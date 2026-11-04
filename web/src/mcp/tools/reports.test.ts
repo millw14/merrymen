@@ -349,7 +349,7 @@ test("summary: paper fills count swaps and curve trades only; the live counts ar
   assert.match(text, /Paper \(simulated\): 2 fill\(s\)/);
 });
 
-test("summary: permission expiring within 7 days is a blocker with an action", async () => {
+test("summary: permission expiring within the three-day renew-soon window is a blocker with an action", async () => {
   const soon = NOW + 3 * DAY;
   const { a } = await setup({ directory: fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_A, ACCOUNT_A, { expiresAt: soon })], [OWNER_B]: [agentFixture(SLUG_B, ACCOUNT_B)] }) });
   const s = data(await run("get_summary", {}, a));
@@ -357,6 +357,14 @@ test("summary: permission expiring within 7 days is a blocker with an action", a
   assert.ok(b);
   assert.match(b.text, /in 3 day/);
   assert.ok(s.action_items.some((i: { because: string }) => i.because === "permission-expiring"));
+});
+
+test("summary: a permission with more than three days left is not a blocker — a weekly grant was flagged its whole life", async () => {
+  const later = NOW + 4 * DAY;
+  const { a } = await setup({ directory: fixtureDirectory({ [OWNER_A]: [agentFixture(SLUG_A, ACCOUNT_A, { expiresAt: later })], [OWNER_B]: [agentFixture(SLUG_B, ACCOUNT_B)] }) });
+  const s = data(await run("get_summary", {}, a));
+  assert.equal(s.blockers.some((x: { code: string }) => x.code === "permission-expiring"), false);
+  assert.equal(s.action_items.some((i: { because: string }) => i.because === "permission-expiring"), false);
 });
 
 test("cross-owner: B's connection cannot read A's agent even when passing its id", async () => {

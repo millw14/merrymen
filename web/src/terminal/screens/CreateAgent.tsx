@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, ArrowRight, Check, Eye, EyeOff } from "lucide-react";
 import {
   DEFAULT_BASKET_SYMBOLS,
+  DEFAULT_PERMISSION_DAYS,
   ENERGY,
   STOCK_TOKENS,
   isEnergyReserveToken,
@@ -66,7 +67,20 @@ const EXAMPLES:Record<string,string>={
   "dip-hunter":"For example, wait for a pullback that matches the strategy before considering an entry.",
   "llm-strategist":"For example, assess current market information, explain a proposed move, and check it against your limits.",
 };
-const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:7,maxDrawdownPct:5,maxOpsPerDay:24};
+/**
+ * The first permission a new agent signs. Its lifetime is the shared monthly
+ * default (`DEFAULT_PERMISSION_DAYS`) rather than a number of this screen's own:
+ * it used to be seven days here, fourteen on the wallet page's "sensible
+ * default" and seven again on the phone, so the one thing an owner of a working
+ * agent had to remember — renew — came round weekly without anyone choosing it.
+ *
+ * The review copy below is RENDERED FROM THIS, never typed beside it: a review
+ * that says "7 days" while the wallet signs thirty is a review of a different
+ * permission from the one being signed.
+ */
+const INITIAL_CAPS: GrantCaps={perTradeUsdg:10,dailyUsdg:50,expiryDays:DEFAULT_PERMISSION_DAYS,maxDrawdownPct:5,maxOpsPerDay:24};
+/** "Renews every 30 days" — the lifetime as a cadence, which is what it is to the owner. */
+const INITIAL_RENEWAL=`Renews every ${INITIAL_CAPS.expiryDays} days`;
 const STATUS_PROMPT="Check my Merryman's setup and current worker status, then show me what I can manage here.";
 const RISK_LABELS:Record<string,string>={strategistStopLossBps:"Stop loss",takeProfitBps:"Take profit",buyPerTickUsdg:"Amount per buy",llmMaxActionUsdg:"Maximum AI trade",slippageBps:"Slippage"};
 function AssistantSetupSummary({setup,showSigningGuidance=false}:{setup:McpCreateReview;showSigningGuidance?:boolean}){
@@ -391,9 +405,9 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
           <p><strong>His limits.</strong> Up to {usd(INITIAL_CAPS.perTradeUsdg)} a trade and {usd(INITIAL_CAPS.dailyUsdg)} a day. He stops himself if he loses {INITIAL_CAPS.maxDrawdownPct}%, and his trading pass renews every {INITIAL_CAPS.expiryDays} days with one signature.</p>
         </div>
         <details className="create-details"><summary>See the exact limits</summary>
-          <dl className="fund-breakdown"><div><dt>Planned entries</dt><dd>$2.50</dd></div><div><dt>Trencher vault limits</dt><dd>$5 per buy · $25 per 24 hours</dd></div><div><dt>Signed trading limits</dt><dd>${INITIAL_CAPS.perTradeUsdg} per trade · ${INITIAL_CAPS.dailyUsdg} per day</dd></div><div><dt>Permission</dt><dd>{INITIAL_CAPS.expiryDays} days · {INITIAL_CAPS.maxDrawdownPct}% drawdown · {INITIAL_CAPS.maxOpsPerDay} operations/day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl>
-          <p className="create-note">Approve the wallet prompts to finish. Your signing wallet keeps ownership; keep access to your sign-in account.</p>
+          <dl className="fund-breakdown"><div><dt>Planned entries</dt><dd>$2.50</dd></div><div><dt>Trencher vault limits</dt><dd>$5 per buy · $25 per 24 hours</dd></div><div><dt>Signed trading limits</dt><dd>${INITIAL_CAPS.perTradeUsdg} per trade · ${INITIAL_CAPS.dailyUsdg} per day</dd></div><div><dt>Permission</dt><dd>{INITIAL_RENEWAL} · {INITIAL_CAPS.maxDrawdownPct}% drawdown · {INITIAL_CAPS.maxOpsPerDay} operations/day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl>
         </details>
+        <p className="create-note">Approve the wallet prompts to finish. Your signing wallet keeps ownership; keep access to your sign-in account.</p>
         {!TRENCHER_FACTORY&&<p className="flow-error" role="status">Trencher's verified trading vault is not configured on this installation. You can choose another strategy below.</p>}
         <div className="create-quick-actions">
           <button className="flow-primary" disabled={!TRENCHER_FACTORY} onClick={()=>void create(true)}>{busy?"Setting up your merryman…":"Start practising"}</button>
@@ -525,7 +539,7 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
     </>}
     {step==="limits" && <><div className="create-intro"><h1>{assistantProposalId?"Your limits. Your call.":<>A little freedom.<br/>Clear limits.</>}</h1><p>{assistantProposalId?"Start in practice with simulated funds, or choose live trading. Only your wallet can authorize the limits you choose.":"Start small. You can change these limits with a new signature later."}</p></div>
       <div className="create-limits"><label>Per trade, USD<input className="create-input" inputMode="decimal" value={trade} disabled={busy} onChange={e=>setTrade(e.target.value)} maxLength={12}/></label><label>Per day, USD<input className="create-input" inputMode="decimal" value={day} disabled={busy} onChange={e=>setDay(e.target.value)} maxLength={12}/></label></div>
-      <dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>7 days</dd></div><div><dt>Drawdown limit</dt><dd>5%</dd></div><div><dt>Maximum operations</dt><dd>24 per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl>
+      <dl className="fund-breakdown"><div><dt>Trading permission</dt><dd>{INITIAL_RENEWAL}</dd></div><div><dt>Drawdown limit</dt><dd>{INITIAL_CAPS.maxDrawdownPct}%</dd></div><div><dt>Maximum operations</dt><dd>{INITIAL_CAPS.maxOpsPerDay} per day</dd></div><div><dt>Network</dt><dd>Robinhood Chain</dd></div></dl>
       <fieldset className="create-mode" disabled={busy}><legend>{t("mode.legend")}</legend><label><input type="radio" name="mode" checked={paper} onChange={()=>setPaper(true)}/> {t("mode.paperOption")}</label><label><input type="radio" name="mode" checked={!paper} onChange={()=>setPaper(false)}/> {t("mode.liveOption")}</label></fieldset><p className="create-note">{paper?t("mode.paperNote"):t("mode.liveNote")}</p>
       {!paper&&<label className="create-check"><input type="checkbox" checked={ack} disabled={busy} onChange={e=>setAck(e.target.checked)}/>{t("mode.ack")}</label>}
       {!privyOwner&&<div className="connect-boundary"><p>Your protected signing wallet is not ready. {reviewedSetup?.setup?.status==="awaiting_approval"?"You can review or decline this setup now. ":""}Creating the agent requires that wallet. {PRIVY_BETA?"Sign in with the same account you connected to your assistant, then wait for its wallet to become ready.":"Protected wallet sign-in is not enabled on this installation."}</p>{PRIVY_BETA&&<SignIn onDone={onSignedIn}/>}<RetryButton retrying={retrying} onRetry={onRefresh}/><a href="/grant">Wallet &amp; permissions</a></div>}

@@ -24,6 +24,8 @@ let postWait: ReturnType<typeof deferred<Response>> | null, preflightWait: Retur
 let hostedMode: boolean, killReply: () => Response | Promise<Response>;
 let archived: Grant[], clearThrows: string | null, grantsFail: boolean, mintPostWait: ReturnType<typeof deferred<void>> | null, retryWait: ReturnType<typeof deferred<void>> | null, tokenWait: ReturnType<typeof deferred<void>> | null;
 let resetStopFence: () => void;
+/** The caps every mint was asked to sign, in order. */
+let mintedCaps: Record<string, number>[];
 const originalFetch = globalThis.fetch;
 const signer = { account: { address: OWNER }, did: "did:privy:perps-test" } as unknown as PrivyOwner;
 const require = createRequire(import.meta.url);
@@ -54,7 +56,7 @@ before(async () => {
         sameGrantPermission: (a: Grant, b: Grant) => a?.smartAccount === b?.smartAccount && a?.sessionKeyAddress === b?.sessionKeyAddress,
         // As session.ts's: a renewal preflight refuses without the account it renews.
         preflightAgentGrant: async (_owner: unknown, options: { purpose: string; expectAccount?: string }) => { events.push("preflight"); assert.equal(options.purpose, "perps"); if (!options.expectAccount) throw new Error("A renewal preflight requires the existing account address."); if (preflightWait) await preflightWait.promise; },
-        createPrivyOwnedWallet: async (_owner: unknown, _did: unknown, options: { purpose: string; expectAccount?: string; beforeCommit: () => Promise<void>; assertCurrent: () => void; minimumValidationNonce?: number }) => { events.push("mint"); if (mintWait) await mintWait.promise; await options.beforeCommit(); options.assertCurrent(); assert.equal(options.purpose, "perps"); if (events.includes("revoke")) assert.equal(options.minimumValidationNonce, 1); assert.equal(options.expectAccount, activeGrant?.smartAccount); const created = grant(); activeGrant = created; localGrant = created; if (mintPostWait) await mintPostWait.promise; return { local: created, handoff: { ok: true } }; },
+        createPrivyOwnedWallet: async (_owner: unknown, _did: unknown, options: { purpose: string; caps: Record<string, number>; expectAccount?: string; beforeCommit: () => Promise<void>; assertCurrent: () => void; minimumValidationNonce?: number }) => { events.push("mint"); mintedCaps.push(structuredClone(options.caps)); if (mintWait) await mintWait.promise; await options.beforeCommit(); options.assertCurrent(); assert.equal(options.purpose, "perps"); if (events.includes("revoke")) assert.equal(options.minimumValidationNonce, 1); assert.equal(options.expectAccount, activeGrant?.smartAccount); const created = grant(); activeGrant = created; localGrant = created; if (mintPostWait) await mintPostWait.promise; return { local: created, handoff: { ok: true } }; },
         // As session.ts's: checked, signed (retryWait), its proof's beforeSubmit, then postGrant, whose check
         // after its token read (tokenWait) answers as a lost handoff rather than throwing.
         retryGrantHandoff: async (_saved: Grant, proof?: { beforeSubmit: () => Promise<void> }, assertCurrent?: () => void) => {
@@ -91,7 +93,7 @@ function accountReport() {
 beforeEach(() => {
   ui = testDom(); tenant = OWNER; activeGrant = grant(); localGrant = null; reportMode = "ok"; reportOwner = OWNER; activityOwner = OWNER; chartOwner = OWNER;
   hostedMode = true; killReply = () => { activeGrant = null; return json({ ok: true, perps: "stopped" }); };
-  archived = []; clearThrows = null; grantsFail = false; mintPostWait = null; retryWait = null; tokenWait = null; resetStopFence();
+  archived = []; clearThrows = null; grantsFail = false; mintPostWait = null; retryWait = null; tokenWait = null; resetStopFence(); mintedCaps = [];
   writes = []; events = []; lostWrite = false; gate = true; settingsEnabled = false; settingsVersion = "version-1"; postWait = null; preflightWait = null; authWait = null; stopWait = null; mintWait = null;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(String(input), "https://app.example.test"), method = init?.method ?? "GET";
@@ -221,6 +223,55 @@ test("renewal checks gate before stop, preserves recovery, and skips only an emp
   await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
   await acknowledge(); await click("Renew Perps permission");
   assert.deepEqual(events, ["offered", "preflight", "offered", "save-recovery", "mark", "stop", "mint", "offered"]);
+});
+
+/**
+ * MONTHLY, OFFERED — never applied. A new Perps wallet opens on the monthly
+ * default (a weekly one could never open a trend entry); a renewal still opens
+ * on the caps signed last time, exactly, and moving it to monthly is one tap
+ * that edits the lifetime field and waits for the same checkbox and button.
+ */
+const lifetimeInput = () => [...ui.container.querySelectorAll("label")]
+  .find(label => label.textContent === "Renew every (days)")?.querySelector("input");
+const monthly = () => [...ui.container.querySelectorAll("button")].find(item => item.textContent === "Renew monthly (30 days)");
+
+test("a new Perps wallet opens on, and signs, the 30-day default", async () => {
+  activeGrant = null; localGrant = null;
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: true, signer }));
+  assert.equal(lifetimeInput()?.value, "30");
+  assert.equal(monthly(), undefined, "nothing to switch from on a first wallet");
+  await acknowledge(); await click("Create Perps wallet");
+  assert.deepEqual(mintedCaps, [{ ...CAPS, expiryDays: 30 }]);
+});
+
+test("a weekly Perps permission is offered monthly renewal; a monthly one is not", async () => {
+  localGrant = grant();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  assert.equal(lifetimeInput()?.value, "7", "the renewal opens on the signed lifetime, exactly");
+  assert.ok(monthly(), "a 7-day permission is offered the switch");
+  assert.match(ui.container.querySelector("[data-renew-monthly]")!.textContent!, /7-day permission never opens one/);
+  await ui.render(null); localGrant = { ...grant(), caps: { ...CAPS, expiryDays: 30 } } as Grant; activeGrant = localGrant;
+  await mount(React.createElement(PerpsWalletView, { key: "monthly", offered: true, creating: false, signer }));
+  assert.equal(lifetimeInput()?.value, "30");
+  assert.equal(monthly(), undefined);
+  assert.equal(ui.container.querySelector("[data-renew-monthly]"), null);
+});
+
+test("Perps monthly changes only the lifetime and still needs the same acknowledgement", async () => {
+  localGrant = grant();
+  await mount(React.createElement(PerpsWalletView, { offered: true, creating: false, signer }));
+  await click("Renew monthly (30 days)");
+  assert.equal(lifetimeInput()?.value, "30");
+  assert.equal(monthly()?.disabled, true);
+  assert.match(ui.container.textContent!, /This renewal runs 30 days instead of 7/);
+  assert.deepEqual(events, [], "choosing monthly reads, stops, revokes and signs nothing");
+  assert.equal(buttonNamed("Renew Perps permission")?.disabled, true, "the replacement checkbox is still required");
+  await act(async () => { buttonNamed("Renew Perps permission")?.click(); }); await settle();
+  assert.deepEqual(events, []);
+  assert.deepEqual(mintedCaps, []);
+  await acknowledge(); await click("Renew Perps permission");
+  assert.deepEqual(events, ["offered", "preflight", "offered", "save-recovery", "mark", "stop", "mint", "offered"], "the same renewal path as any other");
+  assert.deepEqual(mintedCaps, [{ ...CAPS, expiryDays: 30 }], "every other cap signed exactly as before");
 });
 
 test("disabled paper gate refuses renewal before any stop, storage mutation or signature", async () => {

@@ -11,7 +11,8 @@
  *   - the three blockers only a new signature clears (`dead-policy` after an
  *     update changed the sealed permission set, `wrong-chain`, `grant-too-wide`)
  *     — the same three `web/src/lib/live-blocker.ts` marks `resign: true`
- *   - the permission running out within a day, or already run out
+ *   - the permission running out within the shared renew-soon window
+ *     (`RENEW_SOON_DAYS`, three days), or already run out
  *   - a permission signed before an update changed what permissions carry
  *     (wall-release.ts `WALL_CHANGED_AT`) — asked every three days, because
  *     practice mode hides `dead-policy` behind "live trading is off"
@@ -36,7 +37,7 @@
  * here and tested.
  */
 
-import { WALL_CHANGED_AT } from "../../../packages/core/src/index";
+import { RENEW_SOON_DAYS, WALL_CHANGED_AT } from "../../../packages/core/src/index";
 import type { InlineKeyboard } from "./api";
 
 /** Blockers a fresh signature is the fix for. */
@@ -59,8 +60,18 @@ export function settleFor(tickSeconds: number): number {
 }
 /** How often an unresolved state is repeated. */
 export const REPEAT_SEC = 24 * 3600;
-/** "Runs out soon" means inside this window. */
-export const EXPIRING_WITHIN_SEC = 24 * 3600;
+/**
+ * "Runs out soon" means inside this window: the shared `RENEW_SOON_DAYS`, so
+ * the push arrives on the same day the wallet's note and the desk's chip
+ * appear rather than two days after them.
+ *
+ * It was a day. With permissions now monthly, a single push the evening before
+ * is a short notice for a thing that happens twelve times a year, and an owner
+ * who is away that one evening comes back to a stopped agent. Three days with
+ * the daily `REPEAT_SEC` gives up to three nudges — about three days out, two,
+ * then one — under ONE key per grant, so it never piles up.
+ */
+export const EXPIRING_WITHIN_SEC = RENEW_SOON_DAYS * 86_400;
 
 export interface SignInputs {
   /** `agents.live_blocker` for this agent, or null. */
@@ -143,6 +154,20 @@ function hoursLeft(expiresAt: number, now: number): number {
 }
 
 /**
+ * "about 3 days" while more than two days are left, "about 20h" inside them.
+ * The first nudge of a three-day window read "in about 71h", which is a sum
+ * the owner has to do; inside the last two days hours are the useful unit.
+ */
+function timeLeft(expiresAt: number, now: number): string {
+  const secs = expiresAt - now;
+  if (secs > 48 * 3600) {
+    const days = Math.round(secs / 86_400);
+    return `about ${days} days`;
+  }
+  return `about ${hoursLeft(expiresAt, now)}h`;
+}
+
+/**
  * The message, in words an owner does not have to learn.
  *
  * No "grant", "policy", "wall" or "session key": the owner signed something
@@ -172,7 +197,7 @@ export function signPromptText(reason: SignReason, i: SignInputs, name: string):
       );
     case "expiring":
       return (
-        `⏳ <b>${escHtml(who)}'s trading permission runs out in about ${hoursLeft(i.grantExpiresAt ?? i.now, i.now)}h.</b>\n` +
+        `⏳ <b>${escHtml(who)}'s trading permission runs out in ${timeLeft(i.grantExpiresAt ?? i.now, i.now)}.</b>\n` +
         `Review renewal to keep it trading. Revoking old permissions requires network fees before you sign the replacement.`
       );
     case "expired":

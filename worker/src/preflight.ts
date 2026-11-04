@@ -24,6 +24,7 @@
 import {
   DEFAULT_BASKET_SYMBOLS,
   LEGACY_TRADEABLE_SYMBOLS,
+  RENEW_SOON_DAYS,
   STOCK_TOKENS,
   TRADEABLE_SYMBOLS,
   grantHasMultihop,
@@ -263,7 +264,9 @@ export function preflight(input: PreflightInput): Check[] {
       title: "grant EXPIRED",
       detail: "Re-sign at /grant. Same wallet, same funds — a session key is meant to run out.",
     });
-  } else if (secsLeft < 2 * 86_400) {
+  } else if (secsLeft < RENEW_SOON_DAYS * 86_400) {
+    // The shared renew-soon window (three days), the same one the wallet and
+    // the desk warn inside.
     out.push({
       id: "expiry",
       level: "warn",

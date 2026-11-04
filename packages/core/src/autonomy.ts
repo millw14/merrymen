@@ -163,6 +163,45 @@ export function isOwnerActionRule(rule: RefuseRule | string | null | undefined):
 export const RENEW_SOON_DAYS = 3;
 
 /**
+ * How many days a NEW EVM trading permission (Spot or Perps) runs before the
+ * owner renews it — the one number every signing surface opens on, so the
+ * new-agent flow, the wallet presets, the Perps desk and the native apps stop
+ * disagreeing about it (they were 7, 7, 14 and 7, and owners re-signed weekly
+ * without ever having chosen to).
+ *
+ * MONTHLY, BECAUSE A LAPSED KEY IS AN OUTAGE. When a permission runs out the
+ * agent stops — and a hosted agent's Telegram with it — until the owner signs
+ * again; a weekly cadence made that the most common way an agent went offline.
+ * Thirty days also lets the Perps trend producer open at all: it refuses any
+ * entry with less than a week of permission left (perp-trend.ts), which a
+ * seven-day grant is inside from the moment it is signed.
+ *
+ * A DEFAULT, NOT A LIMIT. The owner still picks anywhere from one day to the
+ * form's ninety; the on-chain wall still turns whatever they sign into the
+ * session key's `validUntil` (wall.ts). Every other cap — per trade, per day,
+ * drawdown, operations, the call and asset allowlists — is unchanged by this,
+ * and a renewal still pre-fills the caps the owner signed last time exactly:
+ * moving an existing weekly agent to monthly is a one-tap choice the renewal
+ * panel offers, never something done to it silently.
+ *
+ * Solana is not covered: its hosted limit is 168 hours, enforced by the vault
+ * program itself (solana.ts `SOLANA_MAX_PERMISSION_MS`).
+ */
+export const DEFAULT_PERMISSION_DAYS = 30;
+
+/**
+ * The one sentence beside every "Renew every [N] days" field — web wallet,
+ * renewal panel, Perps desk, phone.
+ *
+ * The field used to read "auto-expire the agent after", under a tooltip calling
+ * it "a safety timer", which reads as a threat to the money. It is a calendar:
+ * what ends is the agent's ability to trade, what it costs to continue is one
+ * signature, and nothing in the account moves either way.
+ */
+export const RENEW_EVERY_TIP =
+  "Your agent's permission runs for this many days; renewing takes one signature. Your money never moves when it ends.";
+
+/**
  * The headline and the button, PER RULE — because "the owner can fix it" and
  * "the owner fixes it the same way" are different claims, and only the first is
  * true of this set.

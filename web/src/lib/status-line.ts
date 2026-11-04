@@ -28,6 +28,7 @@
  */
 
 import { usdAdaptive } from "@/lib/format";
+import { RENEW_SOON_DAYS } from "@merrymen/core";
 
 export interface AgentSnapshot {
   name: string;
@@ -244,9 +245,10 @@ export function statusLine(a: AgentSnapshot): StatusLine {
   }
 
   // ── Live ─────────────────────────────────────────────────────────────────
-  const expiring = a.daysLeft !== null && a.daysLeft <= 2;
+  // The shared renew-soon window, so this line and the desk's chip agree.
+  const expiring = a.daysLeft !== null && a.daysLeft <= RENEW_SOON_DAYS;
   const expiryNote = expiring
-    ? ` Its key expires in ${a.daysLeft === 0 ? "under a day" : `${a.daysLeft} day${a.daysLeft === 1 ? "" : "s"}`} — review renewal on the wallet page; revocation requires network fees.`
+    ? ` Its permission expires in ${a.daysLeft === 0 ? "under a day" : `${a.daysLeft} day${a.daysLeft === 1 ? "" : "s"}`} — renew it on the wallet page with one signature; revoking the old one needs a small network fee.`
     : "";
 
   if (a.positionCount > 0) {

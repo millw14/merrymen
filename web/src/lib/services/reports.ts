@@ -29,7 +29,7 @@
  * measurement.
  */
 import { randomBytes } from "node:crypto";
-import { isEvidencedFlow } from "@merrymen/core";
+import { isEvidencedFlow, RENEW_SOON_DAYS } from "@merrymen/core";
 import type { Db } from "../../../../worker/src/db";
 import { attributeBook, type BookFlow } from "../../../../worker/src/period-pnl";
 import { isRestartCopy, sideOf } from "../../../../worker/src/token-label";
@@ -237,7 +237,14 @@ const SUMMARY_SELLS_MAX = 5_000;
 const FLOWS_MAX = 5_000;
 /** Distinct stored refusal rules grouped per summary; the total is counted separately. */
 const REFUSAL_GROUPS_MAX = 500;
-const EXPIRY_WARN_SEC = 7 * 86_400;
+/**
+ * When a summary starts listing the permission as a blocker: the shared
+ * `RENEW_SOON_DAYS` window every other owner surface warns inside. It was a
+ * week, which a seven-day grant is inside from the moment it is signed, so
+ * every default agent's summary carried a "permission-expiring" blocker and an
+ * action item for its whole life — and owners learned to skip both.
+ */
+const EXPIRY_WARN_SEC = RENEW_SOON_DAYS * 86_400;
 /**
  * The fill kinds (decisions.ts FILL_KINDS) as an SQL list. Constants of our
  * own, never input, so inlined rather than bound: the counts read groups on it
