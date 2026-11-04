@@ -15,6 +15,7 @@ import {
   ChartNoAxesCombined,
 } from "lucide-react";
 import { Coin, Face, LogoMark, TabIcon, NameBlock, MovingFigure } from "./ui";
+import { TABS } from "./nav";
 import {
   money,
   coinPrice,
@@ -55,13 +56,14 @@ type Actions = {
 };
 export function DesktopHeader({
   mine,
+  active,
   hasAgent = true,
   hideBalances = false,
   wallet = "spot",
   tradingMode,
   onScreen,
   onTab,
-}: Actions & { hasAgent?: boolean; hideBalances?: boolean; wallet?: "spot" | "perps"; mine: LiveMine; tradingMode?: ReactNode }) {
+}: Actions & { active?: Tab; hasAgent?: boolean; hideBalances?: boolean; wallet?: "spot" | "perps"; mine: LiveMine; tradingMode?: ReactNode }) {
   const displayedAutonomy = recoveryAutonomy(mine.autonomy, mine.recovery);
   const accountMenu = useRef<HTMLDetailsElement>(null);
   // "/" OPENS SEARCH, as the hint beside the word says (desktop.css). Only
@@ -101,10 +103,20 @@ export function DesktopHeader({
         <LogoMark size={15} />
         <span>merrymen</span>
       </button>
+      {/* THE SAME FOUR PLACES AS THE PHONE'S BAR, so the desktop is not a second
+          product to learn. Explore holds the feed, the board, the markets and
+          research; there was no desktop way into research at all before. */}
+      <nav className="desktop-primary" aria-label="Main navigation">
+        {TABS.map((t) => (
+          <button key={t.id} type="button" className={active === t.id ? "on" : undefined} aria-current={active === t.id ? "page" : undefined} onClick={() => onTab(t.id)}>
+            <TabIcon id={t.id} />
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </nav>
       {tradingMode ? <div className="desktop-mode-controls">{searchButton}{tradingMode}</div> : searchButton}
       <div className="desktop-header-account">
         {room && <Link className="desktop-settings-link" href="/groupchat">Group chat</Link>}
-        <Link className="desktop-settings-link" href={wallet === "perps" ? "/settings?wallet=perps" : "/settings"}>Settings</Link>
         {/* THE LABEL CARRIES THE TRUTH, not a caption under it. Someone who has
             already read "$964" as their deposit does not go on to read a
             footnote. See packages/core/src/autonomy.ts. */}
@@ -116,12 +128,13 @@ export function DesktopHeader({
           className="desktop-fund"
           onClick={() => onScreen({ kind: "deposit" })}
         >
-          {hasAgent ? "Add funds" : "Your account"}
+          {hasAgent ? "Add money" : "Create your merryman"}
         </button>}
         <details className="desktop-account-menu" ref={accountMenu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))closeAccountMenu();}} onKeyDown={event=>{if(event.key==="Escape"){closeAccountMenu();accountMenu.current?.querySelector("summary")?.focus();}}}>
           <summary><Face name={mine.name} slug={mine.slug}/><span>{hasAgent && mine.name ? mine.name : "Account"}</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
             <Link href={wallet === "perps" ? "/perps" : "/you"}>{wallet === "perps" ? "Perps portfolio" : "Portfolio"}</Link>
+            {wallet === "spot" && <Link href="/wardrobe">Dress your merryman</Link>}
             <Link href={wallet === "perps" ? "/settings?wallet=perps" : "/settings"}>Settings</Link>
             <Link href={wallet === "perps" ? "/grant?wallet=perps" : "/grant"}>Wallet & permissions</Link>
             <Link href="/withdraw?wallet=perps">Perps withdrawal & recovery</Link>

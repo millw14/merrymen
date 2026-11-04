@@ -75,7 +75,8 @@ export type Stage = {
 };
 
 const FRAMES: Record<Framing, { look: [number, number, number]; eye: [number, number, number]; fov: number }> = {
-  full: { look: [0, 0.86, 0], eye: [0, 1.05, 4.6], fov: 30 },
+  // Headroom above the hat for his speech bubble and the effects that rise.
+  full: { look: [0, 1.02, 0], eye: [0, 1.18, 5.3], fov: 30 },
   portrait: { look: [0, 1.28, 0], eye: [0, 1.36, 2.25], fov: 30 },
   wide: { look: [0.15, 0.8, 0], eye: [0, 1.15, 5.8], fov: 30 },
 };
@@ -533,11 +534,19 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(resize) : null;
   ro?.observe(host);
   resize();
+  // The observer's word is trusted when it says "on screen"; when it says
+  // "off", the box is measured too, because an entry computed while the page
+  // was in the background can report a visible element as hidden and nothing
+  // would ever ask again until the next scroll.
+  const onScreen = () => {
+    const r = host.getBoundingClientRect();
+    return r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth && r.width > 0;
+  };
   const io = typeof IntersectionObserver !== "undefined"
-    ? new IntersectionObserver((entries) => { visible = entries.some((e) => e.isIntersecting); schedule(); })
+    ? new IntersectionObserver((entries) => { visible = entries.some((e) => e.isIntersecting) || onScreen(); schedule(); }, { rootMargin: "120px" })
     : null;
   io?.observe(host);
-  const onVis = () => schedule();
+  const onVis = () => { if (document.visibilityState === "visible") visible = visible || onScreen(); schedule(); };
   document.addEventListener("visibilitychange", onVis);
   const onLost = (e: Event) => { e.preventDefault(); cancelAnimationFrame(raf); raf = 0; opts.onLost?.(); };
   canvas.addEventListener("webglcontextlost", onLost);

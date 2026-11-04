@@ -50,12 +50,18 @@ import { useTradingModeTransition } from "./use-trading-mode-transition";
 import "./trading-mode-toggle.css";
 import "./perps-entrance.css";
 import "./perps-desk.css";
-import { pathForScreen, screenForPath, TABS } from "./nav";
+import { exploreViewOf, pathForScreen, screenForPath, TABS } from "./nav";
+import { ExploreNav } from "./ExploreNav";
+import { Markets } from "./screens/Markets";
+import { Board } from "./screens/Board";
 
 import { Feed } from "./screens/Feed";
 import { GroupChat } from "./screens/GroupChat";
 import { Wardrobe } from "@/merryman/Wardrobe";
 import { DRAFT } from "@/merryman/wardrobe-store";
+import "@/merryman/merryman.css";
+import "@/merryman/wardrobe.css";
+import "./merryman-shell.css";
 import { Home } from "./screens/Home";
 import { CreateAgent } from "./screens/CreateAgent";
 import Settings from "./screens/Settings";
@@ -177,9 +183,11 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // one place the URL and the body legitimately differ, because the panel is an
   // overlay and the page under it did not go anywhere.
   const [tab, setTab] = useState<Tab>("feed");
-  const screen: Screen = isolatedWallet && requestedScreen.kind === "tab" ? { kind: "perps" } : desktop && (
-    money || (requestedScreen.kind === "tab" && (requestedScreen.tab === "feed" || requestedScreen.tab === "home"))
-  ) ? desktopDetail : requestedScreen;
+  // HOME AND EXPLORE ARE THE CENTRE ON DESKTOP TOO. The desktop used to swap
+  // both for the last token chart opened (or the first one listed), so a
+  // first-time visitor at "/" met an arbitrary chart and Home never rendered
+  // there at all. Only the money panel still keeps the page under it.
+  const screen: Screen = isolatedWallet && requestedScreen.kind === "tab" ? { kind: "perps" } : desktop && money ? desktopDetail : requestedScreen;
   const perpsDesk = selectedWallet === "perps" && screen.kind === "perps";
   const modeOffered = perps && screen.kind !== "solana" && selectedWallet !== "invalid";
   const modeTransition = useTradingModeTransition({
@@ -365,8 +373,10 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
     // There is nothing to fund before an agent exists, and the deposit panel
     // reads `account.status.grant` — so the guard stays, and it sends people to
     // the screen that can actually create one.
+    // That used to be /you, which showed three competing "create" prompts and,
+    // from /you itself, did nothing at all: the same URL is not a navigation.
     if ((next.kind === "deposit" || next.kind === "withdraw") && !account?.status.exists) {
-      goTo("/you");
+      goTo("/create");
       return;
     }
     setScreen(next);
@@ -389,10 +399,6 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
       setChatDocked(true);
       return;
     }
-    if (desktop && next === "feed") {
-      setSidebarSection("feed");
-      return;
-    }
     setTab(next);
     setScreen({ kind: "tab", tab: next });
   };
@@ -400,6 +406,9 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // goTab, so a cold load of /alpha left the bar highlighting Home until the
   // user clicked something.
   const activeTab = screen.kind === "tab" ? screen.tab : requestedScreen.kind === "tab" ? requestedScreen.tab : tab;
+  // Explore's views all light Explore in the bar; Research (alpha) included.
+  const exploreView = exploreViewOf(screen);
+  const barTab: Tab = exploreView ? "feed" : activeTab;
   const token =
     screen.kind === "token" ? tokenById(live.tokens, screen.id) : undefined;
   const listedAgent =
@@ -554,6 +563,14 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // feed has no tenant yet because it has no answer; keep its loading state.
   // Once it answers, a wrong-tenant feed is never shown as this owner's book.
   const portfolioRead = accountFeedRead(account?.session ?? null, live.feedTenant, live.reads.mine);
+  /**
+   * THE MARKET RAIL IS FOR TRADING SCREENS. On a token, a public profile, a
+   * search or the market list it is the fastest way between coins; on Home,
+   * the wardrobe, create and settings it was 300px of tickers beside a screen
+   * about something else, and it squeezed the merryman into a sliver. Those
+   * screens get the width instead. Perps keeps its own rail as it was.
+   */
+  const railShown = isolatedWallet || ["token", "profile", "search", "markets"].includes(screen.kind);
   /** The tape's rows, from the market read above — desktop only; see ticker.ts. */
   const ticks = desktop ? ticksOf(live.tokens, Date.now() / 1000) : [];
 
@@ -563,13 +580,14 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
       className={!isolatedWallet && ticks.length > 0 ? "app has-tape" : "app"}
       data-screen={screen.kind === "tab" ? screen.tab : screen.kind}
       data-wallet={selectedWallet}
+      data-rail={railShown ? "on" : "off"}
     >
       {/* GATED IN JSX, NOT JUST IN CSS. These three were rendered on every
           device and hidden by a media query, so a phone MOUNTED the desktop
           header and the desktop rail — and with them a second `AccountEntry`,
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
-      {desktop && <DesktopHeader tradingMode={tradingMode} hasAgent={!!mine} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
+      {desktop && <DesktopHeader tradingMode={tradingMode} active={barTab} hasAgent={!!mine} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
       {desktop && perpsDesk ? null : desktop && isolatedWallet ? <aside className="desktop-sidebar"><nav className="perps-desk" aria-label="Perps workspace"><h2>Perps wallet</h2><p><a href="/perps">Trading desk</a></p><p><a href="/settings?wallet=perps">Settings</a></p><p><a href="/grant?wallet=perps">Permission</a></p><p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></p><p><a href="/home">Return to Spot</a></p></nav></aside> : desktop && (
         <DesktopSidebar
           reads={live.reads}
@@ -623,7 +641,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             openScreen(next);
           } else openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>}
-        {!isolatedWallet && !mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "solana" && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
+        {!isolatedWallet && !mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "solana" && screen.kind !== "wardrobe" && !(screen.kind === "tab" && screen.tab === "home") && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
         {selectedWallet === "invalid" && <section className="perps-desk"><h1>Unknown wallet selection</h1><p>No wallet controls were opened.</p><a href="/home">Return to Spot</a></section>}
         {selectedWallet === "perps" && <PerpsWorkspace key={`${epoch}:${screen.kind}`} screen={screen.kind} offered={perps}/>}
         {!isolatedWallet && screen.kind === "grant" && <p><a href="/withdraw?wallet=perps">Perps withdrawal &amp; recovery</a></p>}
@@ -648,7 +666,35 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             onSearch={() => openScreen({ kind: "search" })}
             onDesk={() => goTab("agent")}
             onGroupChat={() => openScreen({ kind: "groupchat" })}
+            onCreate={() => openScreen({ kind: "create" })}
+            onWardrobe={() => openScreen({ kind: "wardrobe" })}
+            onLeaders={() => openScreen({ kind: "leaders" })}
+            onResign={() => {window.location.href=resignHref;}}
+            phase={account === null ? (accountFailed ? "failed" : "loading") : account.session.hosted && !account.session.address ? "signed-out" : account.status.exists ? "loading" : "no-agent"}
             hasAgent={account?.status.exists === true}
+          />
+        )}
+        {exploreView && <ExploreNav active={exploreView} />}
+        {screen.kind === "leaders" && (
+          <Board
+            read={live.reads.board}
+            retired={live.retired}
+            retiredAgents={live.retiredAgents}
+            agents={live.agents}
+            theses={live.theses}
+            mine={mine}
+            onProfile={(slug) => openScreen({ kind: "profile", slug })}
+            onDesk={() => openScreen({ kind: "create" })}
+          />
+        )}
+        {screen.kind === "markets" && (
+          <Markets
+            tokens={live.tokens}
+            tokenTab={tokenTab}
+            onTokenTab={setTokenTab}
+            onToken={(id) => openScreen({ kind: "token", id })}
+            onAgent={(slug) => openScreen({ kind: "profile", slug })}
+            onSearch={() => openScreen({ kind: "search" })}
           />
         )}
         {screen.kind === "tab" && screen.tab === "feed" && (
@@ -874,14 +920,14 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
               <button
                 key={t.id}
                 type="button"
-                className={activeTab === t.id ? "tab on" : "tab"}
+                className={barTab === t.id ? "tab on" : "tab"}
                 /* The guided first visit spotlights these by name. An
                    aria-label would have worked and would have tied a visual
                    affordance to an accessibility string, so that renaming a
                    label for screen readers silently unaimed the tour. */
                 data-tour={`tab-${t.id}`}
                 aria-label={t.label}
-                aria-current={activeTab === t.id ? "page" : undefined}
+                aria-current={barTab === t.id ? "page" : undefined}
                 onClick={() => goTab(t.id)}
               >
                 <TabIcon id={t.id} />

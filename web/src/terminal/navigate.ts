@@ -25,6 +25,7 @@ const SCREEN_PATHS = new Set([
   "/", "/home", "/feed", "/chat", "/agent", "/alpha", "/you", "/profile",
   "/search", "/create", "/settings", "/grant", "/limits", "/groupchat",
   "/perps", "/deposit", "/withdraw", "/leaderboard", "/tokens",
+  "/wardrobe", "/leaders", "/markets",
 ]);
 
 /** True for a path the terminal renders itself, so it can be entered in place. */

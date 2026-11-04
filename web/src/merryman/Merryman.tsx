@@ -15,7 +15,8 @@ import { useEffect, useRef, useState } from "react";
 import { MerrymanFlat } from "./MerrymanFlat";
 import { outfitKey, type Outfit } from "./outfit";
 import type { Framing, Stage } from "./stage";
-import "./merryman.css";
+// merryman.css is imported once by the shell (terminal/App.tsx): node tests
+// render screens that mount this component, and they cannot import CSS.
 
 export type Cue = { key: string | number; clip: string };
 
@@ -95,8 +96,19 @@ export function Merryman({
         setLive("ready");
       })
       .catch(() => { if (!cancelled) setLive("flat"); });
+    // The setting can change while the page is open (an OS accessibility
+    // toggle); follow it rather than reading it once.
+    let media: MediaQueryList | null = null;
+    const onMotion = () => stage.current?.setLively(!media?.matches);
+    try {
+      media = window.matchMedia("(prefers-reduced-motion: reduce)");
+      media.addEventListener("change", onMotion);
+    } catch {
+      media = null;
+    }
     return () => {
       cancelled = true;
+      media?.removeEventListener("change", onMotion);
       stage.current?.dispose();
       stage.current = null;
     };

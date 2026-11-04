@@ -394,6 +394,24 @@ const counting: Clip = {
   },
 };
 
+/** Calling you over: a big overhead wave every few seconds, then waiting. */
+const beckon: Clip = {
+  id: "beckon", label: "Call you over", loop: true, duration: 3.6, emote: true,
+  emit: { fx: "exclaim", every: 3.6, offset: 0.2 },
+  sample(p, t, seed) {
+    alive(p, t, seed, 0.5);
+    const wave = bump(t, 0.1, 1.9);
+    arm(p, "r", 0.3 * wave, 2.6 * wave + 0.14 * (1 - wave), 0.4 + Math.sin(t * 12) * 0.35 * wave, 0, Math.sin(t * 12 + 1) * 0.3 * wave);
+    arm(p, "l", 0.05, 0.14, 0.2);
+    p.rootY = Math.abs(Math.sin(t * 6)) * 0.03 * wave;
+    p.tilt = -0.12 * wave;
+    p.brow = 0.6;
+    p.smile = 0.5;
+    p.mouth = 0.25 * wave;
+    p.lookX = 0;
+  },
+};
+
 // ── ONE-SHOTS: the events ────────────────────────────────────────────────
 
 const wave: Clip = {
@@ -882,7 +900,7 @@ const model: Clip = {
 };
 
 export const CLIPS: readonly Clip[] = [
-  idle, happy, scout, think, talk, sleep, sad, walk, run, jig, sway, robot, guard, meditate, aim, sit, counting, model,
+  idle, happy, scout, think, talk, sleep, sad, walk, run, jig, sway, robot, guard, meditate, aim, sit, counting, model, beckon,
   wave, jump, celebrate, backflip, spin, courtesy, shoot, coinToss, facepalm, shrug, salute, clap, point, stretch,
   yawn, scratchHead, lookAround, tapFoot, dizzy, giggle, nodYes, shakeNo, flex, thumbsUp, surprised, kick, sneeze,
   hopTap, hatTip,

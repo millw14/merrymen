@@ -41,15 +41,17 @@ const codeOf = (src: string) =>
     .map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1"))
     .join("\n");
 
-describe("the five tabs", () => {
-  it("is exactly five, in the order the owner asked for", () => {
-    // The bar is `grid-template-columns: repeat(5, 1fr)` in CSS. Six tabs would
-    // silently overflow one cell rather than fail.
-    assert.equal(TABS.length, 5);
+describe("the four tabs", () => {
+  it("is exactly four, in the order the owner asked for", () => {
+    // The bar is `grid-template-columns: repeat(4, 1fr)` in CSS. A fifth tab
+    // would silently overflow one cell rather than fail. Feed, the board, the
+    // markets and research (alpha) all live under Explore now.
+    assert.equal(TABS.length, 4);
     assert.deepEqual(
       TABS.map((t) => t.label),
-      ["Home", "Chat", "Feed", "Alpha", "Profile"],
+      ["Home", "Chat", "Explore", "Me"],
     );
+    assert.match(at("./terminal.css"), /\.tabbar \{[^}]*grid-template-columns: repeat\(4, 1fr\)/, "the bar's grid matches its tabs");
   });
 
   it("THE LOGO IS THE CENTRE BUTTON", () => {
@@ -82,7 +84,7 @@ describe("routing", () => {
     assert.deepEqual(screenForPath("/solana", true), { kind: "solana" });
     assert.equal(pathForScreen({ kind: "solana" }), "/solana");
     assert.ok(existsSync(join(ROOT, "web/src/app/(app)/solana/page.tsx")));
-    assert.equal(TABS.length, 5);
+    assert.equal(TABS.length, 4);
   });
   it("without Solana on this deployment, /solana is Home like any unknown path", () => {
     assert.deepEqual(screenForPath("/solana"), { kind: "tab", tab: "home" });
@@ -177,8 +179,8 @@ describe("the group chat is a place, not a tab", () => {
     assert.ok(existsSync(join(ROOT, "web/src/app/(app)/groupchat/page.tsx")), "/groupchat has no page stub");
   });
 
-  it("and did not become a sixth tab", () => {
-    assert.equal(TABS.length, 5);
+  it("and did not become a fifth tab", () => {
+    assert.equal(TABS.length, 4);
     assert.ok(!TABS.some((t) => (t.id as string) === "groupchat"));
   });
 
@@ -206,7 +208,7 @@ describe("what the nav rewrite could have broken quietly", () => {
     for (const label of TABS.map((t) => t.label)) {
       assert.ok(named.includes(label), `the prompt never mentions the ${label} tab`);
     }
-    assert.ok(!named.includes("Portfolio"), "Portfolio was renamed to Profile");
+    assert.ok(!named.includes("Portfolio"), "Portfolio was renamed, and is now Me");
   });
 
   it("the desktop no longer rewrites /feed to Home", () => {
@@ -256,7 +258,8 @@ describe("what the nav rewrite could have broken quietly", () => {
 });
 
 describe("what the room came for is at the top", () => {
-  const home = codeOf(at("./screens/Home.tsx"));
+  // The market table moved from Home to Explore → Markets, ranking and all.
+  const home = codeOf(at("./screens/Markets.tsx"));
 
   it("COINS RANK ABOVE STOCKS, in every list this screen sorts", () => {
     // An admin's words: "can we show memecoins first instead of stocks? nobody
@@ -271,7 +274,7 @@ describe("what the room came for is at the top", () => {
     assert.equal(
       (home.match(/coinFirst\(a, b\) \|\|/g) ?? []).length,
       3,
-      "every ranked list on Home must put coins first",
+      "every ranked list on Markets must put coins first",
     );
   });
 

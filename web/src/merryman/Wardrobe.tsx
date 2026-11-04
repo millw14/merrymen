@@ -19,7 +19,6 @@ import {
   SLOT_LABELS, outfitKey, randomOutfit, type Choice, type ColorSlot, type Outfit, type ShapeSlot, type Swatch,
 } from "./outfit";
 import { useOutfit } from "./wardrobe-store";
-import "./wardrobe.css";
 
 type Drawer = "look" | "face" | "colours" | "extras" | "moves";
 const DRAWERS: { id: Drawer; label: string }[] = [

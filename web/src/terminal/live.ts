@@ -53,7 +53,9 @@ export type Screen =
   | { kind: "perps" }
   | { kind: "limits" }
   | { kind: "groupchat" }
-  | { kind: "wardrobe" };
+  | { kind: "wardrobe" }
+  | { kind: "leaders" }
+  | { kind: "markets" };
 
 export interface AgentRef {
   slug: string;
