@@ -185,11 +185,8 @@ function Rank({
           <div className="rank-meta">
             {a.glance.known === false ? null : <Stamp>{strategyName(a.glance.id)}</Stamp>}
             <span className="rank-trades">{tradeLine(a)}</span>
-            {a.mode && a.mode !== "live" && (!a.performance || a.mode !== performance.book) && !performance.notRunning
+            {a.mode && a.mode !== "live" && (!a.performance || a.mode !== performance.book)
               && <Stamp>{a.mode === "paper" ? "Paper" : "Inactive"}</Stamp>}
-            {/* KEPT THROUGH THE RECOVERY HOLD, and said neutrally: never
-                "expired", never "re-sign" — see read-leaderboard.ts. */}
-            {performance.notRunning && <Stamp>Not running</Stamp>}
           </div>
         </div>
         <div className="rank-nums">

@@ -18,9 +18,7 @@ import { readOperationCounts } from "./distinct-trades";
  * Every agent something is still running is listed. Only live agents with
  * evidenced returns are ranked; paper and idle agents stay visible and
  * explicitly unranked. Killed, lapsed and unrun agents are folded into a
- * count instead of a row each — see retired-agent.ts for which, and why — but
- * a named agent the recovery hold silenced is not over, and stays listed as
- * "Not running".
+ * count instead of a row each — see retired-agent.ts for which, and why.
  *
  * NULL IS NOT ZERO. An agent with no deposit on record has an UNKNOWN return,
  * not a flat one, and publishing "equity minus nothing" as performance is the
@@ -66,18 +64,6 @@ export interface LeaderRow {
   /** Deepest peak-to-trough this epoch, in bps. Null = no history to measure. */
   maxDdBps: number | null;
   mode: string;
-  /**
-   * NOTHING IS RUNNING THIS, AND THE RECOVERY HOLD IS WHY.
-   *
-   * Set on a named row that has not beaten in a day and that the hold kept on
-   * the board instead of folding — see retired-agent.ts. The page says "Not
-   * running" and the time of the last valuation, and nothing else: this flag
-   * is the whole of what the row says about it, so neither the expiry nor
-   * the hold's cause reaches the public payload through it.
-   *
-   * Optional only so an older server, which does not send it, reads as false.
-   */
-  notRunning?: boolean;
   filledPaper: number;
   landed: number;
   refused: number;
@@ -150,7 +136,7 @@ export async function readLeaderboard(
 
     const selected = await readDirectorySelection(db, identities, nowSec);
     if (!selected) return { source: "none", agents: [], retired: null, retiredAgents: [] };
-    const { rows, slugFor, tenantFor, retired, folded, notRunning } = selected;
+    const { rows, slugFor, tenantFor, retired, folded } = selected;
     const agents = await Promise.all(
       rows.map(async (r): Promise<LeaderRow> => {
         const account = r.smart_account;
@@ -233,7 +219,6 @@ export async function readLeaderboard(
           performance: figures.performance,
           maxDdBps: pnlBps == null ? null : maxDdBps,
           mode: r.mode,
-          notRunning: notRunning.has(account),
           filledPaper,
           landed,
           refused,

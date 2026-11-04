@@ -3,10 +3,10 @@ import type { Db } from "../../../worker/src/db";
 import { readPerpsWallets } from "../../../worker/src/perps-wallets";
 import { getIdentityStore } from "@merrymen/identity-store";
 import { withReadDb } from "./ledger";
-import { inIncidentWindow, isRetired, notRunning as heldNotRunning, type AgentLifecycle } from "./retired-agent";
+import { isRetired, type AgentLifecycle } from "./retired-agent";
 import { discoveryTiming, type DiscoveryMeasure, type DiscoveryTiming } from "./discovery-timing";
 
-/** Shared with the full ranking so re-grants, recovery holds and retirement cannot drift. */
+/** Shared with the full ranking so re-grants and retirement cannot drift. */
 export async function readDirectorySelection(
   db: Db,
   identities = () => getIdentityStore().all(),
@@ -105,15 +105,13 @@ export async function readDirectorySelection(
   // fold with no count is rows leaving the board without a word.
   let retired: number | null = null;
   let folded: typeof rows = [];
-  // Rows the recovery hold kept on the board that nothing is running.
-  const notRunning = new Set<string>();
   if (slugsRead) try {
     type Lifecycle = { mode: string | null; status: string | null; beat_at: number | null; expires_at: number | null };
     const life = new Map<string, Lifecycle>();
     // beat_at IN SECONDS, normalised on its own row: the ledger holds both
-    // units, and the incident window is judged against each account's own
-    // beat. Never against a MAX over the fleet — one millisecond stamp in it
-    // would move every other agent's verdict.
+    // units, and each account is judged by its own beat. Never against a MAX
+    // over the fleet — one millisecond stamp in it would move every other
+    // agent's verdict.
     for (const l of (await measure("lifecycle", () => db
       .prepare(
         `SELECT smart_account, mode, status,
@@ -124,31 +122,12 @@ export async function readDirectorySelection(
       .all())) as (Lifecycle & { smart_account: string })[]) {
       life.set(l.smart_account, l);
     }
-    // THE ACCOUNT'S OWN HOLD ROW, keyed by the tenant that owns it as well
-    // as the account, so one tenant's row never speaks for another's agent.
-    // Read on its own and defensively: a self-hosted or older ledger has no
-    // such table, and a read that fails for any reason is no hold rather
-    // than no board — the beat window below still speaks for each account.
-    // And only a hold recorded inside the incident window: a later one is
-    // the owner's report, not the board's — see inIncidentWindow.
     const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
-    const held = new Set<string>();
-    try {
-      for (const h of (await measure("holds", () => db
-        .prepare(`SELECT tenant, smart_account, since_at FROM fleet_recovery_health WHERE held = 1`)
-        .all())) as { tenant: unknown; smart_account: unknown; since_at: unknown }[]) {
-        if (!inIncidentWindow(num(h.since_at))) continue;
-        held.add(`${String(h.tenant).toLowerCase()} ${String(h.smart_account).toLowerCase()}`);
-      }
-    } catch {
-      /* no recovery table: nothing is held */
-    }
     const now = nowSec();
     const before = rows.length;
     rows = rows.filter((r) => {
       const l = life.get(r.smart_account);
       const account = r.smart_account.toLowerCase();
-      const tenant = tenantFor.get(account);
       const lifecycle: AgentLifecycle = {
         slug: slugFor.get(account) ?? null,
         // RAW, not the COALESCEd `r.mode` above: that reads a newborn that
@@ -157,10 +136,8 @@ export async function readDirectorySelection(
         status: l?.status ?? null,
         beatAt: num(l?.beat_at),
         expiresAt: num(l?.expires_at),
-        held: tenant !== undefined && held.has(`${tenant.toLowerCase()} ${account}`),
       };
       if (isRetired(lifecycle, now)) { folded.push(r); return false; }
-      if (heldNotRunning(lifecycle, now)) notRunning.add(r.smart_account);
       return true;
     });
     retired = before - rows.length;
@@ -169,7 +146,7 @@ export async function readDirectorySelection(
     folded = [];
   }
 
-  return { rows, slugFor, tenantFor, retired, folded, notRunning };
+  return { rows, slugFor, tenantFor, retired, folded };
 }
 
 export interface AgentDirectoryRow {
@@ -178,7 +155,6 @@ export interface AgentDirectoryRow {
   handle: string | null;
   handleVerified: boolean;
   mode: string;
-  notRunning: boolean;
   pnlBps: null;
   paperPnlBps: null;
   maxDdBps: null;
@@ -221,7 +197,6 @@ export async function readAgentDirectory(
           handle: (r.x_handle ?? "").trim() || null,
           handleVerified: Number(r.x_verified ?? 0) !== 0,
           mode: r.mode,
-          notRunning: selected.notRunning.has(r.smart_account),
           pnlBps: null, paperPnlBps: null, maxDdBps: null,
           landed: null, filledPaper: null, refused: null,
           unrankedWhy: "not-read",

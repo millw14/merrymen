@@ -147,13 +147,7 @@ export function performanceOf(agent: LiveAgent, nowSec?: number) {
   const pnl = published ? number(p.pnlUsdg) : null;
   const equityAt = timestamp(p?.equityAt);
   const pnlAt = timestamp(p?.pnlAt);
-  // NOT RUNNING, AND NOTHING MORE. The board kept this row through the
-  // recovery hold (read-leaderboard.ts); it says so neutrally, beside the
-  // newest fact the row has — when its book was last valued — and never why
-  // or what an owner should do about it.
-  const notRunning = agent.notRunning === true;
   const title = [
-    notRunning ? "Not running" : "",
     `${bookLabel} portfolio`,
     equityAt !== null ? `Valued ${fullDateTime(equityAt * 1000)}` : "Valuation time unavailable",
     pnlAt !== null ? `P&L measured ${fullDateTime(pnlAt * 1000)}` : "Measured P&L unavailable",
@@ -171,9 +165,6 @@ export function performanceOf(agent: LiveAgent, nowSec?: number) {
     gasIncomplete: p?.gasComplete === false,
     /** The figure is approximate (gas not all on record): print it with "≈". */
     estimated: p?.pnlEstimated === true,
-    notRunning,
-    /** Visible as-of text for a row nothing is running; null when unvalued. */
-    lastValued: notRunning && equityAt !== null ? `Last valued ${shortDateTime(equityAt * 1000)}` : null,
     /**
      * Printed IN PLACE OF the percentage when not null — see stateOf. The
      * same words on every surface; a page that prints `bps` without checking
@@ -185,7 +176,7 @@ export function performanceOf(agent: LiveAgent, nowSec?: number) {
     /**
      * WHEN, AS VISIBLE TEXT, once the valuation is stale — a tooltip is
      * something nobody reads on a phone. Null without a clock (`nowSec`) to
-     * judge by. A row that prints `lastValued` already says it.
+     * judge by.
      */
     asOf: nowSec !== undefined && equityAt !== null && nowSec - equityAt > STALE_VALUATION_SEC
       ? `as of ${shortDateTime(equityAt * 1000)}` : null,
