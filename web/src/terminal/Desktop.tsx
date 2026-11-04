@@ -480,7 +480,7 @@ export function DesktopPortfolio({
           </span>
         </div>
         <button className="desktop-agent-id" onClick={() => onTab("agent")}>
-          <Face name={mine.name} slug={mine.slug} />
+          <Face name={mine.name} slug={mine.slug} large figure />
           <span>
             <strong>{mine.name}</strong>
             <small>{strategyName(mine.glance.id)}</small>
