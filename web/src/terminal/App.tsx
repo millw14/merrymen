@@ -50,7 +50,7 @@ import { useTradingModeTransition } from "./use-trading-mode-transition";
 import "./trading-mode-toggle.css";
 import "./perps-entrance.css";
 import "./perps-desk.css";
-import { exploreViewOf, pathForScreen, screenForPath, TABS } from "./nav";
+import { closeTarget, exploreViewOf, pathForScreen, screenForPath, TABS } from "./nav";
 import { ExploreNav } from "./ExploreNav";
 import { Markets } from "./screens/Markets";
 import { Board } from "./screens/Board";
@@ -432,8 +432,9 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   /**
    * WHERE BACK AND CLOSE GO: the last place the reader was browsing, not the
    * last tab they happened to click. A profile opened from Home's board goes
-   * back to Home, a token opened from Markets back to Markets, and closing
-   * Add money returns to the page it was opened over.
+   * back to Home, a token opened from Markets back to Markets. Closing Add
+   * money returns to the page it was opened over, detail pages included — see
+   * closeTarget.
    */
   const lastBrowse = useRef<Screen | null>(null);
   const browseKey = pathForScreen(screen);
@@ -441,11 +442,10 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
     if (!["token", "profile", "search", "limits", "deposit", "withdraw"].includes(screen.kind)) lastBrowse.current = screen;
     // Keyed on the path: `screen` is a new object on every render.
   }, [browseKey]);
-  const goBack = () => {
-    const back = lastBrowse.current;
-    if (back && !(desktop && back.kind === "tab" && back.tab === "agent")) setScreen(back);
-    else goTab(tab);
-  };
+  const goBackTo = (back: Screen | null) => (back ? setScreen(back) : goTab(tab));
+  const goBack = () => goBackTo(closeTarget({ money: false, under: null, lastBrowse: lastBrowse.current, desktop }));
+  /** Closing Add money or Withdraw: back to the page it was opened over. */
+  const closeMoney = () => goBackTo(closeTarget({ money: true, under: underMoney.current, lastBrowse: lastBrowse.current, desktop }));
   const token =
     screen.kind === "token" ? tokenById(live.tokens, screen.id) : undefined;
   const listedAgent =
@@ -907,7 +907,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             belongs, and the AccountEntry above says which kind of nothing this
             is: loading, signed out, or no agent yet. */}
         {!desktop && money && account && (
-          <FundingPanel key={money} mode={money} account={account} onClose={goBack}/>
+          <FundingPanel key={money} mode={money} account={account} onClose={closeMoney}/>
         )}
         {screen.kind === "search" && (
           <Search
@@ -942,7 +942,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           className="desktop-money-panel"
           aria-label={money === "withdraw" ? "Withdraw funds" : "Add funds"}
         >
-          {account && <FundingPanel key={money} mode={money} account={account} onClose={goBack}/>}
+          {account && <FundingPanel key={money} mode={money} account={account} onClose={closeMoney}/>}
         </aside>
       ) : desktop && mine ? (
         <DesktopPortfolio

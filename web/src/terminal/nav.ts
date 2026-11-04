@@ -109,3 +109,32 @@ export function pathForScreen(screen: Screen): string {
     return ({ home: "/home", agent: "/chat", you: "/profile", feed: "/feed", alpha: "/alpha" })[screen.tab];
   return `/${screen.kind}`;
 }
+
+/**
+ * WHERE BACK AND CLOSE GO, or null for "the current tab".
+ *
+ * Back from a detail screen (a token, a profile, search, limits) goes to the
+ * last place the reader was BROWSING, which skips those detail screens on
+ * purpose: Back from a profile opened off Home's board is Home, not the token
+ * chart seen before it.
+ *
+ * Closing Add money or Withdraw is different. It goes to the page the panel
+ * was opened OVER, detail screens included. On desktop that page never went
+ * anywhere — it stayed on screen under the panel — so closing over a token
+ * chart and landing on Markets moved the reader somewhere they had not asked
+ * to go. `under` is that page; a cold load of /deposit has none, and falls
+ * back to the browse history like any other Back.
+ *
+ * The desktop opens Chat as a dock over the page rather than as a screen (see
+ * goTab), so neither answer may be that tab there.
+ */
+export function closeTarget({ money, under, lastBrowse, desktop }: {
+  money: boolean;
+  under: Screen | null;
+  lastBrowse: Screen | null;
+  desktop: boolean;
+}): Screen | null {
+  const usable = (s: Screen | null): Screen | null =>
+    !s || s.kind === "deposit" || s.kind === "withdraw" || (desktop && s.kind === "tab" && s.tab === "agent") ? null : s;
+  return (money ? usable(under) : null) ?? usable(lastBrowse);
+}

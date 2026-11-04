@@ -20,7 +20,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { pathForScreen, screenForPath, TABS } from "./nav";
+import { closeTarget, pathForScreen, screenForPath, TABS } from "./nav";
+import type { Screen } from "./live";
 
 
 const ROOT = join(import.meta.dirname, "..", "..", "..");
@@ -170,6 +171,52 @@ describe("money is a place, not a mode", () => {
     const app = codeOf(at("./App.tsx"));
     assert.ok(!/moneyMode|setMoneyMode/.test(app), "deposit and withdraw are routes now");
     assert.match(app, /const money =\s*!isolatedWallet && \(requestedScreen\.kind === "deposit"/, "derived from the Spot URL, not stored; Perps recovery has its own screen");
+  });
+});
+
+describe("closing Add money goes back to the page it was opened over", () => {
+  // Reported on PR #377: on desktop, Markets → a token → Add money → close
+  // landed on Markets, while the token chart had been on screen under the
+  // panel the whole time. Back skips detail screens on purpose; closing a
+  // money panel must not.
+  const markets: Screen = { kind: "markets" };
+  const token: Screen = { kind: "token", id: "0xabc" };
+  const profile: Screen = { kind: "profile", slug: "alan" };
+  const home: Screen = { kind: "tab", tab: "home" };
+  const chat: Screen = { kind: "tab", tab: "agent" };
+
+  it("OVER A TOKEN CHART OR A PROFILE, CLOSE IS THAT PAGE — desktop and phone", () => {
+    for (const desktop of [true, false]) {
+      assert.deepEqual(closeTarget({ money: true, under: token, lastBrowse: markets, desktop }), token);
+      assert.deepEqual(closeTarget({ money: true, under: profile, lastBrowse: home, desktop }), profile);
+      assert.deepEqual(closeTarget({ money: true, under: home, lastBrowse: home, desktop }), home);
+    }
+  });
+
+  it("Back from a detail screen still goes to the last place browsed", () => {
+    assert.deepEqual(closeTarget({ money: false, under: token, lastBrowse: markets, desktop: true }), markets);
+    assert.deepEqual(closeTarget({ money: false, under: null, lastBrowse: home, desktop: false }), home);
+  });
+
+  it("a cold load of /deposit has nothing under it: the browse history, then the tab", () => {
+    assert.deepEqual(closeTarget({ money: true, under: null, lastBrowse: markets, desktop: true }), markets);
+    assert.equal(closeTarget({ money: true, under: null, lastBrowse: null, desktop: true }), null);
+  });
+
+  it("never a money screen, and never Chat on desktop, where Chat is a dock", () => {
+    assert.equal(closeTarget({ money: true, under: { kind: "withdraw" }, lastBrowse: null, desktop: false }), null);
+    assert.equal(closeTarget({ money: true, under: chat, lastBrowse: null, desktop: true }), null);
+    assert.deepEqual(closeTarget({ money: true, under: chat, lastBrowse: markets, desktop: true }), markets);
+    assert.deepEqual(closeTarget({ money: true, under: chat, lastBrowse: null, desktop: false }), chat, "the phone has a Chat screen");
+    assert.equal(closeTarget({ money: false, under: null, lastBrowse: chat, desktop: true }), null);
+  });
+
+  it("App closes BOTH funding panels this way, and nothing else does", () => {
+    const app = codeOf(at("./App.tsx"));
+    const panels = app.match(/<FundingPanel\b[^>]*>/g) ?? [];
+    assert.equal(panels.length, 2, "the phone panel and the desktop side panel");
+    for (const panel of panels) assert.match(panel, /onClose=\{closeMoney\}/);
+    assert.match(app, /const closeMoney = \(\) => goBackTo\(closeTarget\(\{ money: true, under: underMoney\.current/);
   });
 });
 
