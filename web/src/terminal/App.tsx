@@ -54,6 +54,8 @@ import { pathForScreen, screenForPath, TABS } from "./nav";
 
 import { Feed } from "./screens/Feed";
 import { GroupChat } from "./screens/GroupChat";
+import { Wardrobe } from "@/merryman/Wardrobe";
+import { DRAFT } from "@/merryman/wardrobe-store";
 import { Home } from "./screens/Home";
 import { CreateAgent } from "./screens/CreateAgent";
 import Settings from "./screens/Settings";
@@ -844,6 +846,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
         {screen.kind === "limits" && (
           <LimitsPanel account={account} onClose={()=>goTab(tab)}/>
         )}
+        {screen.kind === "wardrobe" && <Wardrobe id={mine?.slug ?? DRAFT} seed={mine?.slug ?? DRAFT} name={mine?.name ?? "your merryman"} />}
         {screen.kind === "groupchat" && <GroupChat mySlug={mine?.slug ?? null} onProfile={(slug) => openScreen({ kind: "profile", slug })} onToken={(id) => openScreen({ kind: "token", id })} />}
       </div>
       {desktop && perpsDesk ? null : desktop && isolatedWallet ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Your Perps wallet</h2><p>Balances and permissions belong to this separate account. Your public profile stays with Spot.</p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></section></aside> : desktop && screen.kind === "solana" ? <aside className="desktop-portfolio"><section className="hosted-entry"><h2>Solana account</h2><p>Solana balances, permissions and trading limits are shown in this workspace.</p><p>Use the network selector to return to Robinhood Chain.</p></section></aside> : desktop && money ? (
