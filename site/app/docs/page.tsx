@@ -421,22 +421,31 @@ merrymen kill       # kill switch — destroys the grant`}
 
         {/* ── faq ── */}
         <h2 id="faq">FAQ</h2>
-        <h3>My session key expired — do I pay to renew it? Do I have to redeploy?</h3>
+        {/*
+          This answer used to say renewing costs "zero gas and zero fees". It does
+          not: a renewal first revokes the old permission ON-CHAIN, which is a
+          transaction, and the wallet page, the attention items and the Telegram
+          prompt all say so. Monthly permissions make that fee a monthly event
+          instead of a weekly one — a real saving, which the old copy hid.
+        */}
+        <h3>My agent&apos;s permission ran out — do I pay to renew it? Do I have to redeploy?</h3>
         <p>
-          <strong>No and no.</strong> The expiry is a safety timer, not a subscription. A grant is a
-          signature your owner key makes <em>locally</em> — nothing goes on-chain to create one, so
-          renewing costs <strong>zero gas and zero fees</strong>, and your wallet, funds, and history
-          stay exactly where they are. When the key is close to expiring (or already dead), the{" "}
-          <code className="inline">/grant</code> page shows a <strong>“renew the key (free)”</strong>{" "}
-          button — one click re-signs the same wallet with a fresh key under the same caps. Your
-          merryman also pings you on Telegram before it expires.
+          <strong>A small network fee, and no.</strong> Your agent&apos;s permission runs for the
+          number of days you chose when you signed it — <strong>30 by default</strong> — and then the
+          agent stops trading until you renew. Renewing is <strong>one signature</strong> on the{" "}
+          <code className="inline">/grant</code> page, plus a <strong>small network fee</strong> (ETH)
+          to revoke the old permission on-chain before the new one is signed. Your wallet, funds, and
+          history stay exactly where they are; nothing is redeployed, and your money never moves when a
+          permission ends. From three days before it ends, the <code className="inline">/grant</code>{" "}
+          page and your merryman on Telegram remind you. An agent still on a shorter permission can
+          switch to monthly in one tap when you renew it.
         </p>
         <h3>Does the expiry apply in paper mode too?</h3>
         <p>
           Yes — expiry applies in <strong>every</strong> mode, paper and live. It&apos;s the guarantee
           that a forgotten agent can&apos;t run forever, and it&apos;s enforced twice: the worker retires
           the agent, and on-chain the account contract refuses the dead key regardless. Renewal is
-          the same free one-click either way.
+          the same single signature either way.
         </p>
         <h3>This feels built for devs — is easier onboarding coming? A desktop app?</h3>
         <p>

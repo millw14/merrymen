@@ -73,7 +73,7 @@ export function WallPanel() {
       */}
       <div className="wall-caps mono">
         <span className="cap">max <b>{info.caps.perTradeUsdg} USDG</b>/trade <i>on-chain</i></span>
-        <span className="cap">key dies in <b>{daysLeft}d</b> <i>on-chain</i></span>
+        <span className="cap">renew in <b>{daysLeft}d</b> <i>on-chain</i></span>
         <span className="cap"><b>{info.caps.dailyUsdg} USDG</b>/day <i>software</i></span>
         <span className="cap"><b>{info.caps.maxOpsPerDay}</b> ops/day <i>software</i></span>
         <span className="cap">breaker <b>{info.caps.maxDrawdownPct}%</b> <i>software</i></span>

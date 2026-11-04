@@ -1,5 +1,6 @@
 /** A read-only path from a connected assistant to an owner-authorized worker. */
 import * as z from "zod";
+import { RENEW_SOON_DAYS } from "@merrymen/core";
 import { readAgentEnergy } from "@/lib/agent-energy";
 import { blockerAdvice } from "@/lib/live-blocker";
 import { readAgentStatus } from "@/lib/services/agent-status";
@@ -164,7 +165,7 @@ const getMerrymanSetup = defineTool({
           : phase === "paper" ? "The worker has a fresh paper-mode report. Its practice balances and trades are simulated."
             : "The worker has a fresh report but is not currently reporting a trading mode.";
         if (phase !== "live" && !settings?.liveTradingEnabled) step("review_live_mode", "Review practice or live mode", "Practice can continue without real funds. Only the owner can enable live trading in Settings, after reviewing the permission and funding.", links.settings);
-        if (selected.expiresAt - now <= 3 * 86_400) step("renew_soon", "Plan permission renewal", "The permission is still valid but expires within three days; renewal remains an owner signature.", links.wallet);
+        if (selected.expiresAt - now <= RENEW_SOON_DAYS * 86_400) step("renew_soon", "Plan permission renewal", `The permission is still valid but expires within ${RENEW_SOON_DAYS} days; renewal remains an owner signature.`, links.wallet);
       }
       if (canDraft) step("propose_settings", "Prepare a settings change", "Changes take effect only after the owner reviews and approves them in Merrymen. Signed limits and live activation are not changed by this tool.", null, false, "propose_settings_change");
     }

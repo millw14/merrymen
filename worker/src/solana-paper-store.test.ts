@@ -9,7 +9,7 @@ import { test, type TestContext } from "node:test";
 import { CHAINS, SOLANA_USDG_MINT, base58Encode, canonicalId } from "../../packages/core/src/ids";
 import type { SolanaPaperLimits, SolanaQuote, SolanaSwapIntent } from "../../packages/core/src/solana";
 import {
-  SOLANA_PAPER_MAX_POSITIONS, SolanaPaperStore, SolanaPaperStoreError,
+  SOLANA_PAPER_MAX_POSITIONS, SOLANA_PAPER_RENEW_DEFAULT_DAYS, SolanaPaperStore, SolanaPaperStoreError,
   solanaPaperIntentFingerprint, type SolanaPaperCommit,
 } from "./solana-paper-store";
 
@@ -663,26 +663,27 @@ test("a renewal without an explicit expiry never shortens it; an explicit one ma
   const DAY = 86_400_000;
   store.create(OWNER, "1000", limits({ expiresAtMs: NOW + 30 * DAY }), NOW);
   setNow(NOW + DAY);
-  // Thirty days left: the 7-day default would cut 22 of them; it keeps them instead.
+  assert.equal(SOLANA_PAPER_RENEW_DEFAULT_DAYS, 30, "the local paper book renews monthly, like an EVM permission");
+  // Twenty-nine days left: a limit change keeps them exactly, neither cut nor stretched to a fresh thirty.
   const kept = store.renew(OWNER, { maxOpsPerDay: 50 });
   assert.equal(kept.limits.expiresAtMs, NOW + 30 * DAY);
   assert.equal(kept.renewal.changes.expiresAtMs, undefined);
-  // An expired book gets the default seven days from now.
+  // An expired book gets the default thirty days from now.
   setNow(NOW + 31 * DAY);
   const revived = store.renew(OWNER, {});
-  assert.equal(revived.limits.expiresAtMs, NOW + 38 * DAY);
+  assert.equal(revived.limits.expiresAtMs, NOW + 61 * DAY);
   assert.equal(revived.renewal.expiryShortened, false);
   // The owner may still choose a shorter expiry explicitly: a tighter limit.
   const shortened = store.renew(OWNER, { expiresAtMs: NOW + 32 * DAY });
   assert.equal(shortened.limits.expiresAtMs, NOW + 32 * DAY);
-  assert.deepEqual([shortened.renewal.changes.expiresAtMs, shortened.renewal.expiryShortened], [{ from: NOW + 38 * DAY, to: NOW + 32 * DAY }, true]);
+  assert.deepEqual([shortened.renewal.changes.expiresAtMs, shortened.renewal.expiryShortened], [{ from: NOW + 61 * DAY, to: NOW + 32 * DAY }, true]);
 });
 
 test("a renewal that only tightens a limit never lengthens a running book's expiry; a bare one extends it", (t) => {
   const { store, setNow } = fixture(t);
   const DAY = 86_400_000;
   store.create(OWNER, "1000", limits({ perTradeUsdg: "500", expiresAtMs: NOW + 2 * DAY }), NOW);
-  // One day left. Lowering the per-trade limit keeps that day; it does not also give the book seven.
+  // One day left. Lowering the per-trade limit keeps that day; it does not also give the book thirty.
   setNow(NOW + DAY);
   const tightened = store.renew(OWNER, { perTradeUsdg: "5" });
   assert.equal(tightened.limits.expiresAtMs, NOW + 2 * DAY);
@@ -693,18 +694,18 @@ test("a renewal that only tightens a limit never lengthens a running book's expi
     assert.equal(store.renew(OWNER, { ...change }).limits.expiresAtMs, NOW + 2 * DAY, JSON.stringify(change));
   }
   // An explicit expiry alongside a change is the owner's choice.
-  assert.equal(store.renew(OWNER, { perTradeUsdg: "4", expiresAtMs: NOW + 10 * DAY }).limits.expiresAtMs, NOW + 10 * DAY);
-  // A bare renewal asks for more time: seven days from now, or a later expiry kept.
-  assert.equal(store.renew(OWNER, {}).limits.expiresAtMs, NOW + 10 * DAY);
-  setNow(NOW + 9 * DAY);
+  assert.equal(store.renew(OWNER, { perTradeUsdg: "4", expiresAtMs: NOW + 40 * DAY }).limits.expiresAtMs, NOW + 40 * DAY);
+  // A bare renewal asks for more time: thirty days from now, or a later expiry kept.
+  assert.equal(store.renew(OWNER, {}).limits.expiresAtMs, NOW + 40 * DAY);
+  setNow(NOW + 39 * DAY);
   const extended = store.renew(OWNER, {});
-  assert.equal(extended.limits.expiresAtMs, NOW + 16 * DAY);
-  assert.deepEqual(extended.renewal.changes, { expiresAtMs: { from: NOW + 10 * DAY, to: NOW + 16 * DAY } });
-  // An expired book can only continue with a new expiry: a renewal that names a change revives it for the default seven days.
-  setNow(NOW + 16 * DAY);
+  assert.equal(extended.limits.expiresAtMs, NOW + 69 * DAY);
+  assert.deepEqual(extended.renewal.changes, { expiresAtMs: { from: NOW + 40 * DAY, to: NOW + 69 * DAY } });
+  // An expired book can only continue with a new expiry: a renewal that names a change revives it for the default thirty days.
+  setNow(NOW + 69 * DAY);
   const revived = store.renew(OWNER, { perTradeUsdg: "3" });
-  assert.equal(revived.limits.expiresAtMs, NOW + 23 * DAY);
-  assert.deepEqual(revived.renewal.changes.expiresAtMs, { from: NOW + 16 * DAY, to: NOW + 23 * DAY });
+  assert.equal(revived.limits.expiresAtMs, NOW + 99 * DAY);
+  assert.deepEqual(revived.renewal.changes.expiresAtMs, { from: NOW + 69 * DAY, to: NOW + 99 * DAY });
 });
 
 test("a held mint valued at zero is checked against the book and can only tighten the drawdown limit", (t) => {

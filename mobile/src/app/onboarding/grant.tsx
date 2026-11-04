@@ -8,7 +8,7 @@ import { isMock } from "@/net/api";
 // package so the wall lists what the key may actually touch — and because a
 // type-only import would be erased at compile time, leaving the Metro alias for
 // @merrymen/core configured but never exercised, which is the same as untested.
-import { TRADEABLE_SYMBOLS, type GrantCaps } from "@merrymen/core";
+import { DEFAULT_PERMISSION_DAYS, TRADEABLE_SYMBOLS, type GrantCaps } from "@merrymen/core";
 import { accountFromMnemonic } from "@/crypto/mnemonic";
 import { readOwner } from "@/crypto/keystore";
 import { fundWithPhantom } from "@/net/wallets";
@@ -27,6 +27,11 @@ import { C } from "@/ui/tokens";
  *
  * Presets and values are the same three the dashboard offers, so a person who set
  * up on desktop sees the same choices here.
+ *
+ * Every preset runs the shared monthly `DEFAULT_PERMISSION_DAYS`: they differ in
+ * how much money the agent may move, not in how often its owner must sign. The
+ * scout and the outlaw were 7 and 14 days, so an agent set up here went offline
+ * every week or two until somebody signed again.
  */
 
 const PRESETS: { id: string; label: string; blurb: string; caps: GrantCaps }[] = [
@@ -34,13 +39,13 @@ const PRESETS: { id: string; label: string; blurb: string; caps: GrantCaps }[] =
     id: "scout",
     label: "cautious · the scout",
     blurb: "dip a toe — tiny trades, tight leash",
-    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 },
+    caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 5, maxOpsPerDay: 24 },
   },
   {
     id: "outlaw",
     label: "balanced · the outlaw",
     blurb: "the sensible default",
-    caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: 14, maxDrawdownPct: 10, maxOpsPerDay: 48 },
+    caps: { perTradeUsdg: 50, dailyUsdg: 500, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 10, maxOpsPerDay: 48 },
   },
   {
     id: "warlord",
@@ -173,7 +178,7 @@ export default function Grant() {
         <Cap label="most per trade" value={`${caps.perTradeUsdg} USDG`} />
         <Cap label="most per day" value={`${caps.dailyUsdg} USDG`} />
         <Cap label="trades per day" value={`${caps.maxOpsPerDay}`} />
-        <Cap label="key expires in" value={`${caps.expiryDays} days`} />
+        <Cap label="renews every" value={`${caps.expiryDays} days`} />
         <Cap label="stops out at" value={`−${caps.maxDrawdownPct}% drawdown`} last />
       </View>
 

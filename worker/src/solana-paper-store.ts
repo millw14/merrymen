@@ -122,7 +122,17 @@ type RenewableLimit = (typeof LOOSENABLE)[number] | "expiresAtMs";
 export type SolanaPaperLimitsRenewal = { expiresAtMs?: number; loosen?: boolean }
   & Partial<Pick<SolanaPaperLimits, (typeof LOOSENABLE)[number]>>;
 const RENEWAL_FIELDS = new Set(["expiresAtMs", "loosen", ...LOOSENABLE]);
-export const SOLANA_PAPER_RENEW_DEFAULT_DAYS = 7;
+/**
+ * The local paper book's default lifetime, for `init` and for a renewal that
+ * names no expiry: thirty days, the same monthly cadence as an EVM permission
+ * (core autonomy.ts `DEFAULT_PERMISSION_DAYS`). It was seven.
+ *
+ * LOCAL PAPER ONLY. This book carries no SOL sell caps, so its limits are not
+ * held to the hosted 168-hour Solana permission (solana.ts
+ * `SOLANA_MAX_PERMISSION_MS`, enforced on-chain by the vault program); that
+ * limit is unchanged and still applies to every hosted Solana account.
+ */
+export const SOLANA_PAPER_RENEW_DEFAULT_DAYS = 30;
 /** One renewal, kept in the book forever: what the limits were, what they became, and when. */
 export interface SolanaPaperLimitsChange {
   renewedAtMs: number;

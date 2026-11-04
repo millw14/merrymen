@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { RENEW_SOON_DAYS } from "../../../packages/core/src/index";
 import {
+  EXPIRING_WITHIN_SEC,
   REPEAT_SEC,
   SETTLE_SEC,
   UPDATE_REPEAT_SEC,
@@ -47,10 +49,33 @@ describe("signNeed — when a signature is the fix", () => {
     assert.equal(n?.settles, false);
   });
 
-  it("running out within a day is its own reason, but a blocker is the one thing to ask for", () => {
+  it("running out within the renew-soon window is its own reason, but a blocker is the one thing to ask for", () => {
     const soon = { grantedAt: NOW - DAY, grantExpiresAt: NOW + 3600 * 5 };
     assert.equal(signNeed({ blocker: null, ...soon, now: NOW })?.reason, "expiring");
     assert.equal(signNeed({ blocker: "wrong-chain", ...soon, now: NOW })?.reason, "wrong-chain");
+  });
+
+  it("the window is the shared three days: inside it asks, outside it stays quiet", () => {
+    assert.equal(EXPIRING_WITHIN_SEC, RENEW_SOON_DAYS * DAY);
+    assert.equal(RENEW_SOON_DAYS, 3);
+    const monthly = { grantedAt: NOW - 27 * DAY };
+    assert.equal(signNeed({ blocker: null, ...monthly, grantExpiresAt: NOW + 3 * DAY - 1, now: NOW })?.reason, "expiring");
+    assert.equal(signNeed({ blocker: null, ...monthly, grantExpiresAt: NOW + 3 * DAY, now: NOW }), null, "exactly three days left is not yet inside");
+    assert.equal(signNeed({ blocker: null, ...monthly, grantExpiresAt: NOW + 4 * DAY, now: NOW }), null);
+    assert.equal(signNeed({ blocker: null, ...monthly, grantExpiresAt: NOW + 20 * DAY, now: NOW }), null);
+  });
+
+  it("one key per grant across the window, repeated daily: day three, two, one", () => {
+    const g = { grantedAt: NOW - 27 * DAY, grantExpiresAt: NOW + 3 * DAY - 60 };
+    const keys = [0, 1, 2].map(d => signNeed({ blocker: null, ...g, now: NOW + d * DAY })!);
+    assert.deepEqual(keys.map(k => k.reason), ["expiring", "expiring", "expiring"]);
+    assert.equal(new Set(keys.map(k => k.key)).size, 1, "one remembered key for the grant, never one per day");
+    assert.equal(keys[0]!.repeatSec, REPEAT_SEC);
+    // Sent on day three; quiet the rest of that day; sent again on day two.
+    const first = signDecision(keys[0]!, null, undefined, NOW);
+    assert.equal(first.send, true);
+    assert.equal(signDecision(keys[0]!, first.watch, NOW, NOW + DAY - 1).send, false);
+    assert.equal(signDecision(keys[1]!, first.watch, NOW, NOW + DAY).send, true);
   });
 
   it("keys on the grant, so a NEW grant that is still wrong asks again", () => {
@@ -107,6 +132,15 @@ describe("the message and the button", () => {
       assert.doesNotMatch(text, /\bfree\b|funds (?:stay|are untouched|don't move)/i, reason);
       assert.doesNotMatch(text, /\b(?:grant|policy|wall|session key|bundler|smart account)\b/i, reason);
     }
+  });
+
+  it("says days while more than two are left, hours inside the last two", () => {
+    const at = (left: number) => signPromptText("expiring", { blocker: null, ...grant, grantExpiresAt: NOW + left, now: NOW }, "Alan");
+    assert.match(at(3 * DAY - 3600), /runs out in about 3 days\./);
+    assert.match(at(2 * DAY + 4 * 3600), /runs out in about 2 days\./);
+    assert.match(at(2 * DAY), /runs out in about 48h\./);
+    assert.match(at(5 * 3600), /runs out in about 5h\./);
+    assert.match(at(60), /runs out in about 1h\./, "never 0h");
   });
 
   it("escapes the agent's name — it is owner-chosen text inside HTML", () => {

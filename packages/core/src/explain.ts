@@ -406,12 +406,19 @@ export const CONCEPTS: readonly Concept[] = [
     evidence: "web/src/lib/session.ts:42-43, web/src/terminal/screens/CreateAgent.tsx:25",
   },
   {
-    term: "Trading permission 7 days",
-    aliases: ["expiry", "expires", "7 days", "does it expire", "revoke"],
-    plain: "Your agent's permission to trade has an end date baked into it — whatever number of days you picked when you signed (the app shows it on the wallet screen). When that date passes, the agent simply stops being able to trade. Nothing happens to your money: the account, and everything in it, stays exactly where it is, and it is still yours.",
-    because: "buildWallPolicies computes expiresAt = now + expiryDays*86400 and installs toTimestampPolicy({validAfter: now, validUntil: expiresAt}) — a contract that IS deployed on this chain. restoreAgentWallet re-derives the same smart account from the same owner key and signs a new session key, moving nothing on-chain.",
+    // The term carries the DEFAULT every signing surface opens on — core
+    // autonomy.ts `DEFAULT_PERMISSION_DAYS`, which explain.test.ts holds this
+    // entry to, so the glossary cannot drift from what a new agent signs.
+    // Written out rather than interpolated: this table is plain literals so a
+    // bundle that does not read it (the SDK) can drop it whole. "7 days" stays
+    // an alias: agents signed before the monthly default still carry weekly
+    // permissions, and their owners ask.
+    term: "Trading permission 30 days",
+    aliases: ["expiry", "expires", "30 days", "a month", "monthly", "7 days", "does it expire", "renew", "revoke"],
+    plain: "Your agent's permission to trade runs for a set number of days — 30 unless you picked another number when you signed (the app shows it on the wallet screen). When it ends, the agent simply stops trading until you renew it, which takes one signature. Nothing happens to your money: the account, and everything in it, stays exactly where it is, and it is still yours.",
+    because: "buildWallPolicies computes expiresAt = now + expiryDays*86400 and installs toTimestampPolicy({validAfter: now, validUntil: expiresAt}) — a contract that IS deployed on this chain. restoreAgentWallet re-derives the same smart account from the same owner key and signs a new session key, moving nothing on-chain. DEFAULT_PERMISSION_DAYS is the lifetime every signing surface opens on.",
     confusable: "Expiry stops trading; it does not touch your money.",
-    evidence: "packages/core/src/wall.ts:694-698, web/src/lib/session.ts:830-845",
+    evidence: "packages/core/src/wall.ts:694-698, web/src/lib/session.ts:830-845, packages/core/src/autonomy.ts",
   },
   {
     term: "Add trading funds",

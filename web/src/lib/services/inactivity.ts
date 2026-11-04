@@ -32,7 +32,7 @@
  * read under the recovery view the grants and chat routes serve), for this
  * tenant's own row only.
  */
-import { liveBlockerText, type RefuseRule } from "@merrymen/core";
+import { liveBlockerText, RENEW_SOON_DAYS, type RefuseRule } from "@merrymen/core";
 import type { Db } from "../../../../worker/src/db";
 import { readFleetRecoveryHold } from "../../../../worker/src/fleet-recovery";
 import { PRIVATE_REVIEW_SOURCE } from "../../../../worker/src/market-review";
@@ -588,7 +588,7 @@ export function diagnoseInactivity(i: InactivityInputs): Diagnosis {
       add({ category: "permission", status: "blocking", kind: "not_permitted", summary: `The signed trading permission expired at ${iso(at)}, so the agent cannot trade.`, observed, threshold, recorded_at: at, since: at, remedy: [resign] });
     } else if (status === "error") {
       add({ category: "permission", status: "blocking", kind: "not_permitted", summary: "The worker could not arm the signed permission, so it is not trading. The error text is only in the agent's own log.", observed, threshold, recorded_at: i.events.arm_failure.last_at ?? beat, since: i.events.arm_failure.first_at, remedy: [resign, "If it still cannot start after re-signing, contact Merrymen support."] });
-    } else if (i.permission.expiresAt !== null && i.permission.expiresAt - i.now < 3 * 86_400) {
+    } else if (i.permission.expiresAt !== null && i.permission.expiresAt - i.now < RENEW_SOON_DAYS * 86_400) {
       add({ category: "permission", status: "warning", kind: null, summary: `The permission is valid but expires soon, at ${iso(i.permission.expiresAt)}.`, observed, threshold, recorded_at: i.permission.grantedAt, remedy: [resign] });
     } else {
       add({ category: "permission", status: "ok", kind: null, summary: `Signed${i.permission.expiresAt !== null ? `; valid until ${iso(i.permission.expiresAt)}` : ""}.`, observed, threshold, recorded_at: i.permission.grantedAt });

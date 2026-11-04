@@ -11,8 +11,10 @@ const OWNER = `0x${"a".repeat(40)}`;
 const FACTORY = `0x${"e".repeat(40)}`;
 const ACCOUNT: AccountState = { session: { hosted: true, address: OWNER }, status: { exists: false, tenant: OWNER } };
 const GRANT = { smartAccount: `0x${"b".repeat(40)}`, owner: OWNER, sessionKeyAddress: `0x${"c".repeat(40)}`, chainId: 4663,
-  caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 7, maxDrawdownPct: 5, maxOpsPerDay: 24 },
-  serialized: "same-signed-permission", grantedAt: 1, expiresAt: 604801, demoSessionPrivateKey: `0x${"d".repeat(64)}`,
+  // The monthly default (`DEFAULT_PERMISSION_DAYS`): a new agent's first
+  // permission runs thirty days, so the review must say thirty too.
+  caps: { perTradeUsdg: 10, dailyUsdg: 50, expiryDays: 30, maxDrawdownPct: 5, maxOpsPerDay: 24 },
+  serialized: "same-signed-permission", grantedAt: 1, expiresAt: 2592001, demoSessionPrivateKey: `0x${"d".repeat(64)}`,
   binding: { version: "privy-did-owner-v1", nonce: "same-nonce", ownerSignature: "0xsame-signature", did: "did:privy:test" },
 } as Grant;
 let testDom: typeof import("./test-dom").testDom;
@@ -104,7 +106,8 @@ describe("new Trencher setup through the actual CreateAgent screen", () => {
     assert.match(text(), /\$2.50/);
     assert.match(text(), /\$5 per buy · \$25 per 24 hours/);
     assert.match(text(), /\$10 per trade · \$50 per day/);
-    assert.match(text(), /7 days · 5% drawdown · 24 operations\/day/);
+    assert.match(text(), /Renews every 30 days · 5% drawdown · 24 operations\/day/);
+    assert.doesNotMatch(text(), /7 days/, "the review is rendered from the caps it signs, never a stale literal");
     assert.equal(ui.container.querySelector<HTMLInputElement>("#agent-name")?.value, "My Merryman");
     assert.equal(writes.length, 0); assert.equal(mints.length, 0);
     await ui.click("Start live Trencher");

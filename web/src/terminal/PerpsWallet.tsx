@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { DEFAULT_PERMISSION_DAYS, RENEW_EVERY_TIP } from "@merrymen/core";
 import { createPrivyOwnedWallet, loadGrant, localGrantsSnapshot, preflightAgentGrant, retryGrantHandoff, sameGrantPermission, type Grant, type GrantCaps } from "../lib/session";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "../lib/saved-grant-binding";
 import { needsPermissionReplacement, markPermissionForReplacement } from "../lib/permission-replacement";
@@ -19,8 +20,15 @@ import { PerpsLinks, PerpsModeBadge } from "./PerpsScreen";
 import { StopAllAgents, currentStopFence, rememberStopped, useStopFence, wasStopped } from "./StopAllAgents";
 import "./perps-desk.css";
 
-const DEFAULT_CAPS: GrantCaps = { perTradeUsdg: 25, dailyUsdg: 100, expiryDays: 7, maxDrawdownPct: 10, maxOpsPerDay: 48 };
-const CAP_FIELDS: [keyof GrantCaps, string, number, number][] = [["perTradeUsdg", "Per-trade limit (USDG)", 1, 100_000], ["dailyUsdg", "Daily limit (USDG)", 1, 100_000], ["expiryDays", "Permission lifetime (days)", 1, 90], ["maxDrawdownPct", "Maximum drawdown (%)", 1, 50], ["maxOpsPerDay", "Maximum operations per day", 1, 10_000]];
+/**
+ * A new Perps wallet's limits. The lifetime is the shared monthly default, and
+ * here it is more than convenience: perp-trend, the default driver, opens
+ * nothing a grant cannot outlive by its longest hold (168 hours), so the seven
+ * days this used to sign could never open a single trend entry. Thirty leaves
+ * about 23 days of entries per signature.
+ */
+const DEFAULT_CAPS: GrantCaps = { perTradeUsdg: 25, dailyUsdg: 100, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 10, maxOpsPerDay: 48 };
+const CAP_FIELDS: [keyof GrantCaps, string, number, number][] = [["perTradeUsdg", "Per-trade limit (USDG)", 1, 100_000], ["dailyUsdg", "Daily limit (USDG)", 1, 100_000], ["expiryDays", "Renew every (days)", 1, 90], ["maxDrawdownPct", "Maximum drawdown (%)", 1, 50], ["maxOpsPerDay", "Maximum operations per day", 1, 10_000]];
 async function requirePaperOffering() {
   const result = await requestJson<{ offered: boolean; mode: string }>(walletUrl("/api/perps/offered", "perps"));
   if (result?.offered !== true || result.mode !== "paper") throw new Error("Paper Perps wallets are not offered here. Nothing was stopped or signed.");
@@ -36,7 +44,7 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
   const { account, busy: reading, error: readError, refresh } = usePerpsAccount(false);
   const [saved, setSaved] = useState<Grant | null>(null);
   const [savedRead, setSavedRead] = useState(false);
-  const [caps, setCaps] = useState<Record<keyof GrantCaps, string>>({ perTradeUsdg: "25", dailyUsdg: "100", expiryDays: "7", maxDrawdownPct: "10", maxOpsPerDay: "48" });
+  const [caps, setCaps] = useState<Record<keyof GrantCaps, string>>(() => Object.fromEntries(CAP_FIELDS.map(([key]) => [key, String(DEFAULT_CAPS[key])])) as Record<keyof GrantCaps, string>);
   const [ack, setAck] = useState(false);
   const [message, setMessage] = useState("");
   const [status, setStatus] = useState("");
@@ -187,6 +195,23 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
     finally { flight.current = false; if (mounted.current) setBusy(false); }
   }
   const signedOut = account?.session.hosted && !owner;
+  /**
+   * MONTHLY IN ONE TAP, as on the Spot wallet's renewal panel. A renewal opens
+   * on the caps signed last time, exactly, so a weekly Perps permission would
+   * renew weekly — and a weekly one can never open a trend entry. Offered only
+   * while the SIGNED lifetime is under the default; the tap edits the lifetime
+   * field and nothing else, and signing still waits for the same checkbox and
+   * the same button.
+   */
+  const signedDays = typeof saved?.caps.expiryDays === "number" ? saved.caps.expiryDays : null;
+  const offerMonthly = signedDays !== null && signedDays < DEFAULT_PERMISSION_DAYS;
+  const monthlyChosen = caps.expiryDays.trim() === String(DEFAULT_PERMISSION_DAYS);
+  // Trend entries stop once the grant cannot outlive a week-long hold, so a
+  // weekly permission's entry window is zero days and a 10-day one's is three.
+  const entryDays = signedDays === null ? 0 : Math.max(0, signedDays - 7);
+  const monthlyNote = monthlyChosen
+    ? `This renewal runs ${DEFAULT_PERMISSION_DAYS} days instead of ${signedDays}.`
+    : `Sign once a month instead. Trend entries stop when a week of permission is left, so a ${signedDays}-day permission ${entryDays === 0 ? "never opens one" : `opens them only in its first ${entryDays} day${entryDays === 1 ? "" : "s"}`}.`;
   return <section className="perps-desk"><div className="perps-title-row"><h1>{creating && !saved ? "Set up your Perps wallet" : "Wallet & permission"}</h1><PerpsModeBadge/></div><PerpsLinks/><p>A separate account owned by your protected signing wallet. This paper permission cannot spend on-chain. No deposit or live trading is required.</p>
     {!offered && <p role="status">Paper Perps creation and renewal are disabled on this server. Withdrawal and recovery remain available.</p>}
     <p>Have a pilot code? <a href="/perps/join">Submit your wallet for administrator approval</a> before creating a permission. Your invitation requests access; an administrator must approve it.</p>
@@ -194,7 +219,8 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
     {signedOut && <SignIn onDone={refresh}/>}
     {account && !signedOut && !signer && <p>Your protected signing wallet is not ready. {PRIVY_BETA ? "Sign in with the account that owns this wallet and wait for it to become ready." : "Protected wallet sign-in is not configured on this installation."}</p>}
     {saved && <><p className="perps-address">Perps account <code>{saved.smartAccount}</code></p><p>Owner <code>{saved.owner}</code></p><p>Permission expires {fullDateTime(saved.expiresAt * 1000)}.</p></>}
-    {account && !signedOut && <><div className="perps-settings-grid">{CAP_FIELDS.map(([key, label]) => <label key={key}>{label}<input inputMode={key === "perTradeUsdg" || key === "dailyUsdg" ? "decimal" : "numeric"} value={caps[key]} disabled={busy || !offered} onChange={event => setCaps(value => ({ ...value, [key]: event.target.value }))}/></label>)}</div><label><input type="checkbox" checked={ack} disabled={busy || !offered} onChange={event => setAck(event.target.checked)}/>{saved ? "I want to replace this Perps permission with the limits above. Recovery access stays with the same owner." : "I understand this is simulated trading and my sign-in controls the separate Perps wallet."}</label><button disabled={!offered || !signer || !savedRead || !ack || busy || stopPending} onClick={() => void sign()}>{busy ? "Working…" : saved ? "Renew Perps permission" : "Create Perps wallet"}</button>
+    {account && !signedOut && <><div className="perps-settings-grid">{CAP_FIELDS.map(([key, label]) => <label key={key}>{label}<input inputMode={key === "perTradeUsdg" || key === "dailyUsdg" ? "decimal" : "numeric"} value={caps[key]} disabled={busy || !offered} onChange={event => setCaps(value => ({ ...value, [key]: event.target.value }))}/></label>)}</div><p>{RENEW_EVERY_TIP}</p>
+      {offerMonthly && <div data-renew-monthly><p>{monthlyNote}</p><button type="button" aria-pressed={monthlyChosen} disabled={busy || !offered || monthlyChosen} onClick={() => setCaps(value => ({ ...value, expiryDays: String(DEFAULT_PERMISSION_DAYS) }))}>{`Renew monthly (${DEFAULT_PERMISSION_DAYS} days)`}</button></div>}<label><input type="checkbox" checked={ack} disabled={busy || !offered} onChange={event => setAck(event.target.checked)}/>{saved ? "I want to replace this Perps permission with the limits above. Recovery access stays with the same owner." : "I understand this is simulated trading and my sign-in controls the separate Perps wallet."}</label><button disabled={!offered || !signer || !savedRead || !ack || busy || stopPending} onClick={() => void sign()}>{busy ? "Working…" : saved ? "Renew Perps permission" : "Create Perps wallet"}</button>
       {saved?.serialized && saved.demoSessionPrivateKey && !account.status.exists && !needsPermissionReplacement(saved) && !killedKey(saved) && <button disabled={!offered || !signer || busy || stopPending} onClick={() => void activate()}>Retry saved permission activation</button>}
       {stopPending && <p role="status">A stop is waiting for its answer. Creating, renewing and activating a permission resume when it arrives.</p>}</>}
     {status && <p role="status">{status}</p>}{message && <p role="status">{message}</p>}<p><a href="/withdraw?wallet=perps">Withdraw or recover this wallet</a></p>
