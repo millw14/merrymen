@@ -37,10 +37,18 @@
   bottom: 12px;
   margin: 0;
   text-align: center;
-  font-size: 12px;
-  color: var(--faint, #898c80);
   pointer-events: none;
 }
+.mm-wardrobe-hint span {
+  display: inline-block;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgb(7 8 6 / 0.72);
+  border: 1px solid rgb(255 255 255 / 0.1);
+  font-size: 12px;
+  color: var(--tx-2, #b3afa9);
+}
+.mm-save-status { margin: 0; min-height: 1.2em; font-size: 13px; color: var(--tx-2, #b3afa9); }
 .mm-wardrobe-panel {
   display: flex;
   flex-direction: column;
@@ -63,7 +71,9 @@
   gap: 8px;
   overflow-x: auto;
   scrollbar-width: none;
-  padding-bottom: 2px;
+  /* Room for the focus ring, which overflow would otherwise clip. */
+  padding: 4px;
+  margin: -4px;
 }
 .mm-looks button {
   flex: none;
@@ -83,19 +93,19 @@
 }
 .mm-looks button:hover { transform: translateY(-2px); }
 .mm-looks button.on { border-color: var(--wd-accent); color: var(--tx, #e9e6e1); }
+/* All five drawers fit a 320px phone: no hidden "Moves" behind a scroll. */
 .mm-drawers {
-  display: flex;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
   padding: 4px;
   border-radius: 14px;
   background: var(--wd-bg);
   border: 1px solid var(--wd-line);
-  overflow-x: auto;
-  scrollbar-width: none;
 }
 .mm-drawers button {
-  flex: 1 0 auto;
-  padding: 9px 14px;
+  min-width: 0;
+  padding: 9px 4px;
   border: 0;
   border-radius: 10px;
   background: transparent;
@@ -220,6 +230,9 @@
   color: #111;
 }
 
+@media (max-width: 420px) {
+  .mm-drawers button { font-size: 13px; }
+}
 @media (max-width: 860px) {
   .mm-wardrobe {
     grid-template-columns: 1fr;

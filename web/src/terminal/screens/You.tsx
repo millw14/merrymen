@@ -24,6 +24,8 @@ export function You({
   perDay,
   mine,
   history,
+  hasAgent = false,
+  onCreate,
 }: {
   onLimits: () => void;
   onStop: () => void;
@@ -36,18 +38,26 @@ export function You({
   perDay: number | null;
   mine: LiveMine | null;
   history: number[];
+  /** Has the server said an agent exists? `mine` is null while it loads too. */
+  hasAgent?: boolean;
+  onCreate?: () => void;
 }) {
   // Before the early return: a hook may not be skipped on some renders.
   const assistants = useConnectAssistantOffered();
   const { outfit } = useOutfit(mine?.slug ?? null, mine?.slug ?? mine?.name ?? "draft");
   // With no agent, the shell sends a "deposit" to /create (App openScreen),
   // so this button now leads somewhere instead of back to this same page.
+  // An owner whose book has not loaded is not offered creation: the account
+  // card above says what is loading or failed. Only with no agent at all does
+  // this become the invitation — and it goes to /create, not to Add money.
   if (!mine)
-    return (
+    return hasAgent ? (
+      <Empty kind="profile" title="Fetching your merryman…" />
+    ) : (
       <Empty
         kind="profile"
         title="Your merryman lives here."
-        action={{ label: "Create your merryman", onClick: onDeposit }}
+        action={{ label: "Create your merryman", onClick: onCreate ?? onDeposit }}
       />
     );
   const word = wordOf(mine.autonomy?.state, { recovery: pausedRecovery(mine.recovery) !== null, expired: mine.autonomy?.rule === "expired", needsOwner: mine.autonomy?.needsOwnerAction });

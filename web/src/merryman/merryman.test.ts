@@ -11,7 +11,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { CLIPS, EMOTES, FIDGETS, FIDGETY_BASES, clipOf } from "./clips";
+import { readFileSync } from "node:fs";
+import { CALM_BASES, CALM_SHOTS, CALM_STAND_IN, CLIPS, EMOTES, FIDGETS, FIDGETY_BASES, clipOf } from "./clips";
 import {
   COLOR_SLOTS,
   DEFAULT_OUTFIT,
@@ -103,6 +104,22 @@ describe("clips", () => {
     for (const f of FIDGETS) assert.ok(ids.includes(f), `fidget ${f}`);
     for (const b of FIDGETY_BASES) assert.ok(ids.includes(b), `base ${b}`);
     assert.ok(EMOTES.length >= 40, `${EMOTES.length} emotes`);
+  });
+
+  it("REDUCE MOTION: every calm clip exists, and every stand-in is itself calm", () => {
+    const ids = new Set(CLIPS.map((c) => c.id));
+    for (const b of CALM_BASES) assert.ok(ids.has(b) && clipOf(b).loop, `calm base ${b}`);
+    for (const c of CALM_SHOTS) assert.ok(ids.has(c) && !clipOf(c).loop, `calm one-shot ${c}`);
+    for (const [from, to] of Object.entries(CALM_STAND_IN)) {
+      assert.ok(ids.has(from), `stand-in source ${from}`);
+      assert.ok(CALM_SHOTS.has(to), `${from} stands in with ${to}, which must be calm`);
+    }
+    for (const big of ["celebrate", "backflip", "spin", "jump", "hop", "dizzy"]) assert.ok(!CALM_SHOTS.has(big), `${big} is not calm`);
+  });
+
+  it("pinch-zoom stays the browser's over every merryman", () => {
+    const css = readFileSync(new URL("./merryman.css", import.meta.url), "utf8");
+    assert.match(css, /\.mm-merryman \{[^}]*touch-action: pan-y pinch-zoom/);
   });
 
   it("an unknown clip id is the idle loop, never undefined", () => {

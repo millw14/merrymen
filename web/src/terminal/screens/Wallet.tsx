@@ -156,7 +156,7 @@ const PRESETS: { id: string; icon: string; label: string; blurb: string; caps: G
     icon: "bolt",
     label: "bold · the warlord",
     blurb: "bigger arrows, wider walls",
-    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: 30, maxDrawdownPct: 15, maxOpsPerDay: 96 },
+    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 15, maxOpsPerDay: 96 },
   },
 ];
 

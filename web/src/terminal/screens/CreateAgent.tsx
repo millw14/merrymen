@@ -30,7 +30,8 @@ import { useT } from "@/lib/i18n";
 import { approveMcpCreateSetup, declineMcpCreateSetup, loadMcpCreateReview, mcpSetupRequest, type McpCreateReview } from "../mcp-create-setup";
 import { Wardrobe } from "@/merryman/Wardrobe";
 import { Merryman } from "@/merryman/Merryman";
-import { DRAFT, useOutfit } from "@/merryman/wardrobe-store";
+import { DRAFT, loadOutfit } from "@/merryman/wardrobe-store";
+import { seededOutfit } from "@/merryman/outfit";
 
 /**
  * `circle` MARKS A STRATEGY THE WORKER WILL NOT ACTUALLY RUN FOR A NON-HOLDER.
@@ -561,7 +562,9 @@ export function CreateAgent({account,accountFailed=false,retrying=false,assistan
 
 /** The moment it works: the merryman you dressed, celebrating. */
 function ReadyMerryman({ name }: { name: string }) {
-  const { outfit } = useOutfit(DRAFT, DRAFT);
+  // Snapshot at mount: the draft is handed to the new agent (and cleared) as
+  // soon as its slug is known, and he must not change clothes mid-celebration.
+  const [outfit] = useState(() => loadOutfit(DRAFT) ?? seededOutfit(DRAFT));
   return (
     <div className="create-ready-merryman">
       <Merryman outfit={outfit} base="happy" cue={{ key: "ready", clip: "celebrate" }} label={`${name || "Your merryman"} is ready`} bubble={`${name || "Your merryman"} is ready!`} bubbleTone="good" />

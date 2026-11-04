@@ -64,10 +64,16 @@ export function clearOutfit(id: string): void {
   }
 }
 
-/** The draft from the create flow becomes this agent's look, if it has none yet. */
+/**
+ * The draft from the create flow becomes this agent's look, if it has none
+ * yet — and the draft is then CLEARED either way, so a look dressed by one
+ * person on a shared browser never reaches the next account to sign in here.
+ */
 export function adoptDraft(slug: string): void {
   const draft = loadOutfit(DRAFT);
-  if (draft && !loadOutfit(slug)) saveOutfit(slug, draft);
+  if (!draft) return;
+  if (!loadOutfit(slug)) saveOutfit(slug, draft);
+  clearOutfit(DRAFT);
 }
 
 function subscribe(onChange: () => void) {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { DEFAULT_PERMISSION_DAYS, RENEW_EVERY_TIP } from "@merrymen/core";
+import { DEFAULT_PERMISSION_DAYS, PERP_TREND_MAX_HOLD_HOURS, RENEW_EVERY_TIP } from "@merrymen/core";
 import { createPrivyOwnedWallet, loadGrant, localGrantsSnapshot, preflightAgentGrant, retryGrantHandoff, sameGrantPermission, type Grant, type GrantCaps } from "../lib/session";
 import { loadRecoveryGrants, saveRecoveryGrant, trustedSavedGrant } from "../lib/saved-grant-binding";
 import { needsPermissionReplacement, markPermissionForReplacement } from "../lib/permission-replacement";
@@ -206,12 +206,14 @@ export function PerpsWalletView({ offered, creating, signer }: { offered: boolea
   const signedDays = typeof saved?.caps.expiryDays === "number" ? saved.caps.expiryDays : null;
   const offerMonthly = signedDays !== null && signedDays < DEFAULT_PERMISSION_DAYS;
   const monthlyChosen = caps.expiryDays.trim() === String(DEFAULT_PERMISSION_DAYS);
-  // Trend entries stop once the grant cannot outlive a week-long hold, so a
-  // weekly permission's entry window is zero days and a 10-day one's is three.
-  const entryDays = signedDays === null ? 0 : Math.max(0, signedDays - 7);
+  // Trend entries stop once the grant cannot outlive the trend hold (core
+  // PERP_TREND_MAX_HOLD_HOURS), so a permission no longer than the hold never
+  // opens one and a longer one opens them only until the hold is what is left.
+  const holdDays = PERP_TREND_MAX_HOLD_HOURS / 24;
+  const entryDays = signedDays === null ? 0 : Math.max(0, signedDays - holdDays);
   const monthlyNote = monthlyChosen
     ? `This renewal runs ${DEFAULT_PERMISSION_DAYS} days instead of ${signedDays}.`
-    : `Sign once a month instead. Trend entries stop when a week of permission is left, so a ${signedDays}-day permission ${entryDays === 0 ? "never opens one" : `opens them only in its first ${entryDays} day${entryDays === 1 ? "" : "s"}`}.`;
+    : `Sign once a month instead. Trend entries stop when ${holdDays} days of permission are left, so a ${signedDays}-day permission ${entryDays === 0 ? "never opens one" : `opens them only in its first ${entryDays} day${entryDays === 1 ? "" : "s"}`}.`;
   return <section className="perps-desk"><div className="perps-title-row"><h1>{creating && !saved ? "Set up your Perps wallet" : "Wallet & permission"}</h1><PerpsModeBadge/></div><PerpsLinks/><p>A separate account owned by your protected signing wallet. This paper permission cannot spend on-chain. No deposit or live trading is required.</p>
     {!offered && <p role="status">Paper Perps creation and renewal are disabled on this server. Withdrawal and recovery remain available.</p>}
     <p>Have a pilot code? <a href="/perps/join">Submit your wallet for administrator approval</a> before creating a permission. Your invitation requests access; an administrator must approve it.</p>

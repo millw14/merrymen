@@ -145,6 +145,14 @@ export function Home({
                 {onWardrobe && <button type="button" className="mm-action" onClick={onWardrobe}><Shirt size={18} aria-hidden="true"/> Dress</button>}
               </div>
             </>
+          ) : hasAgent ? (
+            // AN OWNER WHOSE NUMBERS HAVE NOT LANDED is not a newcomer: no
+            // invitation to create what they already have. The account card
+            // above Home says what is loading or failed, with its retry.
+            <div className="hero empty">
+              <h2>{phase === "failed" ? "Can't reach your merryman's numbers right now." : "Fetching your merryman's numbers…"}</h2>
+              <p>{phase === "failed" ? "Nothing has changed with your agent or your money; this page will try again." : "One moment."}</p>
+            </div>
           ) : (
             <>
               <div className="hero empty">

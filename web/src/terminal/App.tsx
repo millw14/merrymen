@@ -784,6 +784,8 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             perTrade={perTrade}
             perDay={perDay}
             mine={mine}
+            hasAgent={account?.status.exists === true}
+            onCreate={() => openScreen({ kind: "create" })}
           />
         )}
         {/* The trade chime's switch on every device; desktop also has it on

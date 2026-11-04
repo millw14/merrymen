@@ -12,7 +12,8 @@
   height: 100%;
   min-height: 160px;
   isolation: isolate;
-  touch-action: pan-y;
+  /* Vertical scrolling and pinch-zoom stay the browser's; a horizontal drag spins him. */
+  touch-action: pan-y pinch-zoom;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -57,6 +58,19 @@
   50% { transform: translateY(-4px); }
 }
 .mm-merryman[data-state="ready"] .mm-merryman-flat { display: none; }
+.mm-merryman[data-state="flat"] .mm-merryman-stage { display: none; }
+.mm-merryman-figure { position: absolute; inset: 0; }
+.mm-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* ── speech bubble ── */
 .mm-bubble {

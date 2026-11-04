@@ -11,7 +11,7 @@
  * agent (`embedded`), where Save is the step's Continue.
  */
 import { Dices, RotateCcw, Sparkles } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { EMOTES } from "./clips";
 import { Merryman, MerrymanPortrait, type Cue } from "./Merryman";
 import {
@@ -90,6 +90,16 @@ export function Wardrobe({
   // A save from another tab, or the first read of storage after hydration.
   useEffect(() => { setDraft(stored.outfit); }, [storedKey]);
   const dirty = outfitKey(draft) !== storedKey || !stored.custom;
+  // EMBEDDED, EVERY CHANGE IS KEPT. In the create flow the step's own button
+  // is the one that matters ("Start practising"), and a second Save beside it
+  // meant a dressed look vanished unless both were pressed. So the draft is
+  // written as it changes, and the save row is not shown.
+  const draftKey = outfitKey(draft);
+  // The look on screen is kept even untouched, so the agent created next
+  // wears what its owner was shown rather than a different seeded one.
+  useEffect(() => {
+    if (embedded && (!stored.custom || draftKey !== storedKey)) stored.save(draft);
+  }, [embedded, draftKey, stored.custom]);
   const play = (clip: string) => setCue({ key: `${clip}:${Date.now()}`, clip });
 
   const set = (slot: ShapeSlot | ColorSlot, value: string) => {
@@ -116,12 +126,20 @@ export function Wardrobe({
 
   const bubble = saved === "saved" ? `Lookin' sharp! ${name} loves it.` : saved === "failed" ? "Couldn't save in this browser — the look still works here." : null;
   const moves = useMemo(() => EMOTES.filter((c) => c.id !== "model"), []);
+  const onTabKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    const at = DRAWERS.findIndex((d) => d.id === drawer);
+    const to = e.key === "ArrowRight" ? (at + 1) % DRAWERS.length : e.key === "ArrowLeft" ? (at + DRAWERS.length - 1) % DRAWERS.length : e.key === "Home" ? 0 : e.key === "End" ? DRAWERS.length - 1 : -1;
+    if (to < 0) return;
+    e.preventDefault();
+    setDrawer(DRAWERS[to]!.id);
+    e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[to]?.focus();
+  };
 
   return (
     <section className={`mm-wardrobe${embedded ? " is-embedded" : ""}`} aria-label={`Dress ${name}`}>
       <div className="mm-wardrobe-stage">
         <Merryman outfit={draft} base="model" cue={cue} label={`${name}, your merryman`} bubble={bubble} bubbleTone={saved === "failed" ? "warn" : "good"} />
-        <p className="mm-wardrobe-hint">Drag to spin him. Tap him to say hi.</p>
+        <p className="mm-wardrobe-hint"><span>Drag to spin him · tap him to say hi</span></p>
       </div>
       <div className="mm-wardrobe-panel">
         {!embedded && (
@@ -138,14 +156,14 @@ export function Wardrobe({
             </button>
           ))}
         </div>
-        <div className="mm-drawers" role="tablist" aria-label="Wardrobe sections">
+        <div className="mm-drawers" role="tablist" aria-label="Wardrobe sections" onKeyDown={onTabKey}>
           {DRAWERS.map((d) => (
-            <button key={d.id} type="button" role="tab" aria-selected={drawer === d.id} className={drawer === d.id ? "on" : ""} onClick={() => setDrawer(d.id)}>
+            <button key={d.id} id={`mm-tab-${d.id}`} type="button" role="tab" aria-selected={drawer === d.id} aria-controls="mm-drawer-panel" tabIndex={drawer === d.id ? 0 : -1} className={drawer === d.id ? "on" : ""} onClick={() => setDrawer(d.id)}>
               {d.label}
             </button>
           ))}
         </div>
-        <div className="mm-drawer" role="tabpanel">
+        <div className="mm-drawer" role="tabpanel" id="mm-drawer-panel" aria-labelledby={`mm-tab-${drawer}`}>
           {drawer === "moves" ? (
             <div className="mm-moves">
               <p className="mm-slot-label">Tap a move. He knows {moves.length} of them.</p>
@@ -162,9 +180,9 @@ export function Wardrobe({
               {drawer !== "colours" && SHAPES[drawer].map(([slot, list]) => (
                 <fieldset key={slot} className="mm-slot">
                   <legend className="mm-slot-label">{SLOT_LABELS[slot]}</legend>
-                  <div className="mm-chips">
+                  <div className="mm-chips" role="radiogroup" aria-label={SLOT_LABELS[slot]}>
                     {list.map((c) => (
-                      <button key={c.id} type="button" aria-pressed={draft[slot] === c.id} className={draft[slot] === c.id ? "on" : ""} onClick={() => set(slot, c.id)}>
+                      <button key={c.id} type="button" role="radio" aria-checked={draft[slot] === c.id} className={draft[slot] === c.id ? "on" : ""} onClick={() => set(slot, c.id)}>
                         {c.label}
                       </button>
                     ))}
@@ -174,9 +192,9 @@ export function Wardrobe({
               {(drawer === "face" || drawer === "colours") && COLOURS[drawer].map(([slot, list]) => (
                 <fieldset key={slot} className="mm-slot">
                   <legend className="mm-slot-label">{SLOT_LABELS[slot]}</legend>
-                  <div className="mm-swatches">
+                  <div className="mm-swatches" role="radiogroup" aria-label={SLOT_LABELS[slot]}>
                     {list.map((c) => (
-                      <button key={c.id} type="button" title={c.label} aria-label={c.label} aria-pressed={draft[slot] === c.id} className={draft[slot] === c.id ? "on" : ""} style={{ ["--sw" as string]: c.hex }} onClick={() => set(slot, c.id)} />
+                      <button key={c.id} type="button" title={c.label} aria-label={c.label} role="radio" aria-checked={draft[slot] === c.id} className={draft[slot] === c.id ? "on" : ""} style={{ ["--sw" as string]: c.hex }} onClick={() => set(slot, c.id)} />
                     ))}
                   </div>
                 </fieldset>
@@ -186,9 +204,12 @@ export function Wardrobe({
         </div>
         <div className="mm-wardrobe-actions">
           <button type="button" className="mm-btn ghost" onClick={surprise}><Dices size={16} aria-hidden /> Surprise me</button>
-          <button type="button" className="mm-btn ghost" onClick={reset} disabled={!dirty}><RotateCcw size={16} aria-hidden /> Undo</button>
-          <button type="button" className="mm-btn primary" onClick={save} disabled={!dirty}><Sparkles size={16} aria-hidden /> {saveLabel}</button>
+          {!embedded && <button type="button" className="mm-btn ghost" onClick={reset} disabled={!dirty}><RotateCcw size={16} aria-hidden /> Undo</button>}
+          {!embedded && <button type="button" className="mm-btn primary" onClick={save} disabled={!dirty}><Sparkles size={16} aria-hidden /> {saveLabel}</button>}
         </div>
+        {/* The save result in words, for everyone: the bubble says it too, but
+            a failure must not depend on seeing him. */}
+        {!embedded && <p className="mm-save-status" role="status">{saved === "saved" ? "Saved in this browser." : saved === "failed" ? "Couldn't save in this browser — the look still works on this page." : ""}</p>}
       </div>
     </section>
   );

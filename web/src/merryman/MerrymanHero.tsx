@@ -23,11 +23,16 @@ export function useReactions(moves: readonly Move[] | null | undefined): { cue: 
     if (!moves) return;
     const hit = newestReaction(moves, seen.current);
     seen.current = Math.max(seen.current ?? 0, latestAt(moves));
-    if (!hit) return;
-    setState({ cue: { key: hit.at, clip: hit.reaction.clip }, bubble: hit.reaction.bubble, tone: hit.reaction.tone });
+    if (hit) setState({ cue: { key: hit.at, clip: hit.reaction.clip }, bubble: hit.reaction.bubble, tone: hit.reaction.tone });
+  }, [moves]);
+  // THE BUBBLE'S CLOCK BELONGS TO THE REACTION, not to the tape. Every read
+  // hands over a new `moves` array; tying the timer to it cancelled the clear
+  // whenever another read landed inside six seconds, and the bubble stayed.
+  useEffect(() => {
+    if (!state.cue) return;
     const clear = setTimeout(() => setState((s) => ({ ...s, bubble: null })), 6000);
     return () => clearTimeout(clear);
-  }, [moves]);
+  }, [state.cue?.key]);
   return state;
 }
 
@@ -53,16 +58,20 @@ export function MerrymanHero({
   onTap?: () => void;
 }) {
   const reaction = useReactions(moves);
-  const bubble = reaction.bubble ?? mood.bubble;
-  const tone = reaction.bubble ? reaction.tone : mood.tone;
+  // A warning about the agent itself (pass expired, paused, gone quiet)
+  // outranks news about one trade.
+  const urgent = mood.tone === "warn" || mood.tone === "bad";
+  const bubble = urgent ? mood.bubble ?? reaction.bubble : reaction.bubble ?? mood.bubble;
+  const tone = urgent || !reaction.bubble ? mood.tone : reaction.tone;
+  const spoken = mood.word === "…" ? "Loading" : mood.word;
   // Whichever one-shot arrived last plays: a trade reaction or the screen's own.
   const [shown, setShown] = useState<Cue | null>(null);
   useEffect(() => { if (reaction.cue) setShown(reaction.cue); }, [reaction.cue?.key]);
   useEffect(() => { if (cue) setShown(cue); }, [cue?.key]);
   return (
-    <section className={`mm-hero tone-${mood.tone} ${className}`} aria-label={`${name}, ${mood.word}`}>
+    <section className={`mm-hero tone-${mood.tone} ${className}`} aria-label={`${name}, ${spoken}`}>
       <div className="mm-hero-stage">
-        <Merryman outfit={outfit} base={mood.clip} cue={shown} bubble={bubble} bubbleTone={tone} label={`${name}, your merryman: ${mood.word}`} onTap={onTap} />
+        <Merryman outfit={outfit} base={mood.clip} cue={shown} bubble={bubble} bubbleTone={tone} label={/^your merryman$/i.test(name) ? `Your merryman: ${spoken}` : `${name}, your merryman: ${spoken}`} onTap={onTap} />
         <span className={`mm-chip tone-${mood.tone}`}><i aria-hidden /> {mood.word}</span>
       </div>
       {children ? <div className="mm-hero-body">{children}</div> : null}

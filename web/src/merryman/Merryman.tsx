@@ -21,7 +21,17 @@ import type { Framing, Stage } from "./stage";
 
 export type Cue = { key: string | number; clip: string };
 
+/**
+ * CAN THIS BROWSER DRAW HIM? Asked once per page: the answer cannot change
+ * while the page is open, and every probe is a real context created and thrown
+ * away — one per leaderboard row, before this was cached. A context lost later
+ * is the stage's own onLost and portraitOf's concern.
+ */
+let webgl: boolean | undefined;
 function webglAvailable(): boolean {
+  return (webgl ??= probeWebgl());
+}
+function probeWebgl(): boolean {
   // jsdom (the node tests) has a canvas with no context; asking it prints a
   // "not implemented" error into the test output for nothing.
   if (typeof navigator !== "undefined" && /jsdom/i.test(navigator.userAgent)) return false;
@@ -95,7 +105,9 @@ export function Merryman({
           lively: !reduced,
           seed: Math.random() * 10,
           onTap: () => latest.current.onTap?.(),
-          onLost: () => setLive("flat"),
+          // The flat figure stays for good: dispose the stage so it can never
+          // draw a second merryman under it after the context comes back.
+          onLost: () => { stage.current?.dispose(); stage.current = null; setLive("flat"); },
         });
         setLive("ready");
       })
@@ -125,20 +137,27 @@ export function Merryman({
   useEffect(() => { stage.current?.setFraming(framing); }, [framing, live]);
   useEffect(() => { if (cue && live === "ready") stage.current?.play(cue.clip); }, [cue?.key, live]);
 
+  // The picture and what he says are siblings: children of role="img" are
+  // presentational, so a bubble inside it never reached a screen reader. The
+  // live region stays mounted and only its text changes, which is what makes
+  // a polite announcement fire; the visible bubble animates separately.
   return (
-    <div className={`mm-merryman ${className}`} data-state={live} data-framing={framing} role="img" aria-label={label ?? "Your merryman"}>
-      <div className="mm-merryman-glow" aria-hidden />
-      <div className="mm-merryman-stage" ref={host} aria-hidden />
-      {live !== "ready" && (
-        <div className={`mm-merryman-flat${live === "loading" ? " is-loading" : ""}`} aria-hidden>
-          <MerrymanFlat outfit={outfit} size={framing === "portrait" ? 140 : 150} bust={framing === "portrait"} />
-        </div>
-      )}
+    <div className={`mm-merryman ${className}`} data-state={live} data-framing={framing}>
+      <div className="mm-merryman-figure" role="img" aria-label={label ?? "Your merryman"}>
+        <div className="mm-merryman-glow" aria-hidden />
+        <div className="mm-merryman-stage" ref={host} aria-hidden />
+        {live !== "ready" && (
+          <div className={`mm-merryman-flat${live === "loading" ? " is-loading" : ""}`} aria-hidden>
+            <MerrymanFlat outfit={outfit} size={framing === "portrait" ? 140 : 150} bust={framing === "portrait"} />
+          </div>
+        )}
+      </div>
       {bubble ? (
-        <div className={`mm-bubble tone-${bubbleTone}`} key={bubble} aria-live="polite">
+        <div className={`mm-bubble tone-${bubbleTone}`} key={bubble} aria-hidden>
           {bubble}
         </div>
       ) : null}
+      <span className="mm-sr-only" role="status" aria-live="polite">{bubble ?? ""}</span>
     </div>
   );
 }

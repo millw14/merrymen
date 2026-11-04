@@ -44,7 +44,7 @@ import {
   type CanvasTexture,
   type Material,
 } from "three";
-import { CLIPS, FIDGETS, FIDGETY_BASES, clipOf, type Clip, type Fx } from "./clips";
+import { CALM_BASES, CALM_SHOTS, CALM_STAND_IN, CLIPS, FIDGETS, FIDGETY_BASES, clipOf, type Clip, type Fx } from "./clips";
 import { DEFAULT_OUTFIT, outfitKey, type Outfit } from "./outfit";
 import { blendPose, copyPose, restPose, smooth, type Pose } from "./pose";
 import { applyPose, buildRig, createKit, glyphTexture, type Kit, type Rig } from "./rig";
@@ -206,6 +206,7 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   const puffGeo = track(new SphereGeometry(0.08, 10, 8));
   const arrowGeo = track(new CylinderGeometry(0.008, 0.008, 0.6, 5));
   const arrowTipGeo = track(new ConeGeometry(0.02, 0.07, 6));
+  const shieldGeo = track(new SphereGeometry(0.9, 24, 16));
 
   const headWorld = () => rig.head.getWorldPosition(new Vector3());
   const spawn = (obj: Object3D, init: Partial<Particle>) => {
@@ -328,8 +329,7 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
         break;
       case "shield": {
         const mat = new MeshBasicMaterial({ color: new Color("#6fd6ff"), transparent: true, opacity: 0.25, depthWrite: false, blending: AdditiveBlending });
-        const m = new Mesh(new SphereGeometry(0.9, 24, 16), mat);
-        track(m.geometry);
+        const m = new Mesh(shieldGeo, mat);
         m.position.set(0, 0.85, 0);
         spawn(m, { life: 0.9, grow: 0.15, mat });
         break;
@@ -419,7 +419,7 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   // ── the mixer ──
   const seed = opts.seed ?? Math.random() * 10;
   let lively = opts.lively !== false;
-  let base: Clip = clipOf(opts.base ?? "idle");
+  let base: Clip = clipOf(lively || CALM_BASES.has(opts.base ?? "idle") ? opts.base ?? "idle" : "idle");
   let baseAt = 0;
   let prevBase: Clip | null = null;
   let prevBaseAt = 0;
@@ -429,6 +429,7 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   const queue: string[] = [];
   let nextFidget = 4 + Math.random() * 5;
   let nextBlink = 2 + Math.random() * 3;
+  let blinkAt = -1;
   let lastEmit = 0;
   let firedCues = new Set<number>();
   const pose = restPose();
@@ -436,8 +437,19 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   const scratch2 = restPose();
   let clock = 0;
 
+  /**
+   * REDUCE MOTION MEANS HE STAYS PUT. With the OS setting on (lively false)
+   * the bouncy, sweeping and dancing loops become the quiet idle, and the
+   * jumps, spins and flips become a nod or a thumbs-up in place: the reading
+   * still comes through, without whole-body motion nobody asked for. The
+   * requested mood is remembered so turning the setting off restores it.
+   */
+  let wantedBase = opts.base ?? "idle";
+  const calmBase = (id: string) => (lively || CALM_BASES.has(id) ? id : "idle");
+  const calmShot = (id: string) => (lively || CALM_SHOTS.has(id) ? id : CALM_STAND_IN[id] ?? "nodYes");
   function setBase(id: string) {
-    const next = clipOf(id);
+    wantedBase = id;
+    const next = clipOf(calmBase(id));
     if (next.id === base.id) return;
     prevBase = base;
     prevBaseAt = baseAt;
@@ -447,8 +459,9 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
     lastEmit = clock;
   }
   function play(id: string) {
-    const c = clipOf(id);
-    if (c.loop) { setBase(c.id); return; }
+    const asked = clipOf(id);
+    if (asked.loop) { setBase(asked.id); return; }
+    const c = clipOf(calmShot(asked.id));
     if (shot) { if (queue.length < 3) queue.push(c.id); return; }
     shot = c;
     shotAt = clock;
@@ -468,7 +481,11 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   let petReact = 0;
   const raycaster = new Raycaster();
   const interactive = opts.interactive !== false;
+  const pointers = new Set<number>();
   const onMove = (e: PointerEvent) => {
+    // Gaze is irrelevant while the loop is paused; don't force a layout read
+    // on every pointer move anywhere on the page for a stage nobody sees.
+    if (!dragging && raf === 0) return;
     const r = canvas.getBoundingClientRect();
     pointer.set(((e.clientX - r.left) / r.width) * 2 - 1, -(((e.clientY - r.top) / r.height) * 2 - 1));
     gaze.tx = Math.max(-1, Math.min(1, pointer.x * 1.4));
@@ -483,12 +500,18 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
     }
   };
   const onDown = (e: PointerEvent) => {
+    pointers.add(e.pointerId);
+    // A second finger is a pinch, not a spin: let the browser zoom.
+    if (pointers.size > 1) { dragging = false; yawVel = 0; return; }
     dragging = true;
     dragMoved = 0;
     lastX = e.clientX;
     canvas.setPointerCapture?.(e.pointerId);
   };
   const onUp = (e: PointerEvent) => {
+    const multi = pointers.size > 1;
+    pointers.delete(e.pointerId);
+    if (multi) return;
     dragging = false;
     canvas.releasePointerCapture?.(e.pointerId);
     if (dragMoved > 6) return;
@@ -510,9 +533,10 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   // A phone that decides the gesture was a vertical scroll (touch-action:
   // pan-y) sends pointercancel, never pointerup. Without this the drag never
   // ended, and every later pointer move anywhere on the page spun him.
-  const onCancel = () => { dragging = false; yawVel = 0; };
+  const onCancel = (e: PointerEvent) => { pointers.delete(e.pointerId); dragging = false; yawVel = 0; };
   if (interactive) {
-    canvas.addEventListener("pointermove", onMove);
+    // Pointer moves come through the window listener alone: captured canvas
+    // events reach it too, and handling each twice zeroed the spin's inertia.
     canvas.addEventListener("pointerdown", onDown);
     canvas.addEventListener("pointerup", onUp);
     canvas.addEventListener("pointerleave", onLeave);
@@ -527,6 +551,7 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
 
   // ── sizing and visibility ──
   let visible = true;
+  let lost = false;
   let raf = 0;
   let last = performance.now();
   const resize = () => {
@@ -553,11 +578,14 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   io?.observe(host);
   const onVis = () => { if (document.visibilityState === "visible") visible = visible || onScreen(); schedule(); };
   document.addEventListener("visibilitychange", onVis);
-  const onLost = (e: Event) => { e.preventDefault(); cancelAnimationFrame(raf); raf = 0; opts.onLost?.(); };
+  // A lost context ends this stage for good: the host falls back to the flat
+  // figure and disposes us. Restarting on a later visibility change would draw
+  // a second merryman under the flat one.
+  const onLost = (e: Event) => { e.preventDefault(); lost = true; cancelAnimationFrame(raf); raf = 0; opts.onLost?.(); };
   canvas.addEventListener("webglcontextlost", onLost);
 
   function schedule() {
-    const run = visible && document.visibilityState !== "hidden";
+    const run = !lost && visible && document.visibilityState !== "hidden";
     if (run && !raf) { last = performance.now(); raf = requestAnimationFrame(tick); }
     if (!run && raf) { cancelAnimationFrame(raf); raf = 0; }
   }
@@ -623,10 +651,13 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
       nextFidget = clock + 7 + Math.random() * 7;
     }
 
-    // blinks, unless the clip already has the eyes shut
-    if (clock > nextBlink) nextBlink = clock + 2.2 + Math.random() * 3.5;
-    const blinkT = nextBlink - clock;
-    if (blinkT > 2.05 && pose.blink < 0.5) pose.blink = Math.max(pose.blink, Math.sin(((blinkT - 2.05) / 0.15) * Math.PI));
+    // one blink every few seconds, unless the clip already has the eyes shut
+    if (clock > nextBlink) {
+      blinkAt = clock;
+      nextBlink = clock + 2.2 + Math.random() * 3.5;
+    }
+    const sinceBlink = clock - blinkAt;
+    if (blinkAt >= 0 && sinceBlink < 0.15 && pose.blink < 0.5) pose.blink = Math.max(pose.blink, Math.sin((sinceBlink / 0.15) * Math.PI));
 
     // gaze follows the pointer, gently, and drifts home when it leaves
     if (clock - lastInput > 3) { gaze.tx *= 0.98; gaze.ty *= 0.98; }
@@ -675,6 +706,8 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
     },
     setLively(on: boolean) {
       lively = on;
+      const wanted = wantedBase;
+      setBase(wanted);
     },
     snapshot() {
       renderer.render(scene, camera);
@@ -688,7 +721,6 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
       document.removeEventListener("visibilitychange", onVis);
       canvas.removeEventListener("webglcontextlost", onLost);
       if (interactive) {
-        canvas.removeEventListener("pointermove", onMove);
         canvas.removeEventListener("pointerdown", onDown);
         canvas.removeEventListener("pointerup", onUp);
         canvas.removeEventListener("pointerleave", onLeave);
@@ -744,6 +776,12 @@ export function portraitOf(outfit: Outfit, size = 160): string | null {
       portraitStage = { renderer, scene, camera, kit: createKit(0.014), rig: null };
     }
     const ps = portraitStage;
+    if (ps.renderer.getContext().isContextLost()) {
+      ps.renderer.dispose();
+      ps.kit.dispose();
+      portraitStage = null;
+      return null;
+    }
     ps.renderer.setPixelRatio(1);
     ps.renderer.setSize(size, size, false);
     ps.rig?.dispose();

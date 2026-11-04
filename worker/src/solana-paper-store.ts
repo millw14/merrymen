@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { CHAINS, SOLANA_USDG_MINT } from "../../packages/core/src/ids";
 import {
   parseSolanaRawAmount, parseSolanaSwapIntent, solanaPaperAgentId,
-  SOLANA_QUOTE_MAX_AGE_MS,
+  SOLANA_QUOTE_MAX_AGE_MS, SOLANA_MAX_PERMISSION_MS,
   validateSolanaPaperLimits, validateSolanaQuote,
   type SolanaPaperLimits, type SolanaQuote, type SolanaSwapIntent,
 } from "../../packages/core/src/solana";
@@ -127,8 +127,8 @@ const RENEWAL_FIELDS = new Set(["expiresAtMs", "loosen", ...LOOSENABLE]);
  * names no expiry: thirty days, the same monthly cadence as an EVM permission
  * (core autonomy.ts `DEFAULT_PERMISSION_DAYS`). It was seven.
  *
- * LOCAL PAPER ONLY. This book carries no SOL sell caps, so its limits are not
- * held to the hosted 168-hour Solana permission (solana.ts
+ * LOCAL PAPER ONLY. A book without SOL sell caps is not held to the hosted
+ * 168-hour Solana permission; one WITH them is, and renews to that bound (solana.ts
  * `SOLANA_MAX_PERMISSION_MS`, enforced on-chain by the vault program); that
  * limit is unchanged and still applies to every hosted Solana account.
  */
@@ -368,7 +368,10 @@ export class SolanaPaperStore {
       if (nowMs < book.updatedAtMs) fail("clock_rollback");
       if (book.version === Number.MAX_SAFE_INTEGER) fail("version_conflict");
       const previous = book.limits;
-      const defaultExpiry = nowMs + SOLANA_PAPER_RENEW_DEFAULT_DAYS * DAY_MS;
+      // A book carrying SOL sell caps is held to the hosted 168-hour bound
+      // (solana.ts validateSolanaPaperLimits), so its default stays inside it.
+      const sellCapped = Object.hasOwn(previous, "perTradeWsol");
+      const defaultExpiry = nowMs + (sellCapped ? SOLANA_MAX_PERMISSION_MS : SOLANA_PAPER_RENEW_DEFAULT_DAYS * DAY_MS);
       // Without an explicit expiry: revive an expired book; extend a running
       // one only for a renewal that asks for nothing else; otherwise keep it.
       const namesOtherChange = Object.keys(changes).some((key) => key !== "expiresAtMs");

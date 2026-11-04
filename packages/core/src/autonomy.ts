@@ -182,7 +182,9 @@ export const RENEW_SOON_DAYS = 3;
  * drawdown, operations, the call and asset allowlists — is unchanged by this,
  * and a renewal still pre-fills the caps the owner signed last time exactly:
  * moving an existing weekly agent to monthly is a one-tap choice the renewal
- * panel offers, never something done to it silently.
+ * panel offers. The exceptions are paths with no signed caps to copy —
+ * restoring a lost key, starting over — which open on the presets and so on
+ * this default, and say "for N days" before the signature.
  *
  * Solana is not covered: its hosted limit is 168 hours, enforced by the vault
  * program itself (solana.ts `SOLANA_MAX_PERMISSION_MS`).
@@ -190,16 +192,17 @@ export const RENEW_SOON_DAYS = 3;
 export const DEFAULT_PERMISSION_DAYS = 30;
 
 /**
- * The one sentence beside every "Renew every [N] days" field — web wallet,
- * renewal panel, Perps desk, phone.
+ * The one sentence beside every "Renew every [N] days" field on the web —
+ * wallet, renewal panel, Perps desk. (The phone apps carry their own copy.)
  *
  * The field used to read "auto-expire the agent after", under a tooltip calling
  * it "a safety timer", which reads as a threat to the money. It is a calendar:
  * what ends is the agent's ability to trade, what it costs to continue is one
- * signature, and nothing in the account moves either way.
+ * signature and the small fee that revokes the old permission, and nothing in
+ * the account moves either way.
  */
 export const RENEW_EVERY_TIP =
-  "Your agent's permission runs for this many days; renewing takes one signature. Your money never moves when it ends.";
+  "Your agent's permission runs for this many days; renewing takes one signature and a small network fee. Your money never moves when it ends.";
 
 /**
  * The headline and the button, PER RULE — because "the owner can fix it" and

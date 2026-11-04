@@ -13,7 +13,11 @@ const settle=async()=>{for(let i=0;i<15;i++)await new Promise(resolve=>setImmedi
 test("paper attention uses actual expiry, stop and read evidence without inventing live incidents",()=>{
  assert.deepEqual(perpsAttention({state:"absent"},NOW),[]);
  assert.match(perpsAttention({state:"unread"},NOW).join(" "),/unknown, not zero/);
- assert.match(perpsAttention(ready,NOW).join(" "),/expires within 24 hours/);
+ // A permission 1000s from its end is reminded about in the same three-day
+ // window every Spot reminder uses (RENEW_SOON_DAYS), counted in what is left.
+ assert.match(perpsAttention(ready,NOW).join(" "),/runs out within the hour/);
+ assert.match(perpsAttention({...ready,grantExpiresAt:NOW+2.5*86_400},NOW).join(" "),/runs out in about 3 days/);
+ assert.doesNotMatch(perpsAttention({...ready,grantExpiresAt:NOW+4*86_400},NOW).join(" "),/runs out/,"no nag a week out");
  assert.match(formatPerps({...ready,report:null},NOW),/unknown, not zero/);
  const changed={...ready,grantExpiresAt:NOW-1,report:{...ready.report!,venueReadAt:(NOW-200)*1000,stopsMissing:2,entriesHalted:true,incident:true}};
  const words=perpsAttention(changed,NOW).join(" ");assert.match(words,/expired/);assert.match(words,/protective stop/);assert.match(words,/old or unverified/);assert.match(words,/Close all/);assert.doesNotMatch(words,/incident|real.money|funding rate/i);

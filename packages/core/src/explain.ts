@@ -415,7 +415,7 @@ export const CONCEPTS: readonly Concept[] = [
     // permissions, and their owners ask.
     term: "Trading permission 30 days",
     aliases: ["expiry", "expires", "30 days", "a month", "monthly", "7 days", "does it expire", "renew", "revoke"],
-    plain: "Your agent's permission to trade runs for a set number of days — 30 unless you picked another number when you signed (the app shows it on the wallet screen). When it ends, the agent simply stops trading until you renew it, which takes one signature. Nothing happens to your money: the account, and everything in it, stays exactly where it is, and it is still yours.",
+    plain: "Your agent's permission to trade runs for a set number of days — 30 unless you picked another number when you signed; permissions signed before monthly became the default were often 7 or 14, and Solana permissions last at most 168 hours (the wallet screen shows yours). When it ends, the agent simply stops trading until you renew it, which takes one signature. Nothing happens to your money: the account, and everything in it, stays exactly where it is, and it is still yours.",
     because: "buildWallPolicies computes expiresAt = now + expiryDays*86400 and installs toTimestampPolicy({validAfter: now, validUntil: expiresAt}) — a contract that IS deployed on this chain. restoreAgentWallet re-derives the same smart account from the same owner key and signs a new session key, moving nothing on-chain. DEFAULT_PERMISSION_DAYS is the lifetime every signing surface opens on.",
     confusable: "Expiry stops trading; it does not touch your money.",
     evidence: "packages/core/src/wall.ts:694-698, web/src/lib/session.ts:830-845, packages/core/src/autonomy.ts",

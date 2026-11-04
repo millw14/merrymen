@@ -26,7 +26,8 @@ import { C } from "@/ui/tokens";
  * five sliders and hoping.
  *
  * Presets and values are the same three the dashboard offers, so a person who set
- * up on desktop sees the same choices here.
+ * up on desktop sees the same choices here. (The web form opens on the scout and
+ * calls it the default; this screen opens on the outlaw.)
  *
  * Every preset runs the shared monthly `DEFAULT_PERMISSION_DAYS`: they differ in
  * how much money the agent may move, not in how often its owner must sign. The
@@ -51,7 +52,7 @@ const PRESETS: { id: string; label: string; blurb: string; caps: GrantCaps }[] =
     id: "warlord",
     label: "bold · the warlord",
     blurb: "bigger arrows, wider walls",
-    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: 30, maxDrawdownPct: 15, maxOpsPerDay: 96 },
+    caps: { perTradeUsdg: 200, dailyUsdg: 2000, expiryDays: DEFAULT_PERMISSION_DAYS, maxDrawdownPct: 15, maxOpsPerDay: 96 },
   },
 ];
 
@@ -199,7 +200,7 @@ export default function Grant() {
       <View style={styles.nevers}>
         <Never text="Send your money anywhere. This wall registers no withdrawal address, so it carries no transfer permission at all — the chain refuses every send. Funds come home with your owner key." />
         <Never text="Trade an asset outside the allowed list. Adding one means signing a new wall, which is why it can't widen by itself." />
-        <Never text="Outlive its expiry. The key dies on schedule even if every other control fails." />
+        <Never text="Trade past its permission. When the permission ends, trading stops on schedule even if every other control fails." />
         <Never text="Touch your recovery phrase. It never leaves this phone — not to us, not to the agent, not over the network." />
       </View>
 

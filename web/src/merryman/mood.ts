@@ -31,7 +31,7 @@ export type ChatPhase = "idle" | "thinking" | "replying" | "failed";
 export type MoodInput = {
   /** Where the shell is: still reading, failed to read, signed out, signed in with no agent, or an agent. */
   phase: "loading" | "failed" | "signed-out" | "no-agent" | "agent";
-  autonomy?: Pick<Autonomy, "state" | "rule" | "needsOwnerAction" | "headline" | "reason" | "expiresSoon" | "simulated"> | null;
+  autonomy?: Pick<Autonomy, "state" | "rule" | "needsOwnerAction" | "headline" | "reason" | "expiresSoon" | "simulated" | "action"> | null;
   /** A fleet recovery hold (recovery-view.ts pausedRecovery). */
   recovery?: boolean;
   chat?: ChatPhase;
@@ -84,11 +84,17 @@ export function moodOf(input: MoodInput): Mood {
         ? { clip: "beckon", bubble: a.headline ?? "I need you for something before I can trade.", tone: "warn", word }
         : { clip: "think", bubble: a.reason ?? "Something on our side is holding me up. We're on it.", tone: "calm", word };
     case "not-running":
-      return { clip: "sleep", bubble: "I've gone quiet. We're waking me up — your money is safe.", tone: "warn", word };
+      // ONLY WHAT THE VERDICT KNOWS: when the worker last reported, and that
+      // nothing is being placed or closed meanwhile. No promise that money is
+      // safe or that a restart is under way — neither is something the page
+      // can see, and an open position has no exit management while he is out.
+      return { clip: "sleep", bubble: a.reason ? `${a.reason.charAt(0).toUpperCase()}${a.reason.slice(1)}. I'm not placing or closing trades right now.` : "I've gone quiet, so I'm not placing or closing trades right now.", tone: "warn", word };
     case "checking":
       return { clip: "think", bubble: "Checking my new trading pass…", tone: "calm", word };
     case "idle":
-      return { clip: "sit", bubble: "Resting. Start me when you're ready.", tone: "calm", word };
+      // The verdict's own remedy when it has one (no cash → Add funds); idle
+      // otherwise covers an agent that has not run yet, which starts by itself.
+      return { clip: "sit", bubble: a.action?.kind === "add-funds" ? "I've got nothing to trade with yet. Add money and I'll get going." : "Nothing to trade right now.", tone: "calm", word };
     case "paper":
     case "live": {
       const soon = a.expiresSoon;

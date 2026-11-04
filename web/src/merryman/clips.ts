@@ -931,5 +931,19 @@ export const FIDGETS = [
 /** Calm bases that fidgets may interrupt. Napping, scouting, or a dance are left alone. */
 export const FIDGETY_BASES = new Set(["idle", "happy", "model"]);
 
+/**
+ * WHAT STAYS UNDER "REDUCE MOTION": loops that keep the body where it is, and
+ * one-shots that are gestures rather than jumps, spins or flips. Everything
+ * else is swapped for a stand-in (stage.ts calmShot), so the reading still
+ * comes through without whole-body motion.
+ */
+export const CALM_BASES = new Set(["idle", "think", "talk", "sleep", "sad", "sit", "counting", "model"]);
+export const CALM_SHOTS = new Set(["wave", "nodYes", "shakeNo", "thumbsUp", "shrug", "salute", "point", "hatTip", "yawn", "scratchHead", "facepalm", "clap", "lookAround"]);
+export const CALM_STAND_IN: Record<string, string> = {
+  celebrate: "thumbsUp", backflip: "thumbsUp", jump: "thumbsUp", hop: "nodYes", spin: "nodYes", flex: "thumbsUp",
+  shoot: "nodYes", coinToss: "nodYes", dizzy: "shrug", surprised: "nodYes", kick: "nodYes", giggle: "nodYes",
+  sneeze: "nodYes", stretch: "yawn", courtesy: "hatTip", tapFoot: "shrug",
+};
+
 /** Re-exported so callers can shape their own timings the same way. */
 export { easeOut, backOut };

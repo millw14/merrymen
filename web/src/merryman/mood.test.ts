@@ -84,6 +84,22 @@ describe("moods", () => {
     assert.match(m.bubble!, /2 days/);
   });
 
+  it("a silent worker is described by the verdict alone — no promise that money is safe", () => {
+    const silent = autonomyOf({ mode: "live", liveBlocker: null, realCashUsd: 100, workerSilentSince: 1_791_000_000 });
+    assert.equal(silent.state, "not-running");
+    const m = moodOf({ phase: "agent", autonomy: silent });
+    assert.equal(m.clip, "sleep");
+    assert.doesNotMatch(m.bubble!, /safe|waking/i);
+    assert.match(m.bubble!, /not placing or closing trades/);
+    assert.ok(silent.reason && m.bubble!.toLowerCase().includes(silent.reason.slice(1, 20).toLowerCase()), "quotes the verdict's own sentence");
+  });
+
+  it("idle offers only the verdict's remedy, never a start button that does not exist", () => {
+    const broke = autonomyOf({ mode: "idle", liveBlocker: null, realCashUsd: 0 });
+    assert.match(moodOf({ phase: "agent", autonomy: broke }).bubble!, /Add money/);
+    assert.doesNotMatch(moodOf({ phase: "agent", autonomy: autonomyOf({ mode: null, liveBlocker: null }) }).bubble!, /Start me/);
+  });
+
   it("a recovery hold outranks the trading state", () => {
     assert.equal(moodOf({ phase: "agent", autonomy: live, recovery: true }).clip, "counting");
     assert.equal(moodOf({ phase: "agent", autonomy: live, recovery: true }).word, "Paused");

@@ -437,8 +437,8 @@ merrymen kill       # kill switch — destroys the grant`}
           to revoke the old permission on-chain before the new one is signed. Your wallet, funds, and
           history stay exactly where they are; nothing is redeployed, and your money never moves when a
           permission ends. From three days before it ends, the <code className="inline">/grant</code>{" "}
-          page and your merryman on Telegram remind you. An agent still on a shorter permission can
-          switch to monthly in one tap when you renew it.
+          page and your merryman on Telegram remind you. On the web wallet and the Perps desk, an agent
+          still on a shorter permission can switch to monthly in one tap when you renew it.
         </p>
         <h3>Does the expiry apply in paper mode too?</h3>
         <p>

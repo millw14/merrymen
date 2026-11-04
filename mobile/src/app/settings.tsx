@@ -410,7 +410,7 @@ export default function Settings() {
               −10% drawdown", then never surfaced again. A card headed "verify
               every cap" that showed four of five was the bigger problem. */}
           <Row label="stops out at" value={`−${grant.caps.maxDrawdownPct}%`} />
-          <Row label="key expires" value={countdown(left)} tone={expiryTone} last />
+          <Row label="permission ends" value={countdown(left)} tone={expiryTone} last />
           <Pressable
             style={styles.link}
             onPress={() => Linking.openURL(`${EXPLORER}/address/${grant.smartAccount}`)}

@@ -63,7 +63,9 @@ export function Face({
     // agents read as one agent talking to itself. The slug is minted once and
     // never changes, so a rename keeps the face too.
     <span className={figure ? `${cls} has-figure` : cls} style={figure ? undefined : { background: avatarGradient(faceSeed(name, slug)) }} aria-hidden>
-      {figure ? <FaceFigure seed={faceSeed(name, slug)} slug={slug ?? null} /> : initialsOf(name)}
+      {/* The figure only where no uploaded picture will cover it: a row with
+          a picture would otherwise render a portrait nobody sees. */}
+      {figure ? (!src || failed ? <FaceFigure seed={faceSeed(name, slug)} slug={slug ?? null} /> : null) : initialsOf(name)}
       {src && !failed && <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />}
     </span>
   );
