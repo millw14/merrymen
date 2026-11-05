@@ -90,14 +90,39 @@ export interface PositionsRead {
    * July ledger. An unknown must never be representable as a zero.
    */
   readFailed: boolean;
+  /**
+   * Tokens whose OWN balance row failed, by symbol: held or not, this read
+   * cannot say. Every token when `readFailed`.
+   *
+   * THE SAME RULE AS `readFailed`, ONE TOKEN AT A TIME. viem's multicall does
+   * not throw when part of it fails: a rate-limited or dropped chunk comes back
+   * as one failure row per call in it (and this repo's RPC governor sets
+   * `retryCount: 0`, so nothing retries it first). Those rows used to be
+   * skipped exactly like a zero balance, with `readFailed: false`, so a 429 on
+   * one token read as "not held". The stranded-basis sweep then closed the cost
+   * basis of a position the vault still held (Shogun, 2026-11-04 08:36 UTC:
+   * `[basis] T7A7D111C0AB no longer held on-chain`, about 2,842 GATO it never
+   * sold), and that position has read "unpriced AND no cost on record" since.
+   *
+   * Not folded into `readFailed`, because some of these never clear: a token
+   * with no code on the account's chain fails the same way on every tick (see
+   * readPositions), and holding the whole tick on it would freeze the book for
+   * good. The caller decides what an unread token holds up; nothing may treat
+   * it as flat.
+   */
+  unreadBalances: string[];
 }
 
 /**
  * Read balances + multipliers for `tokens` from the account's chain and value
- * them with the supplied mainnet Chainlink prices. Tokens that don't exist on
- * the account's chain (testnet demo) read as zero and are dropped. A token that
- * IS held but can't be valued (feed/multiplier read failed) is reported in
- * `missingPrice` — never silently valued at zero.
+ * them with the supplied mainnet Chainlink prices. A token that IS held but
+ * can't be valued (feed/multiplier read failed) is reported in `missingPrice`
+ * — never silently valued at zero. A token whose balance could not be read is
+ * reported in `unreadBalances` — never silently read as not held.
+ *
+ * A token that does not exist on the account's chain (a mainnet address on a
+ * testnet grant) is one of those: a call to an address with no code returns no
+ * data, which viem reports as a failure row rather than a zero.
  */
 /** 1.0 in ERC-8056's fixed-point convention. */
 export const UI_MULTIPLIER_ONE = 10n ** 18n;
@@ -236,14 +261,27 @@ export async function readPositions(
     .catch(() => null)) as CallResult[] | null;
   // Whole read failed — we can't tell held from unheld. Report nothing valued and
   // no coverage; the tick can't trust this, but "" avoids a per-symbol miss list.
-  if (!results) return { positions: [], missingPrice: [], unpricedByDesign: [], readFailed: true };
+  if (!results) {
+    return {
+      positions: [],
+      missingPrice: [],
+      unpricedByDesign: [],
+      readFailed: true,
+      unreadBalances: tokens.map((t) => t.symbol),
+    };
+  }
 
   const positions: Position[] = [];
   const missingPrice: string[] = [];
   const unpricedByDesign: string[] = [];
+  const unreadBalances: string[] = [];
   for (const { token: t, balAt, multAt } of slots) {
     const bal = results[balAt];
-    if (bal?.status !== "success") continue; // balance unreadable → can't say it's held
+    // Balance unreadable: we can't say it's held, and we can't say it isn't.
+    if (bal?.status !== "success") {
+      unreadBalances.push(t.symbol);
+      continue;
+    }
     const rawBalance = bal.result as bigint;
     if (rawBalance === 0n) continue; // genuinely not held — not a coverage gap
 
@@ -288,7 +326,7 @@ export async function readPositions(
       }),
     });
   }
-  return { positions, missingPrice, unpricedByDesign, readFailed: false };
+  return { positions, missingPrice, unpricedByDesign, readFailed: false, unreadBalances };
 }
 
 /**

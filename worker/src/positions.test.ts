@@ -183,12 +183,68 @@ describe("readPositions — a held holding is never silently valued at zero", ()
     // booked positionsUsdg = 0 for a held book — a phantom 100% crater from one
     // RPC hiccup, which is the 30% drawdown row sitting in the July ledger.
     assert.equal(r.readFailed, true);
+    // And every token is unread, by name: nothing about any of them is known.
+    assert.deepEqual(r.unreadBalances, ["AAPL"]);
   });
 
   it("a successful read is marked as one, so an empty book is believable", async () => {
     const r = await readPositions(client([good(0n), good(ONE)]), ACCT, [AAPL], new Map());
     assert.deepEqual(r.positions, []);
     assert.equal(r.readFailed, false);
+    assert.deepEqual(r.unreadBalances, []);
+  });
+});
+
+/**
+ * ONE FAILED BALANCE ROW IS NOT A ZERO BALANCE.
+ *
+ * viem's multicall does not throw when one chunk of it is rate-limited: every
+ * call in that chunk comes back `{ status: "failure" }` and the rest succeed.
+ * readPositions skipped such a row exactly like a zero and reported
+ * `readFailed: false`, so the tick's stranded-basis sweep read a held token as
+ * gone and closed its basis (Shogun's GATO, 2026-11-04 08:36 UTC).
+ */
+describe("readPositions — one failed balance row among good ones", () => {
+  const GATO: StockToken = { ...feedless("GATO", "0x436b01e41314d4b010edd24cf7c997a7d111c0ab"), kind: "memecoin" };
+  const rateLimited = () => ({ status: "failure" as const, error: new Error("HTTP request failed. Status: 429") });
+
+  it("names the token as unread, and does not report it as held or as flat", async () => {
+    const prices = new Map([["AAPL", px(200)]]);
+    // AAPL: balance + multiplier; GATO (memecoin): balance only, and it failed.
+    const r = await readPositions(client([good(5n * ONE), good(ONE), rateLimited()]), ACCT, [AAPL, GATO], prices);
+    assert.deepEqual(r.unreadBalances, ["GATO"]);
+    // The rest of the read is still used — one token's gap is not the whole book's.
+    assert.equal(r.readFailed, false);
+    assert.deepEqual(r.positions.map((p) => p.symbol), ["AAPL"]);
+    // And GATO is in no holding list: nothing was learned about it either way.
+    assert.deepEqual(r.missingPrice, []);
+    assert.deepEqual(r.unpricedByDesign, []);
+  });
+
+  it("the same token with a balance that DID come back is held, not unread", async () => {
+    const r = await readPositions(client([good(5n * ONE), good(ONE), good(2_842n * ONE)]), ACCT, [AAPL, GATO], new Map([["AAPL", px(200)]]));
+    assert.deepEqual(r.unreadBalances, []);
+    assert.deepEqual(r.unpricedByDesign, ["GATO"]);
+  });
+
+  it("and a balance that came back ZERO is the only flat answer", async () => {
+    const r = await readPositions(client([good(5n * ONE), good(ONE), good(0n)]), ACCT, [AAPL, GATO], new Map([["AAPL", px(200)]]));
+    assert.deepEqual(r.unreadBalances, []);
+    assert.deepEqual(r.unpricedByDesign, []);
+  });
+
+  it("a failed MULTIPLIER on a held token is still a missing price, not an unread balance", async () => {
+    // The balance answered, so the holding is known; only its valuation is not.
+    const r = await readPositions(client([good(5n * ONE), bad()]), ACCT, [AAPL], new Map([["AAPL", px(200)]]));
+    assert.deepEqual(r.unreadBalances, []);
+    assert.deepEqual(r.missingPrice, ["AAPL"]);
+  });
+
+  it("a failed balance row on a Stock Token is unread too, whatever its multiplier said", async () => {
+    const r = await readPositions(client([rateLimited(), good(ONE)]), ACCT, [AAPL], new Map([["AAPL", px(200)]]));
+    assert.deepEqual(r.unreadBalances, ["AAPL"]);
+    assert.deepEqual(r.positions, []);
+    assert.deepEqual(r.missingPrice, []);
   });
 });
 

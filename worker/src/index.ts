@@ -110,7 +110,7 @@ import { createSponsor, sponsorWillQuote, type Sponsor } from "./paymaster";
 import { fillFromDeltas, netTokenDeltas, slippageBpsAgainst, type ReceiptLog } from "./fills";
 import { belowFloorBps, checkDelivery, describeDelivery } from "./delivery";
 import { classifyRevert, suppressionKey, suppressionLegs } from "./revert";
-import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols } from "./custody";
+import { bookAddresses, custodyAddressesOf, provenanceCurves, strandedBasisSymbols, unreadHeldOnRecord } from "./custody";
 import { SponsorRefused } from "./paymaster";
 import { DROP_PROOF_CONFIRMATIONS, findDroppedOps, findOrphanOps, resolveSubmittedOps, type RawLog, type ReconcileChain } from "./inflight-reconcile";
 import { ownerOperationRow, ownerOperationsNotice, type OwnerOperationReading } from "./owner-operations";
@@ -576,6 +576,7 @@ import {
   setClassFirstSeen,
   upsertClassPosition,
   getBasis,
+  openBasisQty,
   setBasis,
   setPositionFloor,
   positionFloors,
@@ -12225,6 +12226,11 @@ async function main() {
     // from missingPrice: there the holding is known and the PRICE is missing;
     // here the holding itself is unknown, so there is nothing to value.
     let unreadBook: string[] = [];
+    // Watched tokens whose own balance row failed this tick (account and vault
+    // reads together). Unknown, not flat: the stranded-basis sweep below must
+    // not close any of them. Those the books say we hold are in `unreadBook`
+    // too, and hold the tick. See positions.ts `unreadBalances`.
+    let unreadPositions: string[] = [];
     /**
      * What the class vault holds, and whether we managed to ask.
      *
@@ -12409,7 +12415,9 @@ async function main() {
         missingPrice.push(...custodyRead.missingPrice);
         unpricedByDesign.push(...custodyRead.unpricedByDesign);
         posRead.readFailed ||= custodyRead.readFailed;
+        posRead.unreadBalances.push(...custodyRead.unreadBalances);
       }
+      unreadPositions = [...new Set(posRead.unreadBalances)];
       // Only tokens the vault ACTUALLY holds. A recorded row with a zero balance
       // is a position that has been fully sold or swept — its basis is genuinely
       // stranded and should close, which is the one case the guard must not
@@ -12560,12 +12568,21 @@ async function main() {
       // the reason the vault was built.
       unpricedByDesign = [...unpricedByDesign, ...classBook.symbols];
       lastUnpricedSymbols = new Set(unpricedByDesign);
+      // A WATCHED TOKEN WHOSE BALANCE DID NOT COME BACK, AND WHICH THE BOOKS SAY
+      // WE HOLD, is a holding this tick cannot see — the same gap as an unread
+      // cash balance, so it holds the tick by the same gate. Skipped when the
+      // whole read failed: "positions" already holds it, and names it.
+      const positionsUnreadOnRecord = posRead.readFailed
+        ? []
+        : // openBasisQty, NOT getBasis: getBasis answers zero for a failed query,
+          // and the guard can only fail closed on a lookup that throws.
+          await unreadHeldOnRecord(unreadPositions, (symbol) => openBasisQty(agentId, "live", symbol));
       unreadBook = bookGaps({
         // MERGED BEFORE THE GATE, not after. `bookGaps` feeds the early return
         // below; a custody read reported anywhere later would let the tick
         // publish an equity figure missing a real holding and then run the
         // stranded-basis sweep against a book it could not see.
-        unreadBalances: [...bal.unread, ...classRead.unread],
+        unreadBalances: [...bal.unread, ...classRead.unread, ...positionsUnreadOnRecord],
         positionsReadFailed: posRead.readFailed,
         missingPrice: [], // reported separately below — it has its own message
       });
@@ -12900,6 +12917,9 @@ async function main() {
         // the basis — and the floor — of a position the owner still holds. See
         // strandedBasisSymbols.
         watched: watchTokens.map((t) => t.symbol),
+        // AND WHAT IT ASKED ABOUT BUT DID NOT HEAR BACK. A failed balance row is
+        // not a zero; only a zero may close a basis. See strandedBasisSymbols.
+        unread: unreadPositions,
       })) {
         const stranded = await getBasis(agentId, "live", symbol);
         if (stranded.qtyRaw <= 0n) continue;

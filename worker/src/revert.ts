@@ -25,6 +25,7 @@
  * treated as retryable — it must never become the bucket that quietly suppresses
  * a token because nobody recognised the message.
  */
+import { decodeErrorResult, parseAbi } from "viem";
 
 /**
  * What kind of failure this was, and therefore what the loop should do next.
@@ -323,14 +324,23 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
     // It is also exactly what the header's own rule forbids: STF is not a
     // string the slippage path emits, and it was added from memory. Ordered
     // ABOVE the generic ERC-20 entries because it is more specific, and the
-    // detail names both causes because the revert genuinely does not say which.
+    // detail names every cause because the revert genuinely does not say which.
+    //
+    // THREE CAUSES, NOT TWO. safeTransferFrom requires the token's own
+    // `transferFrom` to succeed, so a token that refuses to move for its
+    // holder fails here too. Live from 2026-11-04: GATO, held in full by the
+    // vault, refused every sell this way.
+    //
+    // AND NO CLAIM ABOUT WHAT HAPPENS NEXT. A pre-broadcast refusal reads this
+    // sentence too (executor.ts), and there an exit is never held
+    // (exec-backoff.ts). The on-chain path says it suppresses in its own event.
     re: /\bSTF\b/,
     rule: "insufficient-balance",
     retryable: false,
     detail:
       "the router could not pull the token this trade meant to sell — TransferHelper.safeTransferFrom reverted, which " +
-      "means either the account does not hold the amount or the approve did not cover it. Retrying cannot change " +
-      "either, so this intent is suppressed for the rest of the arm.",
+      "means the account does not hold the amount, the approve did not cover it, or the token itself refused the " +
+      "transfer. Retrying cannot change any of these.",
   },
   {
     // SwapRouter02's ACTUAL slippage revert. Case-sensitive on the router's own
@@ -348,9 +358,10 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
     re: /transfer amount exceeds balance|insufficient balance|ERC20InsufficientBalance/i,
     rule: "insufficient-balance",
     retryable: false,
+    // No claim about suppression, for the reason the STF entry above gives.
     detail:
       "the account does not hold what this operation tried to spend. Retrying cannot change that — the position or the " +
-      "cash has to arrive first, so this intent is suppressed for the rest of the arm rather than repeated every tick.",
+      "cash has to arrive first.",
   },
   {
     re: /transfer amount exceeds allowance|insufficient allowance|ERC20InsufficientAllowance/i,
@@ -507,6 +518,73 @@ export function classifyRevert(message: string): RevertVerdict {
       "the event log.",
     retryable: true,
   };
+}
+
+/**
+ * Solidity's two built-in revert encodings. The selectors are DERIVED from these
+ * signatures by viem (0x08c379a0 and 0x4e487b71), per this file's rule.
+ */
+const BUILTIN_REVERTS = parseAbi(["error Error(string)", "error Panic(uint256)"]);
+
+/**
+ * A hex run that starts with one of those selectors. Anchored at a `0x` that no
+ * word character precedes, so a selector spelled by chance in the middle of a
+ * signature or a hash is not a candidate.
+ */
+const ENCODED_REASON = /(?<![0-9A-Za-z])0x(?:08c379a0|4e487b71)[0-9a-f]*/gi;
+
+/**
+ * THE REVERT REASONS A MESSAGE CARRIES ABI-ENCODED, as the words they encode.
+ *
+ * The bundler does not decode them. Its simulation refusal arrives as
+ * `0x08c379a0…` — Solidity's `Error(string)` — so the table above, which
+ * matches words, saw hex: TransferHelper's `STF` (Uniswap v3's
+ * safeTransferFrom failing) reached the executor as `unclassified`, and the
+ * refusal kept the `gas-unreadable` label. Live, from 2026-11-04 00:15 UTC:
+ * every sell of a token whose transfer reverts for its holder.
+ *
+ * `Panic(uint256)` is decoded to its code and nothing more. Naming what a code
+ * means would be a table written from memory.
+ *
+ * Returns each distinct reason once, in the order found. Anything that does not
+ * decode cleanly is left out.
+ */
+export function decodedRevertReasons(message: string): string[] {
+  const out: string[] = [];
+  for (const run of message.match(ENCODED_REASON) ?? []) {
+    let text: string;
+    try {
+      const decoded = decodeErrorResult({ abi: BUILTIN_REVERTS, data: run.toLowerCase() as `0x${string}` });
+      text =
+        decoded.errorName === "Error"
+          ? // Control characters to spaces, so a newline cannot sit between a
+            // word and the boundary a pattern above expects.
+            `Error("${String(decoded.args[0]).replace(/[\u0000-\u001f\u007f]/g, " ")}")`
+          : `Panic(0x${(decoded.args[0] as bigint).toString(16)})`;
+    } catch {
+      continue;
+    }
+    if (!out.includes(text)) out.push(text);
+  }
+  return out;
+}
+
+/**
+ * The message, with every ABI-encoded reason it carries appended in words.
+ *
+ * APPENDED, NEVER SUBSTITUTED: the Pons selectors at the top of the table are
+ * matched inside the hex, so the original text has to stay.
+ *
+ * Used where the bundler refuses to estimate (executor.ts), which is the only
+ * place this file is meant to change anything. A pre-broadcast refusal is only
+ * renamed by a non-retryable class, an exit is never held (exec-backoff.ts),
+ * and nothing was signed either way. The on-chain revert path (index.ts) is
+ * deliberately not given decoded text here: a non-retryable class there
+ * suppresses the pair for the rest of the arm, exits included.
+ */
+export function withDecodedReasons(message: string): string {
+  const reasons = decodedRevertReasons(message);
+  return reasons.length === 0 ? message : `${message}\n\nDecoded revert reason: ${reasons.join("; ")}`;
 }
 
 /**
