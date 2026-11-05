@@ -233,6 +233,48 @@ export async function readMultipliers(
   return { multipliers, unreadable };
 }
 
+/**
+ * viem errors that mean the REQUEST failed, not that the chain answered:
+ * an HTTP refusal or 5xx (HttpRequestError), a deadline (TimeoutError), a
+ * socket, and a JSON-RPC "limit exceeded" (-32005), the rate limit some
+ * providers send inside a 200. Measured through rpc-meter.ts chainRead.
+ */
+const TRANSPORT_FAILURES = new Set([
+  "HttpRequestError",
+  "TimeoutError",
+  "WebSocketRequestError",
+  "SocketClosedError",
+  "LimitExceededRpcError",
+]);
+
+/**
+ * DID THIS ROW FAIL BECAUSE THE MULTICALL'S OWN REQUEST FAILED?
+ *
+ * viem's multicall never throws for a refused chunk: with allowFailure it
+ * gives EVERY call in that chunk `{ status: "failure" }`, each carrying the
+ * aggregate3 call's error. A 429 on the positions read therefore looked like
+ * "every held coin is unread": the book went incomplete and the owner was told
+ * each coin's balance check was failing, and then that it reads again, once per
+ * rate-limit blip. That is our request failing, so it is the whole read
+ * failing, as a thrown multicall already is.
+ *
+ * NARROW ON PURPOSE. Only a transport failure of the aggregate3 call counts. A
+ * token whose own call fails (its row names balanceOf) is that token's gap, and
+ * so is an aggregate3 call the CHAIN failed: a token that burns all the gas
+ * fails the whole eth_call ("out of gas"), and reading that as the whole read
+ * failing would let one coin hold the tick, and every exit, for good. Anything
+ * unrecognised stays per token, the side that cannot freeze.
+ */
+export function multicallRequestFailed(error: unknown): boolean {
+  if ((error as { functionName?: unknown } | null)?.functionName !== "aggregate3") return false;
+  let e: unknown = error;
+  for (let depth = 0; e && depth < 12; depth++) {
+    if (TRANSPORT_FAILURES.has(String((e as { name?: unknown }).name))) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export async function readPositions(
   client: PublicClient,
   account: `0x${string}`,
@@ -275,7 +317,9 @@ export async function readPositions(
     .catch(() => null)) as CallResult[] | null;
   // Whole read failed — we can't tell held from unheld. Report nothing valued and
   // no coverage; the tick can't trust this, but "" avoids a per-symbol miss list.
-  if (!results) {
+  // A chunk whose REQUEST failed is the same failure (multicallRequestFailed):
+  // viem reports it as failed rows instead of a throw.
+  if (!results || results.some((r) => r.status === "failure" && multicallRequestFailed(r.error))) {
     return {
       positions: [],
       missingPrice: [],

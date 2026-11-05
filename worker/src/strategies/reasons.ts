@@ -594,8 +594,11 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
       return (
         `nothing bought — ${own ? "I can't" : "it can't"} read the balance of ` +
         `${w.holdings === 1 ? "one coin" : `${w.holdings} coins`} ${own ? "my books say I hold" : "its books say it holds"}, ` +
-        `so the book can't be totalled and the drawdown limit can't judge a buy until ${w.holdings === 1 ? "it reads" : "they read"}. ` +
-        `Selling everything else is never blocked by this`
+        `so the drawdown limit can't judge a buy until ${w.holdings === 1 ? "it reads" : "they read"}. ` +
+        // even-keel reports this too while it holds its trims, so "selling is
+        // never blocked" was false for it: the wall refuses no sale of anything
+        // else, and a rebalancing basket chooses to wait.
+        `Other sells are never refused by this; a rebalancing basket waits`
       );
     case "legs-locked":
       // NO "selling is never blocked" CLAUSE, unlike its siblings. Those are

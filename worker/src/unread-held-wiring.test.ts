@@ -58,11 +58,22 @@ describe("an unread held coin makes the book incomplete, and leaves it whole", (
     assert.ok(strip < once("const quarantine = quarantineOf("));
   });
 
-  it("THE WALL'S SET IS ASSIGNED ONCE PER TICK, BEFORE EITHER EARLY RETURN", () => {
-    const assign = once("heldUnreadNow = heldUnreadOf(unreadHeld, watchTokens);");
+  it("THE WALL'S SET IS ASSIGNED EVERY TICK, BEFORE EITHER EARLY RETURN — paper hands it none", () => {
+    const assign = CODE.search(
+      /heldUnreadNow = heldUnreadOf\(\s*paper \? \[\] : \[\.\.\.new Set\(\[\.\.\.unreadHeld, \.\.\.heldUnreadNow\.symbols\]\)\],\s*watchTokens,\s*\);/,
+    );
+    assert.ok(assign > 0, "the first assignment, before the early returns");
     assert.ok(assign < once("if (unreadBook.length) {"));
     assert.ok(assign < once("if (missingPrice.length) {"));
     assert.ok(assign > CODE.indexOf("const gaps = classifyBookGaps({"), "after the gaps are classified");
+  });
+
+  it("A COIN THAT READS AGAIN LEAVES THE SET ONLY ONCE ITS ROW IS REWRITTEN — never sized from the kept one", () => {
+    // Until setPositions, its positions row is the one from before the gap.
+    const narrow = once("heldUnreadNow = heldUnreadOf(unreadHeld, watchTokens);");
+    const write = CODE.indexOf("await setPositions(");
+    assert.ok(write > 0 && narrow > write, "narrowed only after setPositions");
+    assert.equal(CODE.indexOf("await setPositions(", write + 1), -1, "one setPositions in the tick");
   });
 
   it("EVERY INTENT IS JUDGED AGAINST IT — both AgentState builders carry it", () => {

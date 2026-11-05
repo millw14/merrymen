@@ -136,7 +136,7 @@ describe("entryBrake — the breaker first, else an unread holding", () => {
     const s = renderWhy(w);
     assert.match(s, /^nothing bought/);
     assert.match(s, /can't read the balance of one coin/);
-    assert.match(s, /Selling everything else is never blocked/);
+    assert.match(s, /Other sells are never refused by this; a rebalancing basket waits/);
     assert.ok(s.length < 220, `over the /why truncation point: ${s.length}`);
     assert.equal(publishesIdle(w), false, "account state, like the breaker");
   });

@@ -188,21 +188,36 @@ export function unreadHeldNotice(
   lastKey: string,
   unreadHeld: readonly string[],
   vaultCoins: ReadonlySet<string>,
+  /**
+   * What this tick's book holds, by symbol. A coin can leave the set without
+   * reading again: the owner stopped watching it (the remedy this notice
+   * gives), or it now reads as zero. "Back in the book" is only said of one
+   * that is.
+   */
+  heldNow: ReadonlySet<string>,
 ): { key: string; event: { level: "warn" | "ok"; text: string } | null } {
   const now = [...new Set(unreadHeld)].sort();
   const key = now.join(",");
   if (key === lastKey) return { key, event: null };
   if (now.length === 0) {
     const was = lastKey.split(",").filter((s) => s.length > 0);
-    return {
-      key,
-      event: {
-        level: "ok",
-        text:
-          `I can read ${names(was)} again — ${was.length === 1 ? "it is" : "they are"} back in the book and no ` +
-          `longer ${was.length === 1 ? "holds" : "hold"} back new buys.`,
-      },
-    };
+    const back = was.filter((s) => heldNow.has(s));
+    const gone = was.filter((s) => !heldNow.has(s));
+    const said: string[] = [];
+    if (back.length > 0) {
+      said.push(
+        `I can read ${names(back)} again — ${back.length === 1 ? "it is" : "they are"} back in the book and no ` +
+          `longer ${back.length === 1 ? "holds" : "hold"} back new buys.`,
+      );
+    }
+    if (gone.length > 0) {
+      const one = gone.length === 1;
+      said.push(
+        `${names(gone)} no longer ${one ? "holds" : "hold"} back new buys: ${one ? "it reads" : "they read"} as not ` +
+          `held now, or ${one ? "is" : "are"} no longer watched, so I stopped counting ${one ? "it" : "them"}.`,
+      );
+    }
+    return { key, event: { level: "ok", text: said.join(" ") } };
   }
   const one = now.length === 1;
   const it = one ? "it" : "them";
@@ -230,7 +245,8 @@ export function unreadHeldNotice(
       text:
         `couldn't read your ${names(now)} balance, and my books say you hold ${it} — so trading is exits-only ` +
         `until ${one ? "it reads" : "they read"}: nothing new is bought, while stop-losses, take-profits and sells ` +
-        `of everything else still go out. I won't sell ${names(now)} on a guessed size, and equity, P&L, the ` +
+        `of everything else still go out. Brain reviews and rebalancing trims wait for it too. I won't sell ` +
+        `${names(now)} on a guessed size, and equity, P&L, the ` +
         `high-water mark and the fee are paused. This is a data gap, not a loss. ` +
         remedies.join(" "),
     },

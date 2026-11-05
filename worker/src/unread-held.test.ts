@@ -151,9 +151,10 @@ describe("heldUnreadOf — what the wall is handed", () => {
 
 describe("unreadHeldNotice — once per change, with the remedy that applies", () => {
   const vault = new Set(["GATO"]);
+  const NONE = new Set<string>();
 
   it("the first sight warns, names the coin, says exits-only and that it is a data gap", () => {
-    const n = unreadHeldNotice("", ["DELTA"], vault);
+    const n = unreadHeldNotice("", ["DELTA"], vault, NONE);
     assert.equal(n.key, "DELTA");
     assert.equal(n.event?.level, "warn");
     const t = n.event?.text ?? "";
@@ -161,23 +162,25 @@ describe("unreadHeldNotice — once per change, with the remedy that applies", (
     assert.match(t, /exits-only/);
     assert.match(t, /nothing new is bought/);
     assert.match(t, /stop-losses, take-profits and sells of everything else still go out/);
+    // And what does wait, so "sells still go out" is not read as "everything still runs".
+    assert.match(t, /Brain reviews and rebalancing trims wait for it too/);
     assert.match(t, /data gap, not a loss/);
   });
 
   it("the same set again says nothing — not once per tick", () => {
-    assert.equal(unreadHeldNotice("DELTA", ["DELTA"], vault).event, null);
-    assert.equal(unreadHeldNotice("DELTA,GATO", ["GATO", "DELTA"], vault).event, null, "the key is sorted");
+    assert.equal(unreadHeldNotice("DELTA", ["DELTA"], vault, NONE).event, null);
+    assert.equal(unreadHeldNotice("DELTA,GATO", ["GATO", "DELTA"], vault, NONE).event, null, "the key is sorted");
   });
 
   it("A WALLET COIN is pointed at Settings, or unwatching it — and told what unwatching costs", () => {
-    const t = unreadHeldNotice("", ["DELTA"], vault).event?.text ?? "";
+    const t = unreadHeldNotice("", ["DELTA"], vault, NONE).event?.text ?? "";
     assert.match(t, /check DELTA's token address in Settings/);
     assert.match(t, /stop watching it/);
     assert.doesNotMatch(t, /contact support/);
   });
 
   it("A TRENCHER VAULT COIN cannot be unwatched, so it is told so, plainly, and to contact support", () => {
-    const t = unreadHeldNotice("", ["GATO"], vault).event?.text ?? "";
+    const t = unreadHeldNotice("", ["GATO"], vault, NONE).event?.text ?? "";
     assert.match(t, /Trencher vault's own token list/);
     assert.match(t, /cannot be unwatched/);
     assert.match(t, /failing on-chain/);
@@ -186,7 +189,7 @@ describe("unreadHeldNotice — once per change, with the remedy that applies", (
   });
 
   it("both kinds at once carry both remedies, and the set names every coin", () => {
-    const n = unreadHeldNotice("GATO", ["GATO", "DELTA"], vault);
+    const n = unreadHeldNotice("GATO", ["GATO", "DELTA"], vault, NONE);
     assert.equal(n.key, "DELTA,GATO");
     assert.equal(n.event?.level, "warn");
     const t = n.event?.text ?? "";
@@ -196,12 +199,24 @@ describe("unreadHeldNotice — once per change, with the remedy that applies", (
   });
 
   it("ONE ok WHEN IT EMPTIES, naming what reads again — and claiming nothing about anything else", () => {
-    const n = unreadHeldNotice("DELTA,GATO", [], vault);
+    const n = unreadHeldNotice("DELTA,GATO", [], vault, new Set(["DELTA", "GATO"]));
     assert.equal(n.key, "");
     assert.equal(n.event?.level, "ok");
     assert.match(n.event?.text ?? "", /I can read DELTA and GATO again/);
     assert.doesNotMatch(n.event?.text ?? "", /breaker/, "an unread venue or an unknown cost may still hold the book");
-    assert.equal(unreadHeldNotice("", [], vault).event, null, "and nothing when there was nothing");
+    assert.equal(unreadHeldNotice("", [], vault, NONE).event, null, "and nothing when there was nothing");
+  });
+
+  it("A COIN THAT LEFT WITHOUT READING AGAIN IS NOT CALLED 'BACK IN THE BOOK' — unwatched, or now read as zero", () => {
+    const gone = unreadHeldNotice("DELTA", [], vault, NONE);
+    assert.equal(gone.event?.level, "ok");
+    const t = gone.event?.text ?? "";
+    assert.doesNotMatch(t, /back in the book|I can read/);
+    assert.match(t, /DELTA no longer holds back new buys: it reads as not held now, or is no longer watched, so I stopped counting it\./);
+    // One of each: each is told its own truth.
+    const both = unreadHeldNotice("DELTA,GATO", [], vault, new Set(["GATO"])).event?.text ?? "";
+    assert.match(both, /I can read GATO again — it is back in the book/);
+    assert.match(both, /DELTA no longer holds back new buys/);
   });
 });
 

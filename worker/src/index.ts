@@ -12682,7 +12682,16 @@ async function main() {
     // WHAT THE WALL JUDGES EVERY INTENT AGAINST until the next tick says
     // otherwise — the app's, Telegram's and the Brain's too. Once, here, before
     // either early return; paper has none (policy.ts holding-unread).
-    heldUnreadNow = heldUnreadOf(unreadHeld, watchTokens);
+    //
+    // A COIN THAT READS AGAIN STAYS IN IT UNTIL ITS ROW IS REWRITTEN. Its
+    // positions row is the one kept from before the gap until setPositions
+    // below, and an app or Telegram sale in between would be sized from that
+    // (order-gate.ts unreadHoldingOrder). The set is narrowed to this tick's
+    // just after setPositions.
+    heldUnreadNow = heldUnreadOf(
+      paper ? [] : [...new Set([...unreadHeld, ...heldUnreadNow.symbols])],
+      watchTokens,
+    );
 
     // The chain didn't answer. Every zero below would be a placeholder, and
     // booking one writes a phantom crater into the equity curve that becomes
@@ -12932,6 +12941,7 @@ async function main() {
         unreadHeldNoted,
         unreadHeld,
         new Set(watchTokens.filter((t) => vaultSet.has(t.address.toLowerCase())).map((t) => t.symbol)),
+        new Set([...positions.map((p) => p.symbol), ...unpricedByDesign, ...missingPrice]),
       );
       unreadHeldNoted = notice.key;
       if (notice.event) {
@@ -13582,6 +13592,8 @@ async function main() {
     // What this live book held, for the next tick's unread-held evidence
     // (unread-held.ts unreadHeldOf). The unread coins stay in it: still held.
     if (!paper) lastLiveHeld = new Set([...positions.map((p) => p.symbol), ...unpricedByDesign, ...unreadHeld]);
+    // Every row is this tick's now, so a coin that read again leaves the set.
+    heldUnreadNow = heldUnreadOf(unreadHeld, watchTokens);
 
     // ── SHADOW BRAIN ─────────────────────────────────────────────────────
     //
