@@ -47,6 +47,7 @@ import {
 import { CALM_BASES, CALM_SHOTS, CALM_STAND_IN, CLIPS, FIDGETS, FIDGETY_BASES, clipOf, type Clip, type Fx } from "./clips";
 import { DEFAULT_OUTFIT, outfitKey, type Outfit } from "./outfit";
 import { blendPose, copyPose, restPose, smooth, type Pose } from "./pose";
+import { buildIsland } from "./island";
 import { applyPose, buildRig, createKit, glyphTexture, type Kit, type Rig } from "./rig";
 
 export type Framing = "full" | "portrait" | "wide";
@@ -135,40 +136,11 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
   const disposables: { dispose(): void }[] = [];
   const track = <T extends { dispose(): void }>(d: T) => (disposables.push(d), d);
 
-  // ── the island ──
-  const island = new Group();
-  scene.add(island);
+  // ── the island (island.ts) ──
   const groundOn = opts.ground !== false;
-  island.visible = groundOn;
-  const top = new Mesh(track(new CylinderGeometry(1.05, 0.95, 0.12, 40)), kit.toon("#3f8f4a"));
-  top.position.y = -0.06;
-  island.add(top);
-  const dirt = new Mesh(track(new CylinderGeometry(0.95, 0.55, 0.38, 40)), kit.toon("#5a3a22"));
-  dirt.position.y = -0.31;
-  island.add(dirt);
-  const rock = new Mesh(track(new ConeGeometry(0.5, 0.5, 9)), kit.toon("#4a3020"));
-  rock.position.y = -0.72;
-  rock.rotation.x = Math.PI;
-  island.add(rock);
-  for (let i = 0; i < 22; i++) {
-    const a = i * 2.39996;
-    const r = 0.35 + ((i * 37) % 60) / 100;
-    if (r > 1) continue;
-    const tuft = new Mesh(track(new ConeGeometry(0.03, 0.09 + (i % 3) * 0.03, 4)), kit.toon(i % 4 ? "#56b25c" : "#7ccf6a"));
-    tuft.position.set(Math.cos(a) * r, 0.03, Math.sin(a) * r);
-    island.add(tuft);
-  }
-  for (const [x, z, s, hex] of [[-0.7, 0.35, 1, "#e0473a"], [0.78, -0.3, 0.8, "#ffcc33"], [-0.45, -0.62, 0.7, "#e0473a"]] as const) {
-    const m = new Group();
-    m.position.set(x, 0, z);
-    m.scale.setScalar(s);
-    const stem = new Mesh(track(new CylinderGeometry(0.025, 0.03, 0.09, 8)), kit.toon("#f2ead8"));
-    stem.position.y = 0.045;
-    const cap = new Mesh(track(new SphereGeometry(0.07, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2)), kit.toon(hex));
-    cap.position.y = 0.085;
-    m.add(stem, cap);
-    island.add(m);
-  }
+  const island = track(buildIsland(kit));
+  island.group.visible = groundOn;
+  scene.add(island.group);
   // blob shadow
   const shadowTex = glyphTexture("glow", "rgba(0,0,0,0.55)", 128);
   if (shadowTex) track(shadowTex);
@@ -679,6 +651,7 @@ export function createStage(host: HTMLElement, opts: StageOptions = {}): Stage {
     }
 
     applyPose(rig, pose, clock, yaw, reacting);
+    if (groundOn) island.update(clock);
     const s = Math.max(0.45, 1 - pose.rootY * 0.9);
     shadow.scale.set(s, s, s);
     shadow.position.x = pose.rootX;
