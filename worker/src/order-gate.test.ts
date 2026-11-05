@@ -24,6 +24,7 @@ import {
   orderRoute,
   placeOrder,
   tickReads,
+  unreadHoldingOrder,
   walletOrderRefusal,
   type OrderReads,
   type OrderRoute,
@@ -77,6 +78,18 @@ describe("an order is never placed on numbers this tick could not read", () => {
     // false)`, so the buy would go out with the loss limit switched off.
     await refused(BUY, { equityKnown: false }, /I did not place it[\s\S]*the drawdown limit can't judge a buy/);
     await refused(BUY, { equityKnown: false }, /Selling still works/);
+  });
+
+  it("AND THE SENTENCE IS TRUE FOR EVERY CAUSE — an unread balance or venue, not only a missing cost", async () => {
+    // equityKnown is false for a holding with no price and no cost, an unread
+    // Lighter venue, and a held coin whose balance did not read. The old words
+    // ("no price and no cost on record") were false for the last two.
+    await refused(BUY, { equityKnown: false }, /something you hold could not be read or valued this tick/);
+    const { reply } = await place(BUY, { equityKnown: false });
+    assert.doesNotMatch(reply.line, /no price and no cost on record/);
+    const sell = await place(SELL, { equityKnown: false });
+    assert.equal(sell.reply.ok, true, "a sell still goes");
+    assert.equal(sell.sent.length, 1);
   });
 
   it("BUT A SELL STILL GOES THROUGH — exits are exempt from the breaker, and the owner can always get out", async () => {
@@ -519,5 +532,32 @@ describe("a tick that fails states that it failed", () => {
       book.composed(80_000_000n, true);
     });
     assert.deepEqual(book.judge("buy"), { ok: true, equityUsdg: 80_000_000n, equityKnown: true });
+  });
+});
+
+/**
+ * A SALE OF A COIN WHOSE BALANCE DID NOT READ IS REFUSED BY NAME.
+ *
+ * Its positions row is the last good read — kept, so the dashboard does not
+ * call it gone — and a sell sized from that row turns an unknown balance into
+ * a guessed one. submitChatTrade asks this before it reads the row, for the
+ * app, the MCP and Telegram alike; the wall refuses the same sale behind it.
+ */
+describe("unreadHoldingOrder — the unread coin cannot be sized", () => {
+  it("A SELL OF THE UNREAD COIN IS REFUSED, NAMING IT, whatever the order's case", () => {
+    const line = unreadHoldingOrder("sell", "GATO", ["GATO"]);
+    assert.equal(line, "I can't read how much GATO you hold right now, so I can't size this. Selling other coins still works.");
+    assert.equal(unreadHoldingOrder("sell", "gato", ["GATO"]), line, "an order may arrive lower-cased");
+    assert.match(unreadHoldingOrder("sell", "GATO", ["gato"]) ?? "", /how much gato you hold/, "and named as the watch set spells it");
+  });
+
+  it("a sell of any other coin goes on", () => {
+    assert.equal(unreadHoldingOrder("sell", "TSLA", ["GATO"]), null);
+    assert.equal(unreadHoldingOrder("sell", "GATO", []), null);
+  });
+
+  it("a buy is not answered here — every buy is refused while a holding is unread, and untotalledBuy says why", () => {
+    assert.equal(unreadHoldingOrder("buy", "GATO", ["GATO"]), null);
+    assert.equal(unreadHoldingOrder("buy", "TSLA", ["GATO"]), null);
   });
 });

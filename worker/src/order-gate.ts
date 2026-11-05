@@ -41,9 +41,12 @@ export interface TickReads {
   /** A balance could not be read, or a holding could not be priced, this tick. */
   bookUnreadable: boolean;
   /**
-   * Whether the book could be totalled. False while something held has neither
-   * a price nor a cost on record — the tick then skips equity, and checkPolicy
-   * skips the drawdown breaker for every intent it judges.
+   * Whether the book could be totalled. False while something held cannot be
+   * counted in it — a holding with neither a price nor a cost on record, an
+   * unread Lighter venue, or a held coin whose balance did not read — the tick
+   * then skips equity, and checkPolicy skips the drawdown breaker for every
+   * intent it judges (its stand-ins, perp-unpriced and holding-unread, refuse
+   * every non-exit instead).
    */
   equityKnown: boolean;
 }
@@ -108,13 +111,41 @@ function unreadRefusal(reads: TickReads): string | null {
  * would go out with the loss limit switched off. A sell is an exit, which the
  * breaker exempts anyway, and refusing it would lock the owner into the very
  * holding that makes the book untotallable. Null when the order may go on.
+ *
+ * ONE SENTENCE FOR EVERY CAUSE, and true of each: a holding with no price and
+ * no cost on record, an unread venue, and a held coin whose balance did not
+ * read. It said "no price and no cost on record", which was false for the
+ * other two.
  */
 function untotalledBuy(side: Side, equityKnown: boolean): string | null {
   if (side !== "buy" || equityKnown) return null;
   return (
-    "I did not place it: something you hold has no price and no cost on record, so I cannot total your " +
+    "I did not place it: something you hold could not be read or valued this tick, so I cannot total your " +
     "book, and without that the drawdown limit can't judge a buy. Selling still works."
   );
+}
+
+/**
+ * A SALE OF A COIN WHOSE BALANCE DID NOT READ CANNOT BE SIZED, so it is
+ * refused by name. Null for every other order.
+ *
+ * The coin's `positions` row is its last good read — setPositions keeps it
+ * while the balance is unread — and a sell sized from it would turn an unknown
+ * balance into a guessed one. A sell that reverts also suppresses the pair for
+ * the rest of the arm, which would block the right sell once the balance reads
+ * again. The wall refuses the same sale (policy.ts holding-unread); this says
+ * so to the owner before anything is read or built. Case-insensitive: an order
+ * may arrive upper-cased.
+ *
+ * A BUY is not answered here. Every buy is refused while a holding is unread,
+ * whichever coin it names, and untotalledBuy and the wall already say why.
+ */
+export function unreadHoldingOrder(side: Side, symbol: string, unreadSymbols: readonly string[]): string | null {
+  if (side !== "sell") return null;
+  const want = symbol.trim().toUpperCase();
+  const hit = unreadSymbols.find((s) => s.toUpperCase() === want);
+  if (hit === undefined) return null;
+  return `I can't read how much ${hit} you hold right now, so I can't size this. Selling other coins still works.`;
 }
 
 /** The book as the latest tick left it: what it read, and the last equity it composed. */
