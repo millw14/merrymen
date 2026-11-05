@@ -113,26 +113,45 @@ export async function verifyNativeModules(installedRoot) {
 }
 
 /**
- * ONE TIME-BOXED EXCEPTION, for one advisory in five packages, in force
+ * ONE TIME-BOXED EXCEPTION, for one advisory in four packages, in force
  * through `lastDay` (UTC) and never after.
  *
  * GHSA-mrhx-c7xc-m3w5 (zod < 4.6.6, high: memory exhaustion while validating
  * oversized constrained collections) was widened on 2026-10-23 to every zod 3
- * release, and no zod 3 release is patched. Five wallet and payment SDKs pin
- * zod 3 in their latest releases, so no upgrade removes these copies: Coinbase
- * CDP, Privy (api-base), Reown (appkit-wallet), wagmi (connectors) and x402.
- * Merrymen's own zod is patched.
+ * release, and no zod 3 release is patched (3.25.76 is the last). Merrymen's
+ * own zod is patched. Every excused copy reaches the install through
+ * @privy-io/react-auth (bundled, see pack-runtime.mjs). Merrymen imports none
+ * of these four packages.
+ *
+ * 2026-11-04: extended from 2026-11-08 to 2026-11-22, with no new package or
+ * version. Privy left the list: react-auth 3.51.1 pins @privy-io/api-base
+ * 2.0.0, which has no zod. The other four still have zod 3 in their latest
+ * releases or cannot move. Each one leaves the list when one of these ships:
+ * - x402: Privy pins ^0.7.1. Needs an x402 0.7.x on zod 4, or a react-auth
+ *   that leaves x402 0.7 (x402 1.2.0 is still zod ^3.24.2).
+ * - @reown/appkit-wallet: 1.8.24 and the 2.0 canary both pin zod 3.22.4.
+ *   Needs a release on zod 4 that WalletConnect's ethereum-provider and
+ *   react-auth then pin. react-auth pins provider 2.22.4, which pins
+ *   appkit 1.8.9, which pins appkit-wallet 1.8.9.
+ * - @wagmi/connectors: 6.2.0 has no zod of its own. This copy is the hoisted
+ *   zod of its nested appkit-wallet 1.7.8. x402 0.7.3 needs wagmi ^2.15.6.
+ *   wagmi 2.19.5, the last 2.x, pins connectors 6.2.0 exactly. Connectors 8.x
+ *   needs @wagmi/core 3, so it cannot move until x402 or Privy leaves wagmi 2.
+ *   It also leaves the list once appkit-wallet does.
+ * - @coinbase/cdp-sdk: 1.60.0 is still zod ^3.25.76. It comes in through
+ *   @base-org/account 2.4.0 under connectors 6.2.0 (range ^1.0.0). Needs a
+ *   cdp-sdk 1.x on zod 4, or connectors leaving wagmi 2.
  *
  * Excused: the zod finding, when that advisory is all it reports and every
- * flagged copy is a zod 3 whose direct parent is one of the five; then any
+ * flagged copy is a zod 3 whose direct parent is one of the four; then any
  * package flagged only because it depends on something excused. Anything else
- * fails as before: another advisory, a zod copy anywhere else, a zod 4 copy,
- * or any day after `lastDay`.
+ * fails as before: another advisory, a zod copy anywhere else (including
+ * @privy-io/api-base again), a zod 4 copy, or any day after `lastDay`.
  */
 export const ZOD3_EXCEPTION = Object.freeze({
   advisory: "GHSA-mrhx-c7xc-m3w5",
-  lastDay: "2026-11-08",
-  parents: Object.freeze(["@coinbase/cdp-sdk", "@privy-io/api-base", "@reown/appkit-wallet", "@wagmi/connectors", "x402"]),
+  lastDay: "2026-11-22",
+  parents: Object.freeze(["@coinbase/cdp-sdk", "@reown/appkit-wallet", "@wagmi/connectors", "x402"]),
 });
 
 /** The package directly above a node: `…/node_modules/@a/b/node_modules/zod` → `@a/b`. */

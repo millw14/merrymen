@@ -94,5 +94,5 @@ test("logging failure cannot fail a read and a stage cannot finish twice", async
   finish("error");
   assert.equal(logs, 2);
   assert.equal(clock.pending(), 0);
-  assert.equal(await timing.measure("holds", async () => { clock.advance(1000); return 7; }), 7);
+  assert.equal(await timing.measure("lifecycle", async () => { clock.advance(1000); return 7; }), 7);
 });

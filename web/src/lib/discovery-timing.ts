@@ -1,5 +1,5 @@
 /** Server-only diagnostics for the public directory; never carries request or row data. */
-export type DiscoveryStage = "read-db" | "identities" | "heartbeat" | "registrations" | "perps-wallets" | "lifecycle" | "holds";
+export type DiscoveryStage = "read-db" | "identities" | "heartbeat" | "registrations" | "perps-wallets" | "lifecycle";
 type Outcome = "ok" | "error";
 export interface DiscoveryTimingEvent {
   stage: DiscoveryStage;

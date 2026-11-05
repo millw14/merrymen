@@ -163,29 +163,27 @@ test("a malformed performance field stays unavailable rather than coercing empty
   assert.doesNotMatch(doc.body.textContent!, /99\.0%|0\.0%|\$0\.00/);
 });
 
-test("a row the recovery hold kept says Not running, keeps when it was last valued in its title, and nothing about expiry", async () => {
+test("a row silent since the recovery hold is stamped by nothing but its own facts: when it was last valued, and nothing about expiry", async () => {
+  // A named agent with a good key, quiet since 10-04: the board keeps it, as
+  // it keeps any quiet worker, and no calendar rule stamps it. A flag an
+  // older server still sends is not read, so it cannot stamp the row either.
   const { agents } = await read([
-    row("Held", { mode: "idle", notRunning: true, performance: performance({ publicBook: false, equityAt: 1_791_083_000 }) }),
-    row("Unvalued", { mode: "idle", notRunning: true, performance: undefined, pnlBps: null }),
+    row("Quiet", { mode: "paper", performance: performance({ book: "paper", publicBook: false, equityAt: 1_791_083_000 }) }),
+    row("Flagged", { mode: "idle", notRunning: true, performance: performance({ equityAt: 1_791_083_000 }) }),
+    row("Unvalued", { mode: "paper", notRunning: true, performance: undefined, pnlBps: null }),
     row("Running"),
-    // An older server sends no flag, and absent is not "not running".
-    row("Older"),
   ]);
   for (const preview of [false, true]) {
     const doc = board(agents, preview);
     const rows = [...doc.querySelectorAll(".rank")];
-    const held = rows.find(r => r.textContent!.includes("Held"))!;
-    assert.ok([...held.querySelectorAll(".tag")].some(t => t.textContent === "Not running"));
-    assert.doesNotMatch(held.textContent!, /Last valued/, "the board carries no as-of line");
-    assert.match(held.querySelector(".rank-value")!.getAttribute("title")!, /^Not running\. .*Valued \S/);
-    assert.equal(held.querySelector(".rank-have")!.textContent, "Private", "a private book stays private");
-    const unvalued = rows.find(r => r.textContent!.includes("Unvalued"))!;
-    assert.ok([...unvalued.querySelectorAll(".tag")].some(t => t.textContent === "Not running"));
-    assert.doesNotMatch(unvalued.textContent!, /Last valued/, "no time is invented for an unvalued book");
-    for (const name of ["Running", "Older"]) {
-      const other = rows.find(r => r.textContent!.includes(name))!;
-      assert.doesNotMatch(other.textContent!, /Not running|Last valued/, name);
-    }
+    for (const r of rows) assert.doesNotMatch(r.textContent!, /Not running|Last valued/);
+    const quiet = rows.find(r => r.textContent!.includes("Quiet"))!;
+    assert.match(quiet.querySelector(".rank-value")!.getAttribute("title")!, /^Paper portfolio\. Valued \S/, "when it was last measured stays on the row");
+    assert.equal(quiet.querySelector(".rank-have")!.textContent, "Private", "a private book stays private");
+    // An idle row the board lists is said to be inactive, as it was before the hold.
+    const flagged = rows.find(r => r.textContent!.includes("Flagged"))!;
+    assert.ok([...flagged.querySelectorAll(".tag")].some(t => t.textContent === "Inactive"));
+    assert.doesNotMatch(rows.find(r => r.textContent!.includes("Unvalued"))!.querySelector(".rank-value")!.getAttribute("title")!, /Valued \S/, "no time is invented for an unvalued book");
     assert.doesNotMatch(doc.body.textContent!, /expire|re-?sign|renew/i);
   }
 });
