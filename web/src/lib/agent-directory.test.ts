@@ -48,10 +48,10 @@ test("164-account directory has the ranking's lifecycle selection without financ
     assert.equal(directory.fetchedAt, NOW * 1000);
     assert.ok(directory.agents.every(r => r.landed === null && r.pnlBps === null && r.unrankedWhy === "not-read"));
     assert.ok(fast.queries.every(sql => !/\b(?:trades|equity|flows|tenant_settings)\b/i.test(sql)), "no financial query can delay identity discovery");
-    // Six: the four selection reads, and the catalogue's answer that no Perps
+    // Five: the three selection reads, and the catalogue's answer that no Perps
     // wallets record exists yet (perps-wallets.ts; two statements on sqlite,
     // one on Postgres), so the record itself is never read.
-    assert.equal(fast.queries.length, 6, "selection cost stays fixed as the fleet grows");
+    assert.equal(fast.queries.length, 5, "selection cost stays fixed as the fleet grows");
     assert.doesNotMatch(JSON.stringify(directory), /smart_account|owner_address|session_key|caps|equityUsdg|pnlUsdg|performance/);
 
     const slow = observed(f.db);
@@ -62,6 +62,8 @@ test("164-account directory has the ranking's lifecycle selection without financ
     assert.deepEqual(new Set(directory.agents.map(r => r.slug)), new Set(ranking.agents.map(r => r.slug)));
     assert.equal(directory.retired, ranking.retired);
     assert.ok(slow.queries.length > fast.queries.length);
+    // The recovery report is the owner's: no public board read touches it.
+    for (const sql of [...fast.queries, ...slow.queries]) assert.doesNotMatch(sql, /fleet_recovery_health/i);
     assert.equal(settingsReads, 164);
     t.diagnostic(`164-account fixture: directory ${duration.toFixed(2)}ms / ${fast.queries.length} ledger queries; full board ${fullDuration.toFixed(2)}ms / ${slow.queries.length} ledger queries + ${settingsReads} settings reads. Local SQLite timings are not production latency.`);
   } finally { f.raw.close(); }
@@ -118,13 +120,10 @@ test("directory diagnostics stop acquisition at callback entry and wrap only the
     assert.equal(directory.agents.length, 1);
     assert.equal(directory.source, "sqlite");
     assert.equal(directory.retired, 0);
-    // This ledger fixture lacks the optional recovery table. Its read still
-    // gets an error outcome, while the existing no-hold fallback keeps rows.
     assert.deepEqual(events, [
       // perps-wallets: the Perps wallets the board leaves out (rule 17), read with the board.
       ...["read-db", "identities", "heartbeat", "registrations", "perps-wallets", "lifecycle"]
         .flatMap(stage => [`start:${stage}`, `ok:${stage}`]),
-      "start:holds", "error:holds",
     ]);
   } finally { f.raw.close(); }
 });

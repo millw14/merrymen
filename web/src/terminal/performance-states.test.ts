@@ -261,10 +261,10 @@ test("a stale valuation says when it was taken off the board; the board itself s
   assert.ok(sidebar(agents).querySelector(".performance-asof"), "the sidebar says it too");
   assert.match((await searchRows(agents, "old"))[0]!, /as of \S/);
   assert.match((await profilePage(agents[0]!)).text, /as of \S/);
-  // A row the recovery hold kept: the board stays clean, the other surfaces say when.
-  const { agents: kept } = await read([row("Kept", { mode: "idle", notRunning: true, performance: performance({ equityAt: stale, pnlAt: stale }) })]);
+  // A quiet row the board keeps: the board stays clean, the other surfaces say when.
+  const { agents: kept } = await read([row("Kept", { mode: "paper", performance: performance({ equityAt: stale, pnlAt: stale }) })]);
   const keptRow = board(kept).querySelector(".rank")!;
-  assert.doesNotMatch(keptRow.textContent!, /Last valued/);
+  assert.doesNotMatch(keptRow.textContent!, /Last valued|Not running/);
   assert.equal(keptRow.querySelector(".performance-asof"), null);
   assert.ok(sidebar(kept).querySelector(".performance-asof"));
   // Fresh: nothing about time is added.
