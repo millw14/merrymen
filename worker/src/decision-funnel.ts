@@ -186,6 +186,9 @@ const RULE_STAGE: Readonly<Record<string, FunnelStage>> = {
   "nonce-changed": "SUBMISSION_FAILED",
   // Sent, and its fate not yet read back.
   "receipt-unresolved": "SETTLEMENT_PENDING",
+  // UNREAD IS NOT SPENT, like autonomous-budget-unread: a held coin's balance
+  // did not read, so nothing new is opened until it does (policy.ts).
+  "holding-unread": "RESEARCH_INCOMPLETE",
   // PERPETUALS (policy.ts's perp branch, exec-mode.ts perpsModeOf, perps/
   // lane.ts). A perp refusal never writes a `trades` row, so the tick's funnel
   // does not hear one today; mapped so the table stays the whole vocabulary.
