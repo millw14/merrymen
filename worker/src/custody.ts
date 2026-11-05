@@ -166,6 +166,20 @@ export function strandedBasisSymbols(args: {
    * assumed — the same shape, and the same reasoning, as `classReadOk` above.
    */
   watched?: readonly string[];
+  /**
+   * Symbols we ASKED about whose balance did not come back (positions.ts
+   * `unreadBalances`, account and vault reads together).
+   *
+   * Asked is not answered. `watched` says the tick looked; this says the look
+   * failed, and a failed look is no more evidence that a position is gone than
+   * not looking was. Only a balance that came back zero may close a basis.
+   * Shogun's GATO basis was closed off a single rate-limited balance row while
+   * its vault held every unit (2026-11-04 08:36 UTC).
+   *
+   * Omitted means "every balance read answered", which is what every caller
+   * before this field could see.
+   */
+  unread?: readonly string[];
 }): string[] {
   if (args.classReadOk === false) return [];
   const heldNow = new Set([
@@ -175,9 +189,41 @@ export function strandedBasisSymbols(args: {
     ...args.classHeld,
   ]);
   const looked = args.watched === undefined ? null : new Set(args.watched);
+  const unread = new Set(args.unread ?? []);
   return args.basisSymbols.filter(
-    // Not held AND we actually asked about it. Absent from a set that was never
-    // populated for this symbol is not evidence of anything.
-    (symbol) => !heldNow.has(symbol) && (looked === null || looked.has(symbol)),
+    // Not held AND we actually asked about it AND it answered. Absent from a set
+    // that was never populated for this symbol is not evidence of anything.
+    (symbol) => !heldNow.has(symbol) && (looked === null || looked.has(symbol)) && !unread.has(symbol),
   );
+}
+
+/**
+ * WHICH UNREAD BALANCES THE BOOKS SAY WE HOLD — the ones that hold the tick.
+ *
+ * A token whose balance did not come back is unknown, not flat. When the books
+ * carry an open position in it (a `cost_basis` quantity above zero), the book
+ * this tick would compose is missing a holding we know about: equity would read
+ * low against a peak that only ratchets, and the drawdown breaker would judge
+ * the gap. So these go to `bookGaps` and the tick holds, exactly as an unread
+ * cash balance does.
+ *
+ * WHY NOT EVERY UNREAD TOKEN. Some never answer: a mainnet token address on a
+ * testnet grant has no code there and fails on every tick. Holding the whole
+ * book on those would freeze it for good. A token with no open basis keeps
+ * today's behaviour (the tick goes on without it), and `strandedBasisSymbols`
+ * still refuses to close anything on its account.
+ *
+ * A lookup that throws counts as on record. Holding a tick costs a tick;
+ * guessing wrong here books a phantom drawdown.
+ */
+export async function unreadHeldOnRecord(
+  unread: readonly string[],
+  openQtyOf: (symbol: string) => Promise<bigint>,
+): Promise<string[]> {
+  const held: string[] = [];
+  for (const symbol of new Set(unread)) {
+    const qty = await openQtyOf(symbol).catch(() => null);
+    if (qty === null || qty > 0n) held.push(symbol);
+  }
+  return held;
 }

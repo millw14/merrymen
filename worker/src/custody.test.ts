@@ -15,6 +15,7 @@ import {
   exitTargetFor,
   provenanceCurves,
   strandedBasisSymbols,
+  unreadHeldOnRecord,
   type Custody,
 } from "./custody";
 
@@ -215,7 +216,9 @@ describe("the tick uses the custody seam", () => {
   it("the custody read's failure reaches bookGaps, which is the gate that holds", () => {
     // Reported any later and the tick publishes an equity figure missing a real
     // holding, then runs a destructive sweep against a book it could not see.
-    assert.match(CODE, /unreadBalances: \[\.\.\.bal\.unread, \.\.\.classRead\.unread\]/);
+    // The third term is the unread balances the books say we hold — see
+    // "a failed balance row is not a zero" below.
+    assert.match(CODE, /unreadBalances: \[\.\.\.bal\.unread, \.\.\.classRead\.unread, \.\.\.positionsUnreadOnRecord\]/);
   });
 
   it("provenance is unioned at BOTH limitsFromGrant call sites", () => {
@@ -277,5 +280,82 @@ describe("the watch set is not evidence that a position is gone", () => {
     // The guarantee is only real if the live caller supplies the set; a default
     // that silently restores the old behaviour is the bug again.
     assert.match(SRC, /watched: watchTokens\.map\(\(t\) => t\.symbol\)/);
+  });
+});
+
+/**
+ * A FAILED BALANCE ROW IS NOT A ZERO.
+ *
+ * Live, 2026-11-04 08:36 UTC: one tick's reads hit a public-RPC 429. viem's
+ * multicall turned it into failure rows instead of throwing, readPositions
+ * skipped them like zeros with `readFailed: false`, and the sweep closed the
+ * cost basis of Shogun's GATO while the vault held every unit. Every tick since
+ * has read "unpriced AND no cost on record", which skips the Brain review.
+ *
+ * `watched` (above) says the tick looked. `unread` says the look failed.
+ */
+describe("a failed balance row is not a zero", () => {
+  const book = {
+    basisSymbols: ["GATO"],
+    positions: [] as string[],
+    unpricedByDesign: [] as string[],
+    missingPrice: [] as string[],
+    classHeld: [] as string[],
+    watched: ["GATO", "AAPL"],
+  };
+
+  it("THE BUG: an unread token reads like a flat one without `unread`", () => {
+    assert.deepEqual(strandedBasisSymbols(book), ["GATO"]);
+  });
+
+  it("THE FIX: an unread token's basis is never closed", () => {
+    assert.deepEqual(strandedBasisSymbols({ ...book, unread: ["GATO"] }), []);
+  });
+
+  it("but a token that answered zero still closes, beside one that did not answer", () => {
+    assert.deepEqual(
+      strandedBasisSymbols({ ...book, basisSymbols: ["GATO", "SOLD"], watched: ["GATO", "SOLD"], unread: ["GATO"] }),
+      ["SOLD"],
+    );
+  });
+
+  it("an unread token with an open basis holds the tick; one with none does not", async () => {
+    const open = new Map([["GATO", 2_842n * 10n ** 18n]]);
+    const qtyOf = async (s: string) => open.get(s) ?? 0n;
+    // TESTNET is the "none" case: a mainnet token address has no code there and
+    // fails on every tick. Holding on it would freeze the book for good.
+    assert.deepEqual(await unreadHeldOnRecord(["GATO", "TESTNET"], qtyOf), ["GATO"]);
+  });
+
+  it("a basis lookup that throws counts as on record, so the tick holds rather than guesses", async () => {
+    const qtyOf = async () => {
+      throw new Error("database is locked");
+    };
+    assert.deepEqual(await unreadHeldOnRecord(["GATO"], qtyOf), ["GATO"]);
+  });
+
+  it("each symbol is asked once, however many reads missed it", async () => {
+    const asked: string[] = [];
+    const qtyOf = async (s: string) => {
+      asked.push(s);
+      return 1n;
+    };
+    assert.deepEqual(await unreadHeldOnRecord(["GATO", "GATO"], qtyOf), ["GATO"]);
+    assert.deepEqual(asked, ["GATO"]);
+  });
+
+  it("AND THE TICK WIRES BOTH HALVES: the vault read joins, the sweep is told, the gate holds", () => {
+    const SRC = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    // The vault's own read joins the account's, so a 429 on the Trencher vault
+    // (where Shogun's GATO sat) is not lost.
+    assert.match(SRC, /posRead\.unreadBalances\.push\(\.\.\.custodyRead\.unreadBalances\)/);
+    assert.match(SRC, /unreadPositions = \[\.\.\.new Set\(posRead\.unreadBalances\)\]/);
+    // The sweep is handed the unread set — a default would be the bug again.
+    assert.match(SRC, /unread: unreadPositions,/);
+    // The gate asks the LIVE book for an open quantity.
+    assert.match(
+      SRC,
+      /unreadHeldOnRecord\(unreadPositions, async \(symbol\) => \(await getBasis\(agentId, "live", symbol\)\)\.qtyRaw\)/,
+    );
   });
 });
