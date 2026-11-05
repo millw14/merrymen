@@ -111,6 +111,19 @@
   line-height: 1.45;
 }
 
+/* ── the way back in, for an owner who is signed out ── */
+.terminal-host .mm-signin {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.terminal-host .mm-signin > p {
+  margin: 0 0 10px;
+  color: var(--tx-2);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
 /* ── the big friendly buttons ── */
 .terminal-host .mm-actions {
   display: flex;

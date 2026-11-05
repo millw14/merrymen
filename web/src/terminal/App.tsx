@@ -1,7 +1,7 @@
 "use client";
 import { performanceFromWire } from "./agent-performance";
 import { usePathname, useSearchParams } from "next/navigation";
-import { AccountEntry, FundingPanel, LimitsPanel, requestJson, type AccountState } from "./HostedControls";
+import { AccountEntry, FundingPanel, LimitsPanel, SignIn, requestJson, type AccountState } from "./HostedControls";
 import { SignOut } from "./SignOut";
 import {
   loadTokenQuotes,
@@ -708,6 +708,10 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             onResign={() => {window.location.href=resignHref;}}
             phase={account === null ? (accountFailed ? "failed" : "loading") : account.session.hosted && !account.session.address ? "signed-out" : account.status.exists ? (portfolioRead === "unreadable" ? "failed" : "loading") : "no-agent"}
             hasAgent={account?.status.exists === true}
+            // The phone's only sign-in on Home: the account card that used to
+            // carry it is hidden here for anybody without an agent (see the
+            // AccountEntry condition above), and the desktop aside has its own.
+            signIn={!desktop && account?.session.hosted && !account.session.address ? <SignIn onDone={invalidateOwnerView}/> : undefined}
           />
         )}
         {exploreView && <ExploreNav active={exploreView} />}
