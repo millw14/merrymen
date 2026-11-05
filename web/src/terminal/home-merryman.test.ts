@@ -36,3 +36,17 @@ it("a newcomer is invited, and the invitation goes to create", async () => {
   await ui.click("Create your merryman");
   assert.equal(created, 1);
 });
+
+it("a signed-out visitor gets the way back in, and a signed-in newcomer does not", async () => {
+  const { Home } = await import("./screens/Home");
+  const signIn = createElement("button", { type: "button" }, "Continue with email");
+  await ui.render(createElement(Home, { ...props, mine: null, hasAgent: false, phase: "signed-out", signIn } as never));
+  const signedOut = ui.container.textContent ?? "";
+  assert.match(signedOut, /Already have a merryman\?/);
+  assert.match(signedOut, /Continue with email/);
+  // Still the newcomer's invitation too: signing in is offered beside it, not instead of it.
+  assert.match(signedOut, /Create your merryman/);
+
+  await ui.render(createElement(Home, { ...props, mine: null, hasAgent: false, phase: "no-agent", signIn } as never));
+  assert.doesNotMatch(ui.container.textContent ?? "", /Already have a merryman\?|Continue with email/);
+});
