@@ -214,7 +214,9 @@ export function strandedBasisSymbols(args: {
  * still refuses to close anything on its account.
  *
  * A lookup that throws counts as on record. Holding a tick costs a tick;
- * guessing wrong here books a phantom drawdown.
+ * guessing wrong here books a phantom drawdown. That is only worth anything if
+ * the lookup CAN throw: store.ts getBasis answers zero for a failed query, so
+ * the tick passes openBasisQty, which does not.
  */
 export async function unreadHeldOnRecord(
   unread: readonly string[],

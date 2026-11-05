@@ -576,6 +576,7 @@ import {
   setClassFirstSeen,
   upsertClassPosition,
   getBasis,
+  openBasisQty,
   setBasis,
   setPositionFloor,
   positionFloors,
@@ -12573,7 +12574,9 @@ async function main() {
       // whole read failed: "positions" already holds it, and names it.
       const positionsUnreadOnRecord = posRead.readFailed
         ? []
-        : await unreadHeldOnRecord(unreadPositions, async (symbol) => (await getBasis(agentId, "live", symbol)).qtyRaw);
+        : // openBasisQty, NOT getBasis: getBasis answers zero for a failed query,
+          // and the guard can only fail closed on a lookup that throws.
+          await unreadHeldOnRecord(unreadPositions, (symbol) => openBasisQty(agentId, "live", symbol));
       unreadBook = bookGaps({
         // MERGED BEFORE THE GATE, not after. `bookGaps` feeds the early return
         // below; a custody read reported anywhere later would let the tick

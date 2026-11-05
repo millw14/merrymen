@@ -352,10 +352,10 @@ describe("a failed balance row is not a zero", () => {
     assert.match(SRC, /unreadPositions = \[\.\.\.new Set\(posRead\.unreadBalances\)\]/);
     // The sweep is handed the unread set — a default would be the bug again.
     assert.match(SRC, /unread: unreadPositions,/);
-    // The gate asks the LIVE book for an open quantity.
-    assert.match(
-      SRC,
-      /unreadHeldOnRecord\(unreadPositions, async \(symbol\) => \(await getBasis\(agentId, "live", symbol\)\)\.qtyRaw\)/,
-    );
+    // The gate asks the LIVE book for an open quantity, through the lookup that
+    // THROWS on a failed query. getBasis answers zero there, which would make
+    // the fail-closed branch unreachable (unread-basis-guard.integration.test.ts).
+    assert.match(SRC, /unreadHeldOnRecord\(unreadPositions, \(symbol\) => openBasisQty\(agentId, "live", symbol\)\)/);
+    assert.doesNotMatch(SRC, /unreadHeldOnRecord\([^)]*getBasis/);
   });
 });

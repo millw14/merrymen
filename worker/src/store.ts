@@ -4992,14 +4992,36 @@ export type BasisMode = "paper" | "live" | "brokerage";
 /** Load a symbol's basis for one mode. Missing row = a flat position, not an error. */
 export async function getBasis(agentId: string, mode: BasisMode, symbol: string): Promise<{ qtyRaw: bigint; costUsdg: bigint }> {
   try {
-    const row = await getDb()
-      .prepare("SELECT qty_raw, cost_usdg FROM cost_basis WHERE agent_id = ? AND mode = ? AND symbol = ?")
-      .get(agentId, mode, symbol) as { qty_raw: string; cost_usdg: string } | undefined;
-    if (!row) return { qtyRaw: 0n, costUsdg: 0n };
-    return { qtyRaw: BigInt(row.qty_raw), costUsdg: BigInt(row.cost_usdg) };
+    return await readBasis(agentId, mode, symbol);
   } catch {
     return { qtyRaw: 0n, costUsdg: 0n };
   }
+}
+
+/**
+ * getBasis WITHOUT THE CATCH: a missing row is zero, and a failed query THROWS.
+ *
+ * getBasis answers zero for both, which is right for its callers (an unknown
+ * basis sizes and prices as none) and wrong for a caller that must fail closed.
+ * A zero there means "the books say we hold nothing", and a database error is
+ * not the books saying anything.
+ */
+export async function readBasis(agentId: string, mode: BasisMode, symbol: string): Promise<{ qtyRaw: bigint; costUsdg: bigint }> {
+  const row = await getDb()
+    .prepare("SELECT qty_raw, cost_usdg FROM cost_basis WHERE agent_id = ? AND mode = ? AND symbol = ?")
+    .get(agentId, mode, symbol) as { qty_raw: string; cost_usdg: string } | undefined;
+  if (!row) return { qtyRaw: 0n, costUsdg: 0n };
+  return { qtyRaw: BigInt(row.qty_raw), costUsdg: BigInt(row.cost_usdg) };
+}
+
+/**
+ * The open quantity on record for one symbol, for the tick's unread-balance
+ * guard (custody.ts unreadHeldOnRecord). Throws on a failed query, which the
+ * guard counts as on record, so a database error holds the tick rather than
+ * letting a held token drop out of equity.
+ */
+export async function openBasisQty(agentId: string, mode: BasisMode, symbol: string): Promise<bigint> {
+  return (await readBasis(agentId, mode, symbol)).qtyRaw;
 }
 
 /** Persist a symbol's basis; a fully-closed position drops the row entirely. */
