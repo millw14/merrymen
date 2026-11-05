@@ -324,14 +324,23 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
     // It is also exactly what the header's own rule forbids: STF is not a
     // string the slippage path emits, and it was added from memory. Ordered
     // ABOVE the generic ERC-20 entries because it is more specific, and the
-    // detail names both causes because the revert genuinely does not say which.
+    // detail names every cause because the revert genuinely does not say which.
+    //
+    // THREE CAUSES, NOT TWO. safeTransferFrom requires the token's own
+    // `transferFrom` to succeed, so a token that refuses to move for its
+    // holder fails here too. Live from 2026-11-04: GATO, held in full by the
+    // vault, refused every sell this way.
+    //
+    // AND NO CLAIM ABOUT WHAT HAPPENS NEXT. A pre-broadcast refusal reads this
+    // sentence too (executor.ts), and there an exit is never held
+    // (exec-backoff.ts). The on-chain path says it suppresses in its own event.
     re: /\bSTF\b/,
     rule: "insufficient-balance",
     retryable: false,
     detail:
       "the router could not pull the token this trade meant to sell — TransferHelper.safeTransferFrom reverted, which " +
-      "means either the account does not hold the amount or the approve did not cover it. Retrying cannot change " +
-      "either, so this intent is suppressed for the rest of the arm.",
+      "means the account does not hold the amount, the approve did not cover it, or the token itself refused the " +
+      "transfer. Retrying cannot change any of these.",
   },
   {
     // SwapRouter02's ACTUAL slippage revert. Case-sensitive on the router's own
@@ -349,9 +358,10 @@ const PATTERNS: readonly { re: RegExp; rule: RevertClass; retryable: boolean; de
     re: /transfer amount exceeds balance|insufficient balance|ERC20InsufficientBalance/i,
     rule: "insufficient-balance",
     retryable: false,
+    // No claim about suppression, for the reason the STF entry above gives.
     detail:
       "the account does not hold what this operation tried to spend. Retrying cannot change that — the position or the " +
-      "cash has to arrive first, so this intent is suppressed for the rest of the arm rather than repeated every tick.",
+      "cash has to arrive first.",
   },
   {
     re: /transfer amount exceeds allowance|insufficient allowance|ERC20InsufficientAllowance/i,

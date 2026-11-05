@@ -128,6 +128,18 @@ test("REGRESSION: STF is a balance/allowance failure, NOT slippage", () => {
   assert.equal(v.rule, "insufficient-balance", "not 'slippage'");
   assert.equal(v.retryable, false, "and retrying it burns gas on a trade that cannot fill");
   assert.match(v.detail, /safeTransferFrom/);
+  // A token that refuses its own transfer fails here too — GATO, 2026-11-04,
+  // whose vault held every unit while each sell came back STF.
+  assert.match(v.detail, /token itself refused the transfer/);
+});
+
+test("the balance sentences promise nothing about suppression, because one path does not suppress", () => {
+  // A refused estimate reads the same sentence (executor.ts), and there an exit
+  // is never held (exec-backoff.ts). Saying "suppressed for the rest of the
+  // arm" was true only on the on-chain path, which announces it separately.
+  for (const m of ["execution reverted: STF", "ERC20: transfer amount exceeds balance"]) {
+    assert.doesNotMatch(classifyRevert(m).detail, /suppress/i, m);
+  }
 });
 
 test("REGRESSION: the real slippage revert still classifies as slippage", () => {
