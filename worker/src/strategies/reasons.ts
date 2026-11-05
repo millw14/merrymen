@@ -191,6 +191,21 @@ export type Why =
    */
   | { code: "breaker-tripped"; limitBps: number }
   /**
+   * NOTHING BOUGHT, BECAUSE A HELD COIN'S BALANCE DID NOT READ — the breaker's
+   * stand-in (policy.ts `holding-unread`). The coin is out of the book until it
+   * reads, so the book cannot be totalled and the drawdown limit cannot judge
+   * a buy: the wall refuses every one. Without this a strategy proposed a buy
+   * a tick, refused a tick, for as long as the row kept failing — days, for a
+   * coin whose balanceOf reverts — and the strategist paid a model for each.
+   *
+   * THE OWNER'S SENTENCE ONLY, like the breaker's: account state, not a view
+   * — see `publishesIdle`. The tick's own event names the coin and its remedy.
+   *
+   * A COUNT, NOT THE COINS, and it does not move while the set does not: the
+   * idle channel tells the owner once per change of sentence.
+   */
+  | { code: "holding-unread"; holdings: number }
+  /**
    * NOTHING BOUGHT, AND IT IS THE SIGNATURE — every leg that was left to buy
    * is a coin the signed key cannot sell back, so the wall refuses the buy.
    *
@@ -575,6 +590,13 @@ export function renderWhy(w: Why, audience: WhyAudience = "owner"): string {
         (audience === "owner" ? `A wider limit needs a re-sign at /grant. ` : ``) +
         `Selling is never blocked by this`
       );
+    case "holding-unread":
+      return (
+        `nothing bought — ${own ? "I can't" : "it can't"} read the balance of ` +
+        `${w.holdings === 1 ? "one coin" : `${w.holdings} coins`} ${own ? "my books say I hold" : "its books say it holds"}, ` +
+        `so the book can't be totalled and the drawdown limit can't judge a buy until ${w.holdings === 1 ? "it reads" : "they read"}. ` +
+        `Selling everything else is never blocked by this`
+      );
     case "legs-locked":
       // NO "selling is never blocked" CLAUSE, unlike its siblings. Those are
       // caps that exempt an exit; this is the key itself, and a key that cannot
@@ -848,5 +870,8 @@ export function publishesIdle(w: Why): boolean {
   // that plus a timestamp into the account. By prefix, so a perp code added
   // later is withheld until someone decides otherwise — the safe direction.
   if (w.code.startsWith("perp-")) return false;
-  return w.code !== "breaker-tripped";
+  // An unread holding is account state exactly as a tripped breaker is: the
+  // refusals it stands in for leave the feed (thesis-policy.ts
+  // ACCOUNT_HALT_RULES), so the same fact must not walk back in as a view.
+  return w.code !== "breaker-tripped" && w.code !== "holding-unread";
 }

@@ -16,7 +16,7 @@ import {
   curveMinOut,
 } from "../venues/pons-price";
 import { entryGateFor, lockedLegs } from "../entry-gates";
-import { breakerIdle, breakerTripped, opsSpent, type Snapshot, type Tick } from "./types";
+import { entryBrake, opsSpent, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
 
 /**
@@ -115,8 +115,10 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
   const countSpent = opsSpent(snap);
   // THE DRAWDOWN BREAKER BINDS THE BUYS, and only the buys. Tripped, the wall
   // refuses every buy and every park with `drawdown-breaker`; the take-profit
-  // and the unpark bring money home, which the breaker never blocks.
-  const braked = breakerTripped(snap);
+  // and the unpark bring money home, which the breaker never blocks. A held
+  // coin whose balance did not read binds them the same way (entryBrake;
+  // policy.ts holding-unread).
+  const braked = entryBrake(snap) !== undefined;
 
   // Cash can't cover a buy but the vault can: pull enough back to fund the next
   // tick's buy plus the liquidity floor. Withdraw-only tick — buys resume next
@@ -388,7 +390,7 @@ export function steadyBasketTick(cfg: SteadyBasketConfig, snap: Snapshot): Tick 
     !bought && skippedLocked > 0 && skippedStale + skippedPaused + skippedLocked === cfg.legs.length;
   // Ahead of every other silence: with the breaker tripped nothing else on
   // this list could have bought either, and this is the one that says why.
-  const brake = !bought && cfg.legs.length > 0 ? breakerIdle(snap) : undefined;
+  const brake = !bought && cfg.legs.length > 0 ? entryBrake(snap) : undefined;
   const idle: Why | undefined = brake ??
     (shut && !boughtCurve
       ? {

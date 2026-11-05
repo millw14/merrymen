@@ -18,7 +18,7 @@
 
 import { entryGateFor, lockedLegs } from "../entry-gates";
 import type { TradeIntent } from "../policy";
-import { breakerIdle, type Snapshot, type Tick } from "./types";
+import { entryBrake, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
 
 export interface GapLeg {
@@ -42,8 +42,10 @@ export function weekendGapTick(cfg: WeekendGapConfig, snap: Snapshot): Tick {
   const why: (Why | null)[] = [];
   // Tripped, the wall refuses every entry at the close; the exit at the open
   // is a sell into cash and still goes. `withheld` is what lets a tick that
-  // did nothing BECAUSE of it say so.
-  const brake = breakerIdle(snap);
+  // did nothing BECAUSE of it say so. A held coin whose balance did not read
+  // withholds the entries the same way (entryBrake) — and that coin is absent
+  // from holdings, so without it `marketClosed && !held` would buy it again.
+  const brake = entryBrake(snap);
   let withheld = false;
   // Entries skipped because the signed key cannot sell the leg back — the exit
   // at the open would be the sell it cannot make, so the wall refuses the buy.

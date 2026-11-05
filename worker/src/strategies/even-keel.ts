@@ -10,7 +10,7 @@
 
 import { entryGateFor, lockedLegs } from "../entry-gates";
 import type { TradeIntent } from "../policy";
-import { breakerIdle, opsSpent, type Snapshot, type Tick } from "./types";
+import { entryBrake, opsSpent, type Snapshot, type Tick } from "./types";
 import type { Why } from "./reasons";
 
 export interface EvenKeelLeg {
@@ -83,6 +83,16 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   // per agent per tick would be 34 copies of one sentence.
   if (!snap.sequencerUp) return { intents: [], why: [] };
 
+  // A LEG WHOSE BALANCE DID NOT COME BACK IS NOT A LEG AT ZERO. It is absent
+  // from `holdings` only because its size is unknown (Snapshot.unreadHeld), and
+  // `valueOf` below would read it as 0n: the target becomes the book over one
+  // leg too many, every other leg reads overweight and is trimmed, tick after
+  // tick — the basket walking itself to cash over a failed read. Trims are
+  // exits, so the wall would let every one of them out. So the basket stands
+  // down WHOLE, no trims and no top-ups, until every leg reads.
+  const unreadLegs = cfg.legs.filter((l) => snap.unreadHeld?.has(l.symbol)).length;
+  if (unreadLegs > 0) return { intents: [], why: [], idle: { code: "holding-unread", holdings: snap.unreadHeld?.size ?? unreadLegs } };
+
   const paused = cfg.legs.filter((l) => snap.pausedTokens.has(l.token.toLowerCase())).length;
   const tradable = cfg.legs.filter(
     (l) => !snap.pausedTokens.has(l.token.toLowerCase()) && !snap.staleFeeds.has(l.symbol),
@@ -126,8 +136,10 @@ export function evenKeelTick(cfg: EvenKeelConfig, snap: Snapshot): Tick {
   const counted: Tick = { intents: [], why: [], idle: { code: "ops-spent" } };
   // THE DRAWDOWN BREAKER BINDS THE BUYS the same way, and ahead of the count:
   // tripped, the wall refuses every seed and every top-up. A trim is a sell
-  // into cash — the one move the breaker exists never to block.
-  const brake = breakerIdle(snap);
+  // into cash — the one move the breaker exists never to block. An unread coin
+  // that is not a leg binds the buys the same way (entryBrake): the wall
+  // refuses them until it reads, while the legs, all read, may still be trimmed.
+  const brake = entryBrake(snap);
   const braked: Tick | null = brake ? { intents: [], why: [], idle: brake } : null;
   const locksAll: Tick = {
     intents: [],

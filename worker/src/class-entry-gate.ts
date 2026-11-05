@@ -19,7 +19,7 @@
 import type { AssetMode } from "../../packages/core/src/index";
 import type { IdleChannel } from "./idle-notice";
 import type { Why } from "./strategies/reasons";
-import { breakerIdle, breakerTripped, type Snapshot, type Tick } from "./strategies/types";
+import { entryBrake, type Snapshot, type Tick } from "./strategies/types";
 
 /**
  * Would the class route look for an entry at all? The same first gates
@@ -35,7 +35,7 @@ export function classRouteLooks(s: { paper: boolean; assetMode: AssetMode; vault
 }
 
 export function classEntryGate(input: {
-  snap: Pick<Snapshot, "drawdown">;
+  snap: Pick<Snapshot, "drawdown" | "unreadHeld">;
   /** classRouteLooks, for this tick. */
   routeLooks: boolean;
   /** The strategy's own idle reason, if it gave one. */
@@ -51,7 +51,11 @@ export function classEntryGate(input: {
    */
   entriesOpen?: boolean;
 }): { propose: boolean; idle: Why | null | undefined } {
-  if (!breakerTripped(input.snap)) return { propose: input.entriesOpen !== false, idle: input.idle };
+  // A HELD COIN WHOSE BALANCE DID NOT READ closes the entries the same way and
+  // for the same reason (entryBrake; policy.ts holding-unread): the wall
+  // refuses every class buy until it reads. The breaker's reason still wins.
+  const brake = entryBrake(input.snap);
+  if (brake === undefined) return { propose: input.entriesOpen !== false, idle: input.idle };
   // TRIPPED, THE BREAKER'S REASON WINS over any other a strategy gave. Not
   // every builtin ranks it first: even-keel says its feeds are stale, and
   // dip-hunter that the cash is short of one buy or the day's count is spent,
@@ -60,7 +64,7 @@ export function classEntryGate(input: {
   // bought anything: the wall refuses every buy until the book recovers. A
   // reason the strategy gave means it would have bought; with none, only a
   // class route that would have looked is a buyer the breaker stopped.
-  return { propose: false, idle: input.idle || input.routeLooks ? breakerIdle(input.snap) : undefined };
+  return { propose: false, idle: input.idle || input.routeLooks ? brake : undefined };
 }
 
 /**
@@ -80,7 +84,7 @@ export async function idleAndClassGate(input: {
   channel: Pick<IdleChannel, "tell">;
   agentId: string;
   strategyName: string;
-  snap: Pick<Snapshot, "drawdown">;
+  snap: Pick<Snapshot, "drawdown" | "unreadHeld">;
   /** classRouteLooks, for this tick. */
   routeLooks: boolean;
   /** The strategy's own idle reason, if it gave one. */

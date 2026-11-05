@@ -157,6 +157,23 @@ export interface Snapshot {
    */
   drawdown?: { bps: number; limitBps: number } | null;
   /**
+   * HELD COINS WHOSE BALANCE DID NOT COME BACK THIS TICK, by symbol (index.ts
+   * unreadHeld; unread-held.ts unreadHeldOf).
+   *
+   * ABSENT FROM `holdings` BECAUSE THEIR SIZE IS UNKNOWN, NOT BECAUSE THEY WERE
+   * SOLD. A strategy must not read their absence as a zero — a rebalancer would
+   * trim every other leg toward it — nor as an exit: a latch released on it
+   * fires a second full sell when the coin reads again, and a re-entry buys
+   * what is already held. This is the contract for custom strategies too.
+   *
+   * While it is non-empty the wall refuses every non-exit and every sale of
+   * these coins (policy.ts holding-unread), so `entryBrake` withholds entries
+   * the way a tripped breaker does. Exits of everything else are untouched.
+   *
+   * Absent or empty: every balance answered — fixtures and backtests included.
+   */
+  unreadHeld?: ReadonlySet<string>;
+  /**
    * TODAY'S ENERGY, when it is limiting anything: how many NEW trades this
    * agent may still start on its own before 00:00 UTC (core energy.ts).
    * Present only while the gate is enforcing on a low-energy agent.
@@ -468,6 +485,22 @@ export function breakerTripped(snap: Pick<Snapshot, "drawdown">): boolean {
 export function breakerIdle(snap: Pick<Snapshot, "drawdown">): Why | undefined {
   const d = snap.drawdown;
   return d && breakerTripped(snap) ? { code: "breaker-tripped", limitBps: d.limitBps } : undefined;
+}
+
+/**
+ * WHAT WITHHOLDS AN ENTRY: the tripped breaker first, else a held coin whose
+ * balance did not read — the breaker's stand-in (policy.ts holding-unread).
+ *
+ * Beside breakerIdle and in its shape, because every entry producer asks the
+ * same question for the same reason: the wall will refuse the buy, so a buy
+ * proposed now is a refusal a tick, and for a Trencher or the strategist a
+ * paid review behind it. Exits never read this. breakerIdle stays as it is
+ * for the readers that mean the breaker itself (idle-notice.ts, the perps
+ * route).
+ */
+export function entryBrake(snap: Pick<Snapshot, "drawdown" | "unreadHeld">): Why | undefined {
+  const held = snap.unreadHeld?.size ?? 0;
+  return breakerIdle(snap) ?? (held > 0 ? { code: "holding-unread", holdings: held } : undefined);
 }
 
 /** Normalise either return shape. The one place that knows about both. */

@@ -212,6 +212,18 @@ describe("it does not sell the same thing twice", () => {
     await tickOf(s, snap({ holdings: new Map() })); // filled — book is empty
     assert.equal((await tickOf(s, snap({ holdings: held() }))).intents.length, 1, "re-armed");
   });
+
+  it("A HOLDING WHOSE BALANCE DID NOT READ HAS NOT LEFT THE BOOK — the latch holds, so no second full sell", async () => {
+    // The fired floor's sell is in flight; the next tick cannot read TSLA's
+    // balance, so TSLA is absent from holdings — unknown, not sold. Releasing
+    // the latch on that would fire the floor a second time the tick TSLA reads
+    // again, selling a position the first sell already took.
+    const { driver } = spyDriver();
+    const s = build(2_000, driver);
+    assert.equal((await tickOf(s, snap({ holdings: held() }))).intents.length, 1, "the floor fires");
+    assert.equal((await tickOf(s, snap({ holdings: new Map(), unreadHeld: new Set(["TSLA"]) }))).intents.length, 0);
+    assert.equal((await tickOf(s, snap({ holdings: held() }))).intents.length, 0, "still latched when it reads again");
+  });
 });
 
 /**

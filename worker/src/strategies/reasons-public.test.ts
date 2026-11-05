@@ -41,6 +41,10 @@ const EVERY: Every = {
   "budget-spent": [{ code: "budget-spent", capRaw: B }],
   "ops-spent": [{ code: "ops-spent" }],
   "breaker-tripped": [{ code: "breaker-tripped", limitBps: 1_000 }],
+  "holding-unread": [
+    { code: "holding-unread", holdings: 1 },
+    { code: "holding-unread", holdings: 3 },
+  ],
   "legs-locked": [
     { code: "legs-locked", legs: 3, locked: 3 },
     { code: "legs-locked", legs: 3, locked: 1 },
