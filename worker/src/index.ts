@@ -141,9 +141,23 @@ import {
   orderReadsOf,
   orderRoute,
   placeOrder,
+  unreadHoldingOrder,
   walletOrderRefusal,
   type StatedReads,
 } from "./order-gate";
+import {
+  classifyBookGaps,
+  heartbeatDrawdownBps,
+  heldUnreadOf,
+  NO_HELD_UNREAD,
+  NOTHING_SHOWN,
+  shownEquityOf,
+  unreadHeldNotice,
+  unreadHeldOf,
+  withoutUnreadHeld,
+  type HeldUnread,
+  type ShownEquity,
+} from "./unread-held";
 import { ownerRefusalNotice } from "./owner-refusal";
 import { BRAIN_MIN_TRADE_USDG, brainLiveEnabledFor, orderFromDecision, tradeConsumesSnapshot } from "./brain-live";
 import { provenanceOf, type Provenance } from "./provenance";
@@ -5041,6 +5055,27 @@ async function main() {
   /** Whether the owner has been told about the current Lighter outage — once per outage, like `notedUnpriced`. */
   let perpUnreadNoted = false;
   /**
+   * HELD COINS WHOSE BALANCE DID NOT READ on the latest tick, as the wall reads
+   * them (policy.ts AgentState.heldUnread; unread-held.ts). Assigned once per
+   * tick, after the book read and before either early return; paper assigns
+   * none. Every intent, from a tick, the app, Telegram or the Brain, is judged
+   * against it, as `perpBook` is for the venue.
+   */
+  let heldUnreadNow: HeldUnread = NO_HELD_UNREAD;
+  /**
+   * WHAT THE LAST LIVE TICK THAT COMPOSED A BOOK HELD, by symbol: one of the
+   * three ways an unread coin counts as held (unread-held.ts unreadHeldOf).
+   * In memory and live only, never from the `positions` table, which paper
+   * ticks write too.
+   */
+  let lastLiveHeld: ReadonlySet<string> = new Set<string>();
+  /** The unread-held set the owner was last told about, as its sorted key (unread-held.ts unreadHeldNotice). */
+  let unreadHeldNoted = "";
+  /** The whole-book gap the owner was last told about, so the early return's event fires on a change, not every tick. */
+  let unreadBookNoted = "";
+  /** What the tick book shows as equity between ticks, and whether it is a sum short of an unread holding. */
+  let shownEquity: ShownEquity = NOTHING_SHOWN;
+  /**
    * AN ENERGY PURCHASE MOVED THE PERSISTED PEAKS, and the in-memory ones have
    * not caught up — on purpose.
    *
@@ -9179,6 +9214,7 @@ async function main() {
       equityKnown,
       perpVenueUnread: perpBook === "unread",
       perpLastKnownMicro,
+      heldUnread: heldUnreadNow,
       nowSec: Math.floor(Date.now() / 1000),
     };
   }
@@ -9397,6 +9433,10 @@ async function main() {
       // no perps is `undefined` there, so this is false and refuses nothing.
       perpVenueUnread: perpBook === "unread",
       perpLastKnownMicro,
+      // A HELD COIN WHOSE BALANCE DID NOT READ, NOTHING NEW (policy.ts
+      // holding-unread), and no sale of that coin on a guessed size. From the
+      // latest tick, whoever placed this, like the venue's state above.
+      heldUnread: heldUnreadNow,
       // EVERYTHING THE PERP BRANCH JUDGES AN OPEN BY, from the lane's last
       // read (view.ts buildPerpPolicyState) — on every intent, so no perp
       // intent is ever judged against its absence. A perp intent is re-judged
@@ -12231,6 +12271,18 @@ async function main() {
     // not close any of them. Those the books say we hold are in `unreadBook`
     // too, and hold the tick. See positions.ts `unreadBalances`.
     let unreadPositions: string[] = [];
+    // THE HELD ONES AMONG THEM — an open basis, the Trencher vault's own list,
+    // the last live tick, or the other custody's row says so (unread-held.ts
+    // unreadHeldOf). Out of the book WHOLE, so the book is INCOMPLETE, as for
+    // an unread venue: no equity row, no peak, no fee, and the strategies still
+    // run, so every OTHER position can still be sold. They never hold the
+    // tick: that return switched off every stop-loss for as long as one row
+    // failed. Paper reads no balance, so it has none.
+    let unreadHeld: string[] = [];
+    // The Trencher vault's own token list (lowercased), live with vault custody only.
+    let vaultTokens: string[] = [];
+    // The Trencher vault's USDG could not be read: a whole-book gap, which holds the tick.
+    let trencherCashUnread = false;
     /**
      * What the class vault holds, and whether we managed to ask.
      *
@@ -12392,22 +12444,36 @@ async function main() {
       unpricedByDesign = posRead.unpricedByDesign;
       if (autoTrench && grantTrencher(grant)) {
         const vault = autoTrench.custody.vault;
+        vaultTokens = autoTrench.tokens.map((t) => t.address.toLowerCase());
+        // THE VAULT IS READ ONCE. Its custody routing is built from the same
+        // read that values it (positions.ts `balances`), so the two cannot
+        // disagree. A second, raw multicall used to set `readFailed` for the
+        // WHOLE read when any one row failed, and every Trencher agent with one
+        // unreadable coin held the tick: no exit on anything. A failed row is
+        // now per token, in custodyRead.unreadBalances, like the account's.
         const custodyRead = await readPositions(client,vault,watchTokens,market.prices);
-        const raw = await client.multicall({contracts:watchTokens.map(t=>({address:t.address,abi:erc20Abi,functionName:"balanceOf" as const,args:[vault]}))});
-        autoTrenchBalances = new Map();
-        for (let i=0;i<raw.length;i++) {
-          const row=raw[i]!;
-          if (row.status!=="success") { posRead.readFailed=true; continue; }
-          if (row.result>0n) autoTrenchBalances.set(watchTokens[i]!.address.toLowerCase(),row.result);
-        }
+        autoTrenchBalances = new Map(custodyRead.balances);
+        // A coin whose ACCOUNT row failed is held at an unknown size, so the
+        // vault half alone must not seed its basis (unread-held.ts strips it
+        // whole below).
+        const accountUnread = new Set(posRead.unreadBalances);
         for (const p of custodyRead.positions) {
           const existing=positions.find(v=>v.token.toLowerCase()===p.token.toLowerCase());
           if (existing) { existing.rawBalance+=p.rawBalance; existing.valueUsdg+=p.valueUsdg; }
           else {
             positions.push(p);
+            if (accountUnread.has(p.symbol)) continue;
             const saved = await getBasis(agentId,"live",p.symbol);
             if (saved.qtyRaw === 0n && saved.costUsdg === 0n) {
-              const cost = await client.readContract({address:vault,abi:TRENCHER_VAULT_ABI,functionName:"cost",args:[p.token]});
+              // A failed read seeds nothing this tick, never a zero cost: the
+              // next tick asks again.
+              const cost = await client
+                .readContract({address:vault,abi:TRENCHER_VAULT_ABI,functionName:"cost",args:[p.token]})
+                .catch(() => null);
+              if (cost === null) {
+                console.log(`[trencher] could not read the vault's cost for ${p.symbol}; basis not seeded this tick`);
+                continue;
+              }
               if (cost > 0n) await setBasis(agentId,"live",p.symbol,{qtyRaw:p.rawBalance,costUsdg:cost});
             }
           }
@@ -12418,6 +12484,25 @@ async function main() {
         posRead.unreadBalances.push(...custodyRead.unreadBalances);
       }
       unreadPositions = [...new Set(posRead.unreadBalances)];
+      // WHICH OF THOSE THE BOOKS SAY WE HOLD, and each leaves the book WHOLE —
+      // before `lastUnpricedSymbols` and the quarantine see it. Never a partial
+      // balance (the vault half of a coin whose account row failed would be
+      // judged against its whole basis), and never routed through the unpriced
+      // set, which would carry it at cost. See unread-held.ts. Skipped when the
+      // whole read failed: "positions" then holds the tick, and names it.
+      if (!posRead.readFailed && unreadPositions.length > 0) {
+        unreadHeld = unreadHeldOf({
+          unread: unreadPositions,
+          // openBasisQty, NOT getBasis: getBasis answers zero for a failed query,
+          // and the guard can only fail closed on a lookup that throws.
+          basisOnRecord: await unreadHeldOnRecord(unreadPositions, (symbol) => openBasisQty(agentId, "live", symbol)),
+          vaultTokens,
+          watch: watchTokens,
+          lastLiveHeld,
+          heldThisTick: new Set([...positions.map((p) => p.symbol), ...missingPrice, ...unpricedByDesign]),
+        });
+        ({ positions, missingPrice, unpricedByDesign } = withoutUnreadHeld({ positions, missingPrice, unpricedByDesign }, unreadHeld));
+      }
       // Only tokens the vault ACTUALLY holds. A recorded row with a zero balance
       // is a position that has been fully sold or swept — its basis is genuinely
       // stranded and should close, which is the one case the guard must not
@@ -12500,7 +12585,13 @@ async function main() {
        */
       classCashUsdg = classRead.balances.get(CASH.USDG.toLowerCase()) ?? 0n;
       if (autoTrench && grantTrencher(grant)) {
-        classCashUsdg += await client.readContract({address:CASH.USDG,abi:erc20Abi,functionName:"balanceOf",args:[autoTrench.custody.vault]});
+        // CAUGHT, AND A GAP THAT HOLDS THE TICK BY NAME. Uncaught, the throw
+        // ended the tick above the drain and left a waiting order unanswered.
+        const vaultCash = await client
+          .readContract({address:CASH.USDG,abi:erc20Abi,functionName:"balanceOf",args:[autoTrench.custody.vault]})
+          .catch(() => null);
+        if (vaultCash === null) trencherCashUnread = true;
+        else classCashUsdg += vaultCash;
       }
       // Kept for the exit producer, which needs the balance AT THE VAULT and
       // must not pay for a second read of it. Replaced wholesale, never merged,
@@ -12568,25 +12659,30 @@ async function main() {
       // the reason the vault was built.
       unpricedByDesign = [...unpricedByDesign, ...classBook.symbols];
       lastUnpricedSymbols = new Set(unpricedByDesign);
-      // A WATCHED TOKEN WHOSE BALANCE DID NOT COME BACK, AND WHICH THE BOOKS SAY
-      // WE HOLD, is a holding this tick cannot see — the same gap as an unread
-      // cash balance, so it holds the tick by the same gate. Skipped when the
-      // whole read failed: "positions" already holds it, and names it.
-      const positionsUnreadOnRecord = posRead.readFailed
-        ? []
-        : // openBasisQty, NOT getBasis: getBasis answers zero for a failed query,
-          // and the guard can only fail closed on a lookup that throws.
-          await unreadHeldOnRecord(unreadPositions, (symbol) => openBasisQty(agentId, "live", symbol));
-      unreadBook = bookGaps({
-        // MERGED BEFORE THE GATE, not after. `bookGaps` feeds the early return
-        // below; a custody read reported anywhere later would let the tick
-        // publish an equity figure missing a real holding and then run the
-        // stranded-basis sweep against a book it could not see.
-        unreadBalances: [...bal.unread, ...classRead.unread, ...positionsUnreadOnRecord],
+      // WHICH GAPS HOLD THE TICK AND WHICH ONLY MAKE THE BOOK INCOMPLETE
+      // (unread-held.ts classifyBookGaps). Whole-book gaps — cash, ETH, the
+      // Morpho vault, the class vault, a whole positions read, the Trencher
+      // vault's cash — still hold it. A held coin whose own row failed does
+      // not: it is out of the book whole, and `bookIncomplete` below says so.
+      // MERGED BEFORE THE GATE, not after: a custody read reported anywhere
+      // later would let the tick publish an equity figure missing a real
+      // holding and then run the stranded-basis sweep against a book it could
+      // not see.
+      const gaps = classifyBookGaps({
+        balances: bal.unread,
+        classVault: classRead.unread,
         positionsReadFailed: posRead.readFailed,
-        missingPrice: [], // reported separately below — it has its own message
+        trencherCashUnread,
+        unreadHeld,
       });
+      unreadBook = gaps.holdTick;
+      unreadHeld = gaps.incomplete;
     }
+
+    // WHAT THE WALL JUDGES EVERY INTENT AGAINST until the next tick says
+    // otherwise — the app's, Telegram's and the Brain's too. Once, here, before
+    // either early return; paper has none (policy.ts holding-unread).
+    heldUnreadNow = heldUnreadOf(unreadHeld, watchTokens);
 
     // The chain didn't answer. Every zero below would be a placeholder, and
     // booking one writes a phantom crater into the equity curve that becomes
@@ -12594,11 +12690,17 @@ async function main() {
     // the missing-price branch below — hold and retry.
     if (unreadBook.length) {
       console.log(`[tick] could not read ${unreadBook.join(",")}; holding (equity + breaker skipped, not a real loss)`);
-      await addEvent(
-        agentId,
-        "warn",
-        `couldn't read ${unreadBook.join(", ")} this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`,
-      );
+      // Once per change of the gap, not once per tick: a line every tick is a
+      // line nobody reads. The console line above still says it every tick.
+      const bookGapKey = unreadBook.join(",");
+      if (bookGapKey !== unreadBookNoted) {
+        unreadBookNoted = bookGapKey;
+        await addEvent(
+          agentId,
+          "warn",
+          `couldn't read ${unreadBook.join(", ")} this tick — trading + equity paused (fail-closed); this is a data gap, not a loss`,
+        );
+      }
       // AND AN ORDER WAITING ON THIS TICK IS ANSWERED, not starved. The same
       // rule the unreadable-market return learned: this return sits above the
       // drain, so a queued order was skipped until its window closed. With the
@@ -12609,6 +12711,7 @@ async function main() {
       await drainOnUnreadTick(plan, () => runQueuedCommand(agentId, bookUnread));
       return;
     }
+    unreadBookNoted = "";
 
     // TRANSIENT gap: a feed exists but didn't read this tick. A held position we
     // can't price is NOT worth zero — recording it as such books a phantom
@@ -12817,7 +12920,25 @@ async function main() {
     // perp-unpriced). So: no equity row, no peak, no fee, equity judged as
     // unknown — and strategies still run, so the owner can always get out.
     const venueGap = bookGaps({ unreadBalances: [], positionsReadFailed: false, missingPrice: [], perp: perpTerm });
-    const bookIncomplete = unknownCost.length > 0 || venueGap.length > 0;
+    // AND A HELD COIN WHOSE BALANCE DID NOT READ (unread-held.ts): the venueGap
+    // precedent, for the same reason. Its stand-in for the breaker is
+    // policy.ts holding-unread, judged from `heldUnreadNow`.
+    const bookIncomplete = unknownCost.length > 0 || venueGap.length > 0 || unreadHeld.length > 0;
+    // The owner is told once per change of the set, and once when it empties.
+    // Live only: paper reads no balance, so its empty set says nothing.
+    if (!paper) {
+      const vaultSet = new Set(vaultTokens);
+      const notice = unreadHeldNotice(
+        unreadHeldNoted,
+        unreadHeld,
+        new Set(watchTokens.filter((t) => vaultSet.has(t.address.toLowerCase())).map((t) => t.symbol)),
+      );
+      unreadHeldNoted = notice.key;
+      if (notice.event) {
+        console.log(`[tick] unread held: ${unreadHeld.length > 0 ? unreadHeld.join(",") : "none"} (exits-only while any)`);
+        await addEvent(agentId, notice.event.level, notice.event.text);
+      }
+    }
     if (venueGap.length > 0 && !perpUnreadNoted) {
       perpUnreadNoted = true; // once per outage, not once per tick
       await addEvent(
@@ -12862,7 +12983,7 @@ async function main() {
     }
     if (unpricedByDesign.length === 0) notedUnpriced = false;
     // What Telegram groups may know is held: memecoin names only, no sizes.
-    tgNoteHeld(positions, [...missingPrice, ...unpricedByDesign]);
+    tgNoteHeld(positions, [...missingPrice, ...unpricedByDesign, ...unreadHeld]);
 
     const positionsUsdg = positions.reduce((sum, p) => sum + p.valueUsdg, 0n);
     // Equity is the whole book — cash, vault, multiplier-aware stock value, and
@@ -13119,6 +13240,7 @@ async function main() {
           [
             ...(unknownCost.length > 0 ? [`${unknownCost.join(",")} unpriced AND no cost on record`] : []),
             ...(venueGap.length > 0 ? [`${venueGap.join(",")} could not be read`] : []),
+            ...(unreadHeld.length > 0 ? [`held ${unreadHeld.join(",")} balance could not be read (exits-only)`] : []),
           ].join("; ") +
           `) — equity, HWM, fee and breaker skipped this tick`,
       );
@@ -13453,7 +13575,13 @@ async function main() {
         priceSource: p.priceSource,
         valueUsdg: usdgNum(p.valueUsdg),
       })),
+      // An unread holding's last row stands: absent from `positions` because
+      // its size is unknown, not because it was sold (store.ts setPositions).
+      unreadHeld,
     );
+    // What this live book held, for the next tick's unread-held evidence
+    // (unread-held.ts unreadHeldOf). The unread coins stay in it: still held.
+    if (!paper) lastLiveHeld = new Set([...positions.map((p) => p.symbol), ...unpricedByDesign, ...unreadHeld]);
 
     // ── SHADOW BRAIN ─────────────────────────────────────────────────────
     //
@@ -13502,8 +13630,18 @@ async function main() {
     // tick that cannot read a balance leaves it (order-gate.ts `unread`) —
     // unless there never was one, when the partial figure beats a zero that
     // reads as "still saddling up" and would refuse the owner's sells too.
-    const shownEquityUsdg =
-      venueGap.length > 0 && tickBook.latest().equityUsdg > 0n ? tickBook.latest().equityUsdg : equityUsdg;
+    //
+    // AND THE SAME FOR A HELD COIN WHOSE BALANCE DID NOT READ (unread-held.ts
+    // shownEquityOf). A partial figure shown because there was no whole one
+    // (the restart corner) is flagged, so the heartbeat stays quiet about it.
+    shownEquity = shownEquityOf({
+      equityUsdg,
+      complete: !bookIncomplete,
+      venueUnread: venueGap.length > 0,
+      holdingUnread: unreadHeld.length > 0,
+      last: { equityUsdg: tickBook.latest().equityUsdg, shortOfHolding: shownEquity.shortOfHolding },
+    });
+    const shownEquityUsdg = shownEquity.equityUsdg;
     const drainReads = tickBook.composed(shownEquityUsdg, !bookIncomplete);
     if (!paper) lastGasWei = balances.ethWei;
     // THE DRAWDOWN THE WALL WOULD JUDGE A BUY AGAINST, measured once from the
@@ -14539,6 +14677,9 @@ async function main() {
       // And the drawdown, the same way: a strategy stops proposing buys on the
       // tick the breaker would start refusing them, and says so once.
       drawdown: drawdownNow,
+      // HELD COINS WHOSE BALANCE DID NOT READ: absent from `holdings` because
+      // their size is unknown, NOT sold (strategies/types.ts entryBrake).
+      ...(unreadHeld.length > 0 ? { unreadHeld: new Set(unreadHeld) } : {}),
       perTradeCapUsdg: active.limits.perTradeUsdg,
       // TODAY'S ENERGY, only while it limits anything: the new trades this
       // agent may still start on its own. A hint the strategist reads so it
@@ -15585,6 +15726,12 @@ async function main() {
       // AND ITS NAME AS THE WATCH SET SPELLS IT — the book stores the position
       // under that, and an order may arrive upper-cased (resolveOrderToken).
       const named = resolved.symbol;
+      // A SALE OF A COIN WHOSE BALANCE DID NOT READ CANNOT BE SIZED: its kept
+      // row is the last good read, not this one (order-gate.ts
+      // unreadHoldingOrder). Asked before the row is read or a curve is tried;
+      // the wall refuses the same sale behind it.
+      const unreadSale = unreadHoldingOrder(side, named, heldUnreadNow.symbols);
+      if (unreadSale) return no(unreadSale);
       // WHERE DOES THIS TOKEN ACTUALLY TRADE? A Pons token has no pool until it
       // graduates, so routing it to the swap router would build an operation
       // against a pool that does not exist. Asked before anything is sized.
@@ -16118,10 +16265,13 @@ async function main() {
       // judged against what can actually be DEPLOYED — an agent fully invested
       // in one holding is not being throttled by its cap.
       cashUsdg: lastCashUsdg === null ? null : Number(lastCashUsdg) / 1e6,
-      drawdownBps:
-        drawdownPeak() > 0n && tickBook.latest().equityUsdg > 0n
-          ? Math.max(0, Number(((drawdownPeak() - tickBook.latest().equityUsdg) * 10_000n) / drawdownPeak()))
-          : null,
+      // Silent only over a figure composed short of an unread holding with no
+      // whole one to keep (unread-held.ts heartbeatDrawdownBps): that would be
+      // a loss nobody made, and a nudge to re-sign the limit over a read gap.
+      drawdownBps: heartbeatDrawdownBps({
+        peakUsdg: drawdownPeak(),
+        shown: { equityUsdg: tickBook.latest().equityUsdg, shortOfHolding: shownEquity.shortOfHolding },
+      }),
       breakerBps: active ? active.limits.maxDrawdownBps : null,
       // Pass ZERO through. It used to be mapped to null here AND filtered again
       // in the notifier, so an account with exactly no ETH — the only balance

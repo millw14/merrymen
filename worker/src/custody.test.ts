@@ -213,12 +213,20 @@ describe("the tick uses the custody seam", () => {
     );
   });
 
-  it("the custody read's failure reaches bookGaps, which is the gate that holds", () => {
+  it("the custody read's failure reaches the gate that holds, and an unread HELD coin the incomplete book", () => {
     // Reported any later and the tick publishes an equity figure missing a real
     // holding, then runs a destructive sweep against a book it could not see.
-    // The third term is the unread balances the books say we hold — see
-    // "a failed balance row is not a zero" below.
-    assert.match(CODE, /unreadBalances: \[\.\.\.bal\.unread, \.\.\.classRead\.unread, \.\.\.positionsUnreadOnRecord\]/);
+    // A whole-book gap (cash, ETH, the vault, the class vault, a whole read,
+    // the Trencher vault's cash) still holds the tick. A held coin whose own
+    // row failed no longer does — that return switched off every exit — it
+    // makes the book incomplete instead (unread-held.ts classifyBookGaps), as
+    // an unread venue does. See "a failed balance row is not a zero" below.
+    assert.match(
+      CODE,
+      /const gaps = classifyBookGaps\(\{\s*balances: bal\.unread,\s*classVault: classRead\.unread,\s*positionsReadFailed: posRead\.readFailed,\s*trencherCashUnread,\s*unreadHeld,\s*\}\);/,
+    );
+    assert.match(CODE, /unreadBook = gaps\.holdTick;\s*unreadHeld = gaps\.incomplete;/);
+    assert.match(CODE, /const bookIncomplete = unknownCost\.length > 0 \|\| venueGap\.length > 0 \|\| unreadHeld\.length > 0;/);
   });
 
   it("provenance is unioned at BOTH limitsFromGrant call sites", () => {
@@ -344,7 +352,7 @@ describe("a failed balance row is not a zero", () => {
     assert.deepEqual(asked, ["GATO"]);
   });
 
-  it("AND THE TICK WIRES BOTH HALVES: the vault read joins, the sweep is told, the gate holds", () => {
+  it("AND THE TICK WIRES BOTH HALVES: the vault read joins, the sweep is told, the held ones are found", () => {
     const SRC = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     // The vault's own read joins the account's, so a 429 on the Trencher vault
     // (where Shogun's GATO sat) is not lost.
