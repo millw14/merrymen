@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import test, { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
-import { toFunctionSelector } from "viem";
-import { PATTERN_SOURCES, PONS_ERROR_SELECTORS, classifyRevert, suppressionKey, suppressionLegs } from "./revert";
+import { encodeErrorResult, parseAbi, toFunctionSelector } from "viem";
+import {
+  PATTERN_SOURCES,
+  PONS_ERROR_SELECTORS,
+  classifyRevert,
+  decodedRevertReasons,
+  suppressionKey,
+  suppressionLegs,
+  withDecodedReasons,
+} from "./revert";
 
 /**
  * The value of this table is entirely in what it REFUSES to claim, so most of
@@ -670,5 +678,108 @@ describe("both call sites derive the key the same way", () => {
       !/suppressionKey\(\s*intent\.kind,\s*intent\.kind === "swap"/.test(CODE),
       "the read site's swap-only derivation is what silently disabled curve suppression",
     );
+  });
+});
+
+/**
+ * ABI-ENCODED REASONS ARE DECODED BEFORE THE TABLE READS THEM — where the
+ * bundler refuses to estimate, and only there.
+ *
+ * The bundler hands the simulation's revert back as `0x08c379a0…`, Solidity's
+ * Error(string). Every entry above matches words, so `STF` in hex was
+ * unclassified, and the executor kept the refusal's `gas-unreadable` label
+ * (live from 2026-11-04 00:15 UTC, on every sell of a token whose transfer
+ * reverts for its holder).
+ */
+describe("decoding Error(string) and Panic(uint256)", () => {
+  const BUILTIN = parseAbi(["error Error(string)", "error Panic(uint256)"]);
+  const encodeError = (reason: string) => encodeErrorResult({ abi: BUILTIN, errorName: "Error", args: [reason] });
+  const encodePanic = (code: bigint) => encodeErrorResult({ abi: BUILTIN, errorName: "Panic", args: [code] });
+  const STF = encodeError("STF");
+
+  it("the selectors are the ones the signatures derive, not remembered ones", () => {
+    assert.equal(toFunctionSelector("Error(string)"), "0x08c379a0");
+    assert.equal(toFunctionSelector("Panic(uint256)"), "0x4e487b71");
+    assert.ok(STF.startsWith("0x08c379a0") && STF.includes("535446"));
+  });
+
+  it("decodes Error(string) into its words", () => {
+    assert.deepEqual(decodedRevertReasons(`UserOperation reverted during simulation with reason: ${STF}`), ['Error("STF")']);
+  });
+
+  it("decodes one with its trailing padding dropped, and one in upper case", () => {
+    assert.deepEqual(decodedRevertReasons(`reason: ${STF.replace(/(00)+$/, "")}`), ['Error("STF")']);
+    assert.deepEqual(decodedRevertReasons(`reason: 0x${STF.slice(2).toUpperCase()}`), ['Error("STF")']);
+  });
+
+  it("decodes Panic(uint256) to its code and claims nothing about what the code means", () => {
+    assert.deepEqual(decodedRevertReasons(`reason: ${encodePanic(0x11n)}`), ["Panic(0x11)"]);
+  });
+
+  it("reports a reason viem repeats under Details: once", () => {
+    const m = `Execution reverted with reason: ${STF}.\n\nDetails: reason: ${STF}\nVersion: viem@2.56.0`;
+    assert.deepEqual(decodedRevertReasons(m), ['Error("STF")']);
+  });
+
+  it("ignores a selector spelled inside a longer hex run, and a payload that does not decode", () => {
+    // A signature or a hash that happens to contain 08c379a0 is not a revert.
+    assert.deepEqual(decodedRevertReasons(`signature: 0xdeadbeef${STF.slice(2)}`), []);
+    assert.deepEqual(decodedRevertReasons(`hash: 0x1234${"0".repeat(4)}08c379a0`), []);
+    // The selector alone, and a length that runs past the data.
+    assert.deepEqual(decodedRevertReasons("reason: 0x08c379a0"), []);
+    assert.deepEqual(decodedRevertReasons(`reason: 0x08c379a0${"0".repeat(62)}20${"0".repeat(62)}ff5354`), []);
+    // Custom errors (Pons's own) are not touched — they have no ABI here.
+    assert.deepEqual(decodedRevertReasons("execution reverted: 0x71c4efed"), []);
+  });
+
+  it("a newline inside a reason cannot hide a word from its boundary", () => {
+    assert.deepEqual(decodedRevertReasons(`reason: ${encodeError("TransferHelper:\nSTF")}`), ['Error("TransferHelper: STF")']);
+  });
+
+  it("the decoded text is APPENDED, so a selector the table matches in hex still matches", () => {
+    const both = `execution reverted: ${PONS_ERROR_SELECTORS[0]}${"0".repeat(128)} then ${STF}`;
+    const withWords = withDecodedReasons(both);
+    assert.ok(withWords.startsWith(both));
+    assert.equal(classifyRevert(withWords).rule, classifyRevert(both).rule, "the first entry that matched still wins");
+  });
+
+  it("a message with nothing encoded in it comes back unchanged", () => {
+    for (const m of ["", "AA21 didn't pay prefund", "execution reverted: STF", "connection reset by peer"]) {
+      assert.equal(withDecodedReasons(m), m);
+    }
+  });
+
+  it("with the words in it, an encoded STF is the class the plain-text one always was", () => {
+    const v = classifyRevert(withDecodedReasons(`UserOperation reverted during simulation with reason: ${STF}`));
+    assert.deepEqual(v, classifyRevert("execution reverted: STF"));
+    assert.equal(v.rule, "insufficient-balance");
+    assert.equal(v.retryable, false);
+  });
+
+  it("and every encoded reason the table knows lands where its plain text does", () => {
+    for (const words of [
+      "STF",
+      "Too little received",
+      "ERC20: transfer amount exceeds balance",
+      "ERC20: transfer amount exceeds allowance",
+      "SPL",
+      "Transaction too old",
+    ]) {
+      assert.deepEqual(
+        classifyRevert(withDecodedReasons(`reason: ${encodeError(words)}`)),
+        classifyRevert(`execution reverted: ${words}`),
+        words,
+      );
+    }
+  });
+
+  it("classifyRevert ITSELF does not decode: the on-chain revert path is unchanged", () => {
+    // index.ts classifies a typed on-chain revert with classifyRevert(msg), and
+    // a non-retryable class there suppresses the pair for the rest of the arm —
+    // exits included. Decoding there is a separate decision (see the PR), so it
+    // is pinned as not taken.
+    assert.equal(classifyRevert(`reverted on-chain: ${STF} (0x${"ab".repeat(32)})`).rule, "unclassified");
+    const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    assert.match(index, /const revertVerdict = onChain \? classifyRevert\(msg\) : null;/);
   });
 });

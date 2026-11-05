@@ -31,7 +31,7 @@ import {
   totalGas,
   type UserOpGas,
 } from "./gas-limits";
-import { classifyRevert } from "./revert";
+import { classifyRevert, withDecodedReasons } from "./revert";
 
 export interface Call {
   to: `0x${string}`;
@@ -876,7 +876,12 @@ export async function createAgentExecutor(opts: {
         // NOTHING ABOUT THE MONEY CHANGES. The operation is refused before
         // signing either way; only the name on the refusal and the sentence
         // under it differ.
-        const diagnosed = estimateError ? classifyRevert(estimateError) : null;
+        //
+        // THE BUNDLER'S REVERT REASON ARRIVES ABI-ENCODED (`0x08c379a0…`), so
+        // it is decoded into words before the table, which matches words, sees
+        // it. Without that a sell refused in simulation with Uniswap's `STF`
+        // read as unclassified and kept `gas-unreadable`. See withDecodedReasons.
+        const diagnosed = estimateError ? classifyRevert(withDecodedReasons(estimateError)) : null;
         const renamed = diagnosed && !diagnosed.retryable && diagnosed.rule !== "unclassified" ? diagnosed : null;
         // BEFORE the send, so nothing is spent and no 'submitted' row exists.
         // This is a pre-broadcast rejection in the same shape as a policy one.

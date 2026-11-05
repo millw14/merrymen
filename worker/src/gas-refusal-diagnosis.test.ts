@@ -36,7 +36,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { classifyRevert } from "./revert";
+import { encodeErrorResult, parseAbi } from "viem";
+import { classifyRevert, withDecodedReasons } from "./revert";
 
 /** The bundler's message, verbatim from the production log. */
 const LIVE_MESSAGE =
@@ -213,7 +214,9 @@ describe("what may and may not rename a gas refusal", () => {
     const lines = readFileSync(new URL("./executor.ts", import.meta.url), "utf8")
       .split(/\r?\n/)
       .map((l) => l.trim());
-    const diagnosed = lines.findIndex((l) => l.startsWith("const diagnosed = estimateError ? classifyRevert(estimateError)"));
+    const diagnosed = lines.findIndex((l) =>
+      l.startsWith("const diagnosed = estimateError ? classifyRevert(withDecodedReasons(estimateError))"),
+    );
     const renamed = lines.findIndex((l) => l.startsWith("const renamed = diagnosed"));
     const thrown = lines.indexOf("throw new GasRefused(", renamed);
     assert.ok(diagnosed > 0 && renamed > diagnosed && thrown > renamed, "the executor's rename is where we think it is");
@@ -221,10 +224,11 @@ describe("what may and may not rename a gas refusal", () => {
     assert.match(rule, /^renamed \? renamed\.rule : bounded\.rule$/, "the refusal is named by the rename or by boundGas");
     return new Function(
       "classifyRevert",
+      "withDecodedReasons",
       "estimateError",
       "bounded",
       `${lines[diagnosed]}\n${lines[renamed]}\nreturn ${rule};`,
-    )(classifyRevert, estimateError, { rule: boundedRule }) as string;
+    )(classifyRevert, withDecodedReasons, estimateError, { rule: boundedRule }) as string;
   };
 
   it("the copy above answers what the executor's own lines answer", () => {
@@ -260,5 +264,57 @@ describe("what may and may not rename a gas refusal", () => {
     // own rule rather than borrowing the wall's.
     assert.equal(classifyRevert("AA21 didn't pay prefund").rule, "prefund");
     assert.equal(mayRename("AA21 didn't pay prefund"), true);
+  });
+
+  /**
+   * THE BUNDLER'S REASON IS ABI-ENCODED, and the table matches words.
+   *
+   * Live from 2026-11-04 00:15 UTC: every sell of a token whose `transfer`
+   * reverts for its holder was refused in simulation with
+   * `0x08c379a0…535446` — `Error("STF")`, Uniswap's safeTransferFrom failing —
+   * and filed `gas-unreadable`, because the table never saw the letters STF.
+   *
+   * Built in viem's layout around the same Request Arguments as the
+   * 13:07:48Z fixture above, with the reason encoded by viem rather than
+   * pasted, so it carries nothing from a real operation.
+   */
+  const BUILTIN = parseAbi(["error Error(string)", "error Panic(uint256)"]);
+  const STF_HEX = encodeErrorResult({ abi: BUILTIN, errorName: "Error", args: ["STF"] });
+  const PANIC_HEX = encodeErrorResult({ abi: BUILTIN, errorName: "Panic", args: [0x11n] });
+  const simulationRefusal = (reasonHex: string) =>
+    SIMULATION_REVERT_MESSAGE.replaceAll(/0x71c4efed[0-9a-f]*/g, reasonHex);
+
+  it("the fixture carries the encoded reason, and nothing the table could read without decoding", () => {
+    const m = simulationRefusal(STF_HEX);
+    assert.ok(m.includes(`reason: ${STF_HEX}.`) && m.includes(`reason: ${STF_HEX}\n`));
+    assert.doesNotMatch(m, /0x71c4efed/);
+    assert.doesNotMatch(m, /\bSTF\b/);
+    // Raw, it is what the executor used to see: unrecognised, retryable.
+    assert.equal(classifyRevert(m).rule, "unclassified");
+  });
+
+  it("an encoded STF renames the refusal `insufficient-balance`", () => {
+    assert.equal(executorRule(simulationRefusal(STF_HEX), "gas-unreadable"), "insufficient-balance");
+  });
+
+  it("so does one whose trailing zero padding was dropped on the way", () => {
+    // A relay that trims the payload must not be able to hide the reason.
+    assert.equal(executorRule(simulationRefusal(STF_HEX.replace(/(00)+$/, "")), "gas-unreadable"), "insufficient-balance");
+  });
+
+  it("an encoded Panic is decoded but recognised by nothing, so the gas verdict keeps its name", () => {
+    assert.match(withDecodedReasons(simulationRefusal(PANIC_HEX)), /Decoded revert reason: Panic\(0x11\)$/);
+    assert.equal(executorRule(simulationRefusal(PANIC_HEX), "gas-unreadable"), "gas-unreadable");
+  });
+
+  it("an encoded RETRYABLE reason is decoded and still does not rename", () => {
+    // Slippage really can pass: decoding must not turn a retry into a rename.
+    const slip = encodeErrorResult({ abi: BUILTIN, errorName: "Error", args: ["Too little received"] });
+    assert.equal(executorRule(simulationRefusal(slip), "gas-unreadable"), "gas-unreadable");
+  });
+
+  it("the 13:07:48Z refusal is untouched: a Pons selector is not an encoded Error", () => {
+    assert.equal(withDecodedReasons(SIMULATION_REVERT_MESSAGE), SIMULATION_REVERT_MESSAGE);
+    assert.equal(executorRule(SIMULATION_REVERT_MESSAGE, "enable-too-wide"), "enable-too-wide");
   });
 });
