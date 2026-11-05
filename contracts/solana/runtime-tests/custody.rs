@@ -368,18 +368,13 @@ impl Fixture {
             self.expiry,
         )
     }
+    /// Signed by this fixture's owner; runs through `signed` like every other transaction.
     async fn owner_send(
         &mut self,
         ix: Vec<Instruction>,
     ) -> std::result::Result<(), solana_program_test::BanksClientError> {
-        let hash = self.ctx.banks_client.get_latest_blockhash().await.unwrap();
-        let tx = Transaction::new_signed_with_payer(
-            &ix,
-            Some(&self.ctx.payer.pubkey()),
-            &[&self.ctx.payer, &self.owner],
-            hash,
-        );
-        self.ctx.banks_client.process_transaction(tx).await
+        let owner = self.owner.insecure_clone();
+        self.signed(ix, &[&owner]).await
     }
     async fn swap(
         &mut self,
@@ -388,7 +383,7 @@ impl Fixture {
         let session = self.session.insecure_clone();
         self.signed(vec![ix], &[&session]).await
     }
-    /// An owner transaction made unique like `swap`, so resending is judged by the program.
+    /// Signed by another key, such as a second tenant's owner.
     async fn send_as(
         &mut self,
         ix: Vec<Instruction>,
@@ -396,7 +391,16 @@ impl Fixture {
     ) -> std::result::Result<(), solana_program_test::BanksClientError> {
         self.signed(ix, &[signer]).await
     }
-    /// Signs with the cluster payer (the fee payer account) and `signers`.
+    /// Signs with the cluster payer (the fee payer account) and `signers`, and runs it.
+    ///
+    /// Every transaction in this suite runs through process_transaction_with_metadata, which
+    /// executes it on the working bank inside the request. Do not mix in
+    /// BanksClient::process_transaction: it queues the transaction for the bank-forks thread
+    /// and returns once the signature status is committed, which can be before that thread
+    /// unlocks the batch's accounts. A transaction executed directly right after it then finds
+    /// the shared fee payer still locked and fails with AccountInUse without running.
+    ///
+    /// Each transaction is unique (see `nonce`), so a resent instruction is judged again.
     async fn signed(
         &mut self,
         mut ix: Vec<Instruction>,
@@ -1252,15 +1256,8 @@ async fn a_session_without_a_wsol_input_bound_cannot_be_created() {
     let mut f = Fixture::new().await;
     for (per_trade_wsol, daily_wsol) in [(0, 0), (0, 100), (200, 100)] {
         let bad = f.session_caps_ix(100, 150, per_trade_wsol, daily_wsol);
-        let hash = f.ctx.banks_client.get_latest_blockhash().await.unwrap();
-        let tx = Transaction::new_signed_with_payer(
-            &[bad],
-            Some(&f.ctx.payer.pubkey()),
-            &[&f.ctx.payer, &f.owner],
-            hash,
-        );
         assert!(vault_error(
-            f.ctx.banks_client.process_transaction(tx).await,
+            f.owner_send(vec![bad]).await,
             vault::VaultError::RiskLimit
         ));
     }
@@ -2431,7 +2428,13 @@ async fn typescript_built_instructions_run_against_the_compiled_program() {
         all.extend(signers.into_iter().filter(|s| s.pubkey() != payer.pubkey()));
         let hash = ctx.banks_client.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &all, hash);
-        let result = ctx.banks_client.process_transaction(tx).await;
+        // The one execution path, as in `Fixture::signed`.
+        let result = ctx
+            .banks_client
+            .process_transaction_with_metadata(tx)
+            .await
+            .unwrap()
+            .result;
         assert!(result.is_ok(), "{name}: {result:?}");
         let state = read_state(&mut ctx, vault_key).await;
         let (usdg, wsol) = (
