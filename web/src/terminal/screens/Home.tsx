@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { PerformanceChart } from "../DitherChart";
 import { ArrowUpRight, ChartNoAxesCombined, MessageCircle, MessagesSquare, Plus, Shirt, Sparkles, Trophy } from "lucide-react";
 import { useGroupChatSupported } from "../groupchat";
@@ -39,6 +40,7 @@ export function Home({
   onResign,
   hasAgent,
   phase,
+  signIn,
   read,
   retired = null,
   retiredAgents = [],
@@ -77,6 +79,15 @@ export function Home({
   hasAgent: boolean;
   /** What the shell knows before `mine` exists: still reading, failed, signed out. */
   phase?: Exclude<MoodInput["phase"], "agent">;
+  /**
+   * THE WAY BACK IN for a returning owner, shown only while signed out.
+   *
+   * A slot rather than a component Home imports: the sign-in control holds
+   * Privy hooks, and Home renders in node tests. The shell fills it only where
+   * no other sign-in is on screen (the desktop aside has its own), because two
+   * mounted sign-in controls would both try to prove the same session.
+   */
+  signIn?: ReactNode;
   /** Whether the leaderboard READ landed — quiet and unreadable are different. */
   read: import("../live").ReadState;
   /** Accounts the board folded into a count. See Board. */
@@ -163,6 +174,12 @@ export function Home({
                 <button type="button" className="mm-action primary" onClick={onCreate ?? onDeposit}><Sparkles size={18} aria-hidden="true"/> Create your merryman</button>
                 {onWardrobe && <button type="button" className="mm-action" onClick={onWardrobe}><Shirt size={18} aria-hidden="true"/> Dress him first</button>}
               </div>
+              {phase === "signed-out" && signIn && (
+                <div className="mm-signin">
+                  <p>Already have a merryman? Sign in with the email or X account you made him with.</p>
+                  {signIn}
+                </div>
+              )}
             </>
           )}
         </MerrymanHero>
