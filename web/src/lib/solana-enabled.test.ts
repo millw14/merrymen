@@ -204,8 +204,12 @@ describe("Privy's Solana configuration", () => {
     const accessor = readdirSync(dist).filter((name) => name.endsWith(".mjs")).map((name) => readFileSync(join(dist, name), "utf8"))
       .find((source) => source.includes("No RPC configuration found for chain"));
     assert.ok(accessor, "react-auth's Solana RPC accessor moved");
-    assert.match(accessor, /\.solanaRpcs\[e\]\?\?t\?\.\[e\]/, "configured RPCs first, then the plugin's defaults");
-    assert.match(accessor, /getDefaultRpcs\(\{appId:/);
+    // Minified names change between releases (3.46.0 called the plugin's
+    // defaults `t`, 3.51.1 `n`): bind whichever name holds them.
+    const plugin = /\b([\w$]+)=[\w$]+\?\.getDefaultRpcs\(\{appId:/.exec(accessor);
+    assert.ok(plugin, "react-auth no longer asks the plugin for its default RPCs");
+    const defaults = plugin[1]!.replace(/\$/g, "\\$");
+    assert.match(accessor, new RegExp(`\\.solanaRpcs\\[([\\w$]+)\\]\\?\\?${defaults}\\?\\.\\[\\1\\]`), "configured RPCs first, then the plugin's defaults");
   });
 
   it("only the terminal layout turns it on, from the server switch", () => {
