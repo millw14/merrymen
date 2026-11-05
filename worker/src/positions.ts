@@ -111,6 +111,20 @@ export interface PositionsRead {
    * it as flat.
    */
   unreadBalances: string[];
+  /**
+   * The raw balance of every row that ANSWERED above zero, keyed by lowercased
+   * token address — priced, unpriced by design and missing a price alike.
+   *
+   * A failed row is absent here and named in `unreadBalances`; a zero is absent
+   * from both. Empty when `readFailed`.
+   *
+   * THE TRENCHER VAULT'S CUSTODY ROUTING IS BUILT FROM THIS (index.ts
+   * autoTrenchBalances), so the vault is read once. It used to be read twice in
+   * one tick — this read for the valuation and a second raw multicall for the
+   * routing — and the two could disagree: a coin valued as held while its exit
+   * routed through the account, which does not hold it.
+   */
+  balances: Map<string, bigint>;
 }
 
 /**
@@ -268,6 +282,7 @@ export async function readPositions(
       unpricedByDesign: [],
       readFailed: true,
       unreadBalances: tokens.map((t) => t.symbol),
+      balances: new Map(),
     };
   }
 
@@ -275,6 +290,7 @@ export async function readPositions(
   const missingPrice: string[] = [];
   const unpricedByDesign: string[] = [];
   const unreadBalances: string[] = [];
+  const balances = new Map<string, bigint>();
   for (const { token: t, balAt, multAt } of slots) {
     const bal = results[balAt];
     // Balance unreadable: we can't say it's held, and we can't say it isn't.
@@ -284,6 +300,9 @@ export async function readPositions(
     }
     const rawBalance = bal.result as bigint;
     if (rawBalance === 0n) continue; // genuinely not held — not a coverage gap
+    // Before the multiplier and the price are asked: a held coin nobody can
+    // value is still held, and the routing that sells it needs its balance.
+    balances.set(t.address.toLowerCase(), rawBalance);
 
     // Held, but unvaluable: an unreadable multiplier mis-prices post-split. Fail
     // closed — flag, don't drop. (Only ERC-8056 tokens have one to read.)
@@ -326,7 +345,7 @@ export async function readPositions(
       }),
     });
   }
-  return { positions, missingPrice, unpricedByDesign, readFailed: false, unreadBalances };
+  return { positions, missingPrice, unpricedByDesign, readFailed: false, unreadBalances, balances };
 }
 
 /**

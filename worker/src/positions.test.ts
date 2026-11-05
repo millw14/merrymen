@@ -249,6 +249,58 @@ describe("readPositions — one failed balance row among good ones", () => {
 });
 
 /**
+ * THE RAW BALANCE OF EVERY ROW THAT ANSWERED, for the Trencher vault's routing.
+ *
+ * The tick used to read the vault twice — this read for the valuation, and a
+ * second raw `balanceOf` multicall for the custody routing — and the second
+ * one turned ONE failed row into `readFailed`, which froze every exit on the
+ * agent for as long as that row kept failing. The routing is built from this
+ * map now, so it must carry everything the raw read did: a held coin whether
+ * or not it can be valued, and nothing for a row that failed or read zero.
+ */
+describe("readPositions — balances, every row that answered", () => {
+  const MEME: StockToken = { ...feedless("MEME", "0x00000000000000000000000000000000000000C4"), kind: "memecoin" };
+  const GATO: StockToken = { ...feedless("GATO", "0x436B01E41314d4b010edd24cf7c997a7d111c0ab"), kind: "memecoin" };
+  const ZERO: StockToken = { ...feedless("ZERO", "0x00000000000000000000000000000000000000c5"), kind: "memecoin" };
+  const rateLimited = () => ({ status: "failure" as const, error: new Error("HTTP request failed. Status: 429") });
+
+  it("a priced holding and an unpriced one are both there, by lowercased address; a failed row and a zero are not", async () => {
+    const r = await readPositions(
+      // AAPL: balance + multiplier; MEME, GATO, ZERO: balance only.
+      client([good(5n * ONE), good(ONE), good(7n * ONE), rateLimited(), good(0n)]),
+      ACCT,
+      [AAPL, MEME, GATO, ZERO],
+      new Map([["AAPL", px(200)]]),
+    );
+    assert.deepEqual(
+      [...r.balances.entries()].sort(),
+      [
+        ["0x00000000000000000000000000000000000000a1", 5n * ONE],
+        ["0x00000000000000000000000000000000000000c4", 7n * ONE],
+      ],
+    );
+    assert.ok(!r.balances.has(GATO.address.toLowerCase()), "a failed row is no balance");
+    assert.ok(!r.balances.has(ZERO.address.toLowerCase()), "a zero is no balance");
+    // ONE FAILED ROW IS THAT TOKEN, UNREAD — never the whole read failing.
+    assert.deepEqual(r.unreadBalances, ["GATO"]);
+    assert.equal(r.readFailed, false);
+  });
+
+  it("a held Stock Token whose multiplier failed is a missing price AND a balance — it is held, only unvalued", async () => {
+    const r = await readPositions(client([good(5n * ONE), bad()]), ACCT, [AAPL], new Map([["AAPL", px(200)]]));
+    assert.deepEqual(r.missingPrice, ["AAPL"]);
+    assert.equal(r.balances.get(AAPL.address.toLowerCase()), 5n * ONE);
+  });
+
+  it("a whole read that failed has no balances at all, and says so", async () => {
+    const broken = { multicall: async () => { throw new Error("rpc down"); } } as unknown as PublicClient;
+    const r = await readPositions(broken, ACCT, [AAPL, MEME], new Map());
+    assert.equal(r.readFailed, true);
+    assert.equal(r.balances.size, 0);
+  });
+});
+
+/**
  * A feed that FAILED is transient — hold and retry. A feed that doesn't EXIST
  * never recovers, and treating the two alike froze the tick permanently: no
  * equity, no breaker, no strategy run, and therefore no way to sell out of the
