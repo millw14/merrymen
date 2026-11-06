@@ -29,7 +29,11 @@ import {
   type PublicClient,
 } from "viem";
 import { robinhoodChain } from "../../packages/core/src/chain";
-import { CASH, UNISWAP } from "../../packages/core/src/index";
+import { CASH, TRENCHER_VAULT_ABI, UNISWAP, type StockToken } from "../../packages/core/src/index";
+import { FEE_TIERS } from "./venues/uniswap";
+import { readPositions } from "./positions";
+import { quarantineOf, unknownCostOf } from "./quarantine";
+import { restoreUnpricedVaultCosts } from "./vault-cost-restore";
 import {
   CONTROL_RECIPIENT,
   SELL_CHECK_TTL_MS,
@@ -70,6 +74,8 @@ type Overrides = Record<string, { stateDiff?: Record<string, Hex> }>;
 class FakeChain {
   readonly tokens = new Map<string, FakeToken>();
   readonly v3 = new Map<string, Address>();
+  /** Trencher vaults, by address: what each one's `cost(token)` answers. */
+  readonly vaults = new Map<string, Map<string, bigint>>();
   /** Every eth_call, in order: target, function, sender, and whether storage was overridden. */
   readonly log: { to: string; fn: string; from?: string; overridden: boolean; recipient?: string }[] = [];
   /** Return an error to throw for this call, or null to answer it. */
@@ -129,6 +135,16 @@ class FakeChain {
       const e = this.fail({ to, fn: "getPool" });
       if (e) throw e;
       return encodeFunctionResult({ abi: FACTORY_ABI, functionName: "getPool", result: this.v3.get(`${x}|${y}|${fee}`) ?? "0x0000000000000000000000000000000000000000" });
+    }
+    const vault = this.vaults.get(to);
+    if (vault) {
+      const { functionName, args } = decodeFunctionData({ abi: TRENCHER_VAULT_ABI, data });
+      this.log.push({ to, fn: functionName, from, overridden: false });
+      const e = this.fail({ to, fn: functionName });
+      if (e) throw e;
+      if (functionName !== "cost") throw revert();
+      const token = String((args as readonly unknown[])[0]).toLowerCase();
+      return encodeFunctionResult({ abi: TRENCHER_VAULT_ABI, functionName: "cost", result: vault.get(token) ?? 0n });
     }
     const t = this.tokens.get(to);
     if (!t) throw revert();
@@ -495,6 +511,101 @@ describe("PROBE: GATO, the coin Shogun bought", () => {
     assert.deepEqual(pools, { ok: true, pools: [GATO_POOL] });
     const held = 2_842_330_000_000_000_000_000n;
     assert.equal((await gate.check(chain.client(), { token: GATO, holder: VAULT, pools: [GATO_POOL], amount: held, heldRaw: held })).verdict, "locked");
+  });
+});
+
+/**
+ * PROBE: FIX 3 END TO END, over the same stubbed transport.
+ *
+ * The vault is read the way the tick reads it (readPositions, one multicall),
+ * so a feedless coin lands in `unpricedByDesign` with its raw balance in
+ * `balances`. Then the restore runs with the real gate and the vault's real
+ * `cost()` call, and the quarantine is built over the result. A sellable coin
+ * leaves `unknownCost`; GATO, which cannot be sold, stays in it, and its
+ * cost() is never read.
+ */
+describe("PROBE: the unpriced vault restore, read → sell check → cost() → quarantine", () => {
+  const GATO = getAddress("0x436b01e41314d4B010EDd24CF7c997a7D111C0aB");
+  const GATO_POOL = getAddress("0xd97ffa831A40116877918FeC2C430b77D10f0d56");
+  const MOON = getAddress("0x00000000000000000000000000000000000000aa");
+  const MOON_POOL = getAddress("0x00000000000000000000000000000000000000bb");
+  const VAULT = getAddress("0x00000000000000000000000000000000002ca2b5");
+  const feedless = (symbol: string, address: Address): StockToken =>
+    ({ symbol, name: symbol, address, chainlinkFeed: null, kind: "memecoin", decimals: 18 }) as StockToken;
+  const watch = [feedless("GATO", GATO), feedless("MOON", MOON)];
+
+  it("MOON gets the vault's 2.5 USDG and leaves unknownCost; GATO stays in it, cost() unread", async () => {
+    const chain = new FakeChain();
+    const gato = chain.token({ address: GATO, rule: "pool-locked" });
+    const moon = chain.token({ address: MOON, rule: "clean" });
+    chain.pool(WETH, GATO, 100, GATO_POOL);
+    chain.pool(WETH, MOON, 3000, MOON_POOL);
+    gato.balances.set(VAULT.toLowerCase(), 2_842_330_000_000_000_000_000n);
+    moon.balances.set(VAULT.toLowerCase(), 9_000n * ONE);
+    chain.vaults.set(VAULT.toLowerCase(), new Map([[GATO.toLowerCase(), 2_500_000n], [MOON.toLowerCase(), 2_500_000n]]));
+    const client = chain.client();
+
+    const custodyRead = await readPositions(client, VAULT, watch, new Map());
+    assert.deepEqual(custodyRead.unpricedByDesign, ["GATO", "MOON"], "both feedless, both held");
+    const basis = new Map<string, { qtyRaw: bigint; costUsdg: bigint }>();
+    const quarantine = () => quarantineOf(custodyRead.unpricedByDesign, (s) => basis.get(s)?.costUsdg ?? 0n, () => undefined);
+    assert.deepEqual(unknownCostOf(quarantine()), ["GATO", "MOON"], "before: the book is unknown");
+
+    const gate = new SellLockGate();
+    const out = await restoreUnpricedVaultCosts({
+      unpriced: custodyRead.unpricedByDesign,
+      accountUnread: new Set(),
+      accountHeld: new Set(),
+      tokenOf: (symbol) => watch.find((t) => t.symbol === symbol)?.address,
+      vaultRawOf: (token) => custodyRead.balances.get(token.toLowerCase()),
+      readBasis: async (s) => basis.get(s) ?? { qtyRaw: 0n, costUsdg: 0n },
+      sellCheck: async (token, raw) => {
+        const pools = await gate.canonicalPools(client, token, { v3Factory: V3_FACTORY, quotes: [USDG, WETH], fees: FEE_TIERS });
+        if (!pools.ok) return { verdict: "unknown", transient: true, detail: pools.detail };
+        return gate.check(client, { token, holder: VAULT, pools: pools.pools, amount: raw, heldRaw: raw });
+      },
+      vaultCost: (token) =>
+        client.readContract({ address: VAULT, abi: TRENCHER_VAULT_ABI, functionName: "cost", args: [token] }).catch(() => null),
+      setBasis: async (s, b) => {
+        basis.set(s, b);
+      },
+    });
+    assert.deepEqual(out.map((o) => [o.symbol, o.result]), [["GATO", "not-sellable"], ["MOON", "restored"]]);
+    assert.deepEqual(basis.get("MOON"), { qtyRaw: 9_000n * ONE, costUsdg: 2_500_000n });
+    const q = quarantine();
+    assert.deepEqual(Object.fromEntries(q.holdings.map((h) => [h.symbol, h.costUsdg])), { GATO: 0n, MOON: 2_500_000n });
+    assert.deepEqual(unknownCostOf(q), ["GATO"], "after: MOON carried at cost; GATO still has no cost on record");
+    const costReads = chain.log.filter((l) => l.fn === "cost");
+    assert.equal(costReads.length, 1, "only MOON's cost() was read");
+    assert.equal(chain.log.some((l) => l.overridden), false, "a held coin is asked on the chain's own state");
+  });
+
+  it("a failed cost() read over the transport seeds nothing", async () => {
+    const chain = new FakeChain();
+    const moon = chain.token({ address: MOON, rule: "clean" });
+    chain.pool(WETH, MOON, 3000, MOON_POOL);
+    moon.balances.set(VAULT.toLowerCase(), ONE);
+    chain.vaults.set(VAULT.toLowerCase(), new Map([[MOON.toLowerCase(), 2_500_000n]]));
+    chain.fail = (c) => (c.fn === "cost" ? rateLimited() : null);
+    const client = chain.client();
+    const gate = new SellLockGate();
+    const basis = new Map<string, { qtyRaw: bigint; costUsdg: bigint }>();
+    const out = await restoreUnpricedVaultCosts({
+      unpriced: ["MOON"],
+      accountUnread: new Set(),
+      accountHeld: new Set(),
+      tokenOf: () => MOON,
+      vaultRawOf: () => ONE,
+      readBasis: async () => ({ qtyRaw: 0n, costUsdg: 0n }),
+      sellCheck: async (token, raw) => gate.check(client, { token, holder: VAULT, pools: [MOON_POOL], amount: raw, heldRaw: raw }),
+      vaultCost: (token) =>
+        client.readContract({ address: VAULT, abi: TRENCHER_VAULT_ABI, functionName: "cost", args: [token] }).catch(() => null),
+      setBasis: async (s, b) => {
+        basis.set(s, b);
+      },
+    });
+    assert.equal(out[0]!.result, "cost-unread");
+    assert.equal(basis.size, 0);
   });
 });
 

@@ -62,6 +62,17 @@ export function quarantineOf(
   return { holdings, totalCostUsdg };
 }
 
+/**
+ * The quarantined holdings with NO cost on record — what the tick calls
+ * `unknownCost`. One of them makes the book unknown: we know neither what it is
+ * worth nor what was paid, so equity, the peak, the fee and the drawdown
+ * breaker are all skipped (index.ts). Named so the tick and its tests read the
+ * same rule.
+ */
+export function unknownCostOf(view: QuarantineView): string[] {
+  return view.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
+}
+
 export interface ScoutLimits {
   enabled: boolean;
   /** Total cost that may sit in unpriceable positions at once (6dp). */

@@ -95,7 +95,7 @@ import { checkEnergySwapCalls, checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
 import { SHADOW_SOURCES, ownerRejectRuleLabel, publicationSourceFor, publishableThesis, rejectRuleLabel, rejectRuleRemedy, type PublicThesis } from "./thesis-policy";
-import { bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
+import { FEE_TIERS, bestRoute, buildTradeCalls, minOutWithSlippage, requoteRoute } from "./venues/uniswap";
 import {
   NotRecorded,
   createAgentExecutor,
@@ -377,7 +377,8 @@ import { createDepthReader } from "./venues/depth-cache";
 import { getName, nameSeat } from "./soul";
 import { createNameReconciler, mirrorNameOnArm } from "./name-reconcile";
 import { curveMarkedSymbols, positionValueUsdg, readMultipliers, readPositions, sampledGainUsdg, type Position } from "./positions";
-import { quarantineOf } from "./quarantine";
+import { quarantineOf, unknownCostOf } from "./quarantine";
+import { restoreUnpricedVaultCosts, zeroCostMemo, type RestoreResult } from "./vault-cost-restore";
 import {
   describeDiscovery,
   describeTrending,
@@ -592,6 +593,7 @@ import {
   upsertClassPosition,
   getBasis,
   openBasisQty,
+  readBasis,
   setBasis,
   setPositionFloor,
   positionFloors,
@@ -1080,6 +1082,11 @@ async function main() {
   // one per worker, so its answers, slots and pools are cached across ticks,
   // and the candidate list can skip what the buy path just turned back.
   const sellLock = new SellLockGate();
+  // A vault coin's cost() that answered zero is not asked again for ten
+  // minutes (vault-cost-restore.ts), and what each unpriced vault coin's
+  // restore last came to, so the log says it once per change, not per tick.
+  const vaultCostZero = zeroCostMemo(10 * 60_000);
+  const vaultRestoreNoted = new Map<string, RestoreResult>();
   // Pools proved canonical stay proved across passes (trencher-discovery.ts).
   // Grant changes keep these chain facts; connection changes replace the cache
   // because another RPC can serve a different chain or fork.
@@ -12526,6 +12533,9 @@ async function main() {
         // vault half alone must not seed its basis (unread-held.ts strips it
         // whole below).
         const accountUnread = new Set(posRead.unreadBalances);
+        // WHAT THE ACCOUNT ITSELF HOLDS, before the vault's coins are merged
+        // into the same arrays below: the vault's cost() covers only its half.
+        const accountHeld = new Set([...posRead.positions.map((p) => p.symbol), ...posRead.unpricedByDesign, ...posRead.missingPrice]);
         for (const p of custodyRead.positions) {
           const existing=positions.find(v=>v.token.toLowerCase()===p.token.toLowerCase());
           if (existing) { existing.rawBalance+=p.rawBalance; existing.valueUsdg+=p.valueUsdg; }
@@ -12545,6 +12555,50 @@ async function main() {
               }
               if (cost > 0n) await setBasis(agentId,"live",p.symbol,{qtyRaw:p.rawBalance,costUsdg:cost});
             }
+          }
+        }
+        // ── AND THE SAME FOR A VAULT COIN NOBODY CAN PRICE (vault-cost-restore.ts)
+        //
+        // The restore above ran for priced coins only, so an unpriced vault
+        // coin that lost its basis (GATO, 2026-11-04 08:36: a 429-hit read let
+        // the sweep close it) reached the quarantine at a cost of ZERO —
+        // "unpriced AND no cost on record" — and the book was unknown every
+        // tick, the breaker skipped. The vault's cost() restores it, under the
+        // rules above (never from a partial balance; a failed read seeds
+        // nothing), and ONLY when a simulated sale of the vault's own holding
+        // goes through: a coin that cannot be sold is not carried at cost,
+        // because there cost is the loss, not a stand-in for worth.
+        const restored = await restoreUnpricedVaultCosts({
+          unpriced: custodyRead.unpricedByDesign,
+          accountUnread,
+          accountHeld,
+          tokenOf: (symbol) => watchTokens.find((t) => t.symbol === symbol)?.address,
+          vaultRawOf: (token) => custodyRead.balances.get(token.toLowerCase()),
+          readBasis: (symbol) => readBasis(agentId, "live", symbol),
+          sellCheck: async (token, raw) => {
+            const pools = await sellLock.canonicalPools(client, token, {
+              v3Factory: UNISWAP.v3Factory as `0x${string}`,
+              quotes: [CASH.USDG as `0x${string}`, CASH.WETH as `0x${string}`],
+              fees: FEE_TIERS,
+            });
+            if (!pools.ok) return { verdict: "unknown", transient: true, detail: pools.detail };
+            return sellLock.check(client, { token, holder: vault, pools: pools.pools, amount: raw, heldRaw: raw });
+          },
+          vaultCost: (token) =>
+            vaultCostZero(`${vault}|${token}`, () =>
+              client.readContract({ address: vault, abi: TRENCHER_VAULT_ABI, functionName: "cost", args: [token] }).catch(() => null),
+            ),
+          setBasis: (symbol, b) => setBasis(agentId, "live", symbol, b),
+        });
+        for (const r of restored) {
+          if (vaultRestoreNoted.get(r.symbol) === r.result) continue;
+          vaultRestoreNoted.set(r.symbol, r.result);
+          if (r.result === "restored") {
+            console.log(`[trencher] restored ${r.symbol}'s basis from the vault's cost (${usdgNum(r.costUsdg ?? 0n)} USDG)`);
+          } else if (r.result === "not-sellable") {
+            console.log(`[trencher] ${r.symbol} has no cost on record and is not restored at cost: ${r.detail}`);
+          } else if (r.result === "cost-unread" || r.result === "basis-unread") {
+            console.log(`[trencher] could not read ${r.symbol}'s ${r.result === "cost-unread" ? "vault cost" : "basis"}; basis not seeded this tick`);
           }
         }
         missingPrice.push(...custodyRead.missingPrice);
@@ -12973,7 +13027,7 @@ async function main() {
       quarantine.totalCostUsdg + curveCostUsdg + lastClassCostUsdg - classCostInQuarantine;
     lastQuarantinedKnown = true;
 
-    const unknownCost = quarantine.holdings.filter((h) => h.costUsdg === 0n).map((h) => h.symbol);
+    const unknownCost = unknownCostOf(quarantine);
     // A LIVE BOOK'S PERP HALF. No live perps exist in this build (perps/lane.ts
     // perpsRailOf: a live account with perps on is refused `perp-live-not-yet`),
     // so the lane reads nothing and this is the known zero of an agent with
