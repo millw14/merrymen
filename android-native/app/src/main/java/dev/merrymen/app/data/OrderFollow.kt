@@ -175,6 +175,7 @@ val REJECT_RULE_LABELS: Map<String, String> = mapOf(
   "daily-cap" to "past today's spending cap",
   "ops-cap" to "past today's number of trades",
   "drawdown-breaker" to "the drawdown breaker was tripped",
+  "holding-unread" to "a coin it holds could not be read, so its book could not be totalled and nothing new was opened",
   "asset-allowlist" to "that asset is not in its signed permissions",
   "target-allowlist" to "that venue is not in its signed permissions",
   "transfer-recipient-allowlist" to "that recipient is not in its signed permissions",
