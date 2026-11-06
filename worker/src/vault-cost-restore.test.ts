@@ -178,8 +178,10 @@ describe("index.ts wiring", () => {
     assert.match(call, /readBasis\(agentId, "live", symbol\)/);
     assert.doesNotMatch(call, /getBasis/);
     assert.match(call, /heldRaw: raw/, "the chain's own state, no override");
-    assert.match(call, /accountUnread/);
-    assert.match(call, /accountHeld/);
+    // The variables themselves, by shorthand: `accountUnread: new Set()` must not pass.
+    assert.match(call, /^\s*accountUnread,$/m);
+    assert.match(call, /^\s*accountHeld,$/m);
+    assert.match(call, /unpriced: custodyRead\.unpricedByDesign,/);
     const merge = SRC.slice(SRC.lastIndexOf("const accountUnread = new Set(posRead.unreadBalances);", at), at);
     const held = merge.indexOf("const accountHeld = new Set(");
     assert.ok(held > 0 && held < merge.indexOf("for (const p of custodyRead.positions)"), "the account's own holdings, before the vault's are merged into them");

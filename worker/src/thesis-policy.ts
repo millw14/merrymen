@@ -851,7 +851,7 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   // (sell-lock.ts). Said as what was tested and what it showed — never as a
   // judgement of anyone behind the coin.
   "sell-locked": "a test sale of that coin into its pool was refused, so it could have been bought but not sold back",
-  "sell-unverified": "a test sale of that coin into its pool could not be run, so it was not bought blind",
+  "sell-unverified": "a test sale of that coin into its pool could not be shown to go through, so it was not bought blind",
   slippage: "the price moved too far between quote and fill",
   "insufficient-balance": "it did not hold what it tried to spend",
   "curve-graduated": "that launch had already graduated",

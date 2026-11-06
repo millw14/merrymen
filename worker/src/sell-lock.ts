@@ -25,23 +25,41 @@
  * and an unknown refuses the buy exactly as `locked` does. Only `sellable` lets
  * a buy through (sellRefusal).
  *
+ * A buy is asked about EVERY canonical v3 pool its coin has against USDG and
+ * WETH, plus the pool its route buys from: an exit is routed by the quoter,
+ * which cannot see a blocked pool, so a coin that refuses ANY pool it could be
+ * sold into is a coin whose exit can be routed into the refusal.
+ *
  * WHAT THIS IS NOT, and each limit is real:
- *   - Not a tax check. A coin that keeps 99% of every sale returns success.
+ *   - NOT A TRANSFER-TAX CHECK, and on this venue that is a sell lock too. A
+ *     coin that skims even 1% off a transfer into the pool returns success
+ *     here, but the pool receives less than the swap says, and a v3 pool (or
+ *     v4 settle) reverts that sale outright. Catching it needs the pool's
+ *     balance delta, which one `transfer` cannot return: a probe contract put at
+ *     the holder by a code override (follow-up, not here). Nor does this see a
+ *     `transfer` that answers true without moving anything.
+ *   - Not the router's exact call. A sale is `approve` then `transferFrom(holder,
+ *     pool)` by the router; this is `transfer(pool)` by the holder, which
+ *     reaches the same `_transfer(holder, pool)` in every ERC-20 template we
+ *     know. A token that tells the two apart is not caught.
+ *   - Not a lock the buy itself switches on: a blacklist written on buy, a sell
+ *     cap tied to the amount bought. The holder here has not bought yet.
+ *   - Not a lock that can tell a simulation from a sale (eth_call runs at a gas
+ *     price of zero, which a token can read), and not a v4 hook that refuses
+ *     sales: the v4 "pool" is the PoolManager, which every v4 coin accepts.
  *   - Not a promise about later. An owner who flips a switch after the buy is
  *     not seen; a `sellable` answer is cached for minutes, not hours, for that.
- *   - Not the router's exact call. A sale is `transferFrom(holder, pool)` by
- *     the router; this is `transfer(pool)` by the holder, which reaches the same
- *     `_transfer(holder, pool)` in every ERC-20 template we know. A token that
- *     tells the two apart is not caught.
  *   - Not every layout. A balance kept anywhere but a plain mapping slot (a
  *     reflection token's `_rOwned`, say) cannot be set, so the answer is
  *     `unknown`, and the buy is refused rather than made blind.
  *
  * COST, BOUNDED ON PURPOSE: the fleet's read quota is spent and its reads fail
- * over to the public RPC. One sale (plus one control when it reverts) per token
- * per cache window, two `balanceOf` calls per token per process to find its
- * slot, and one `getPool` per route. Answers are cached by verdict
- * (SELL_CHECK_TTL_MS) and concurrent asks for the same coin share one call.
+ * over to the public RPC. One sale per pool (plus one control when one reverts)
+ * per coin per cache window; two `balanceOf` calls per coin and holder per
+ * process to find its slot; one multicall per coin per six hours for its
+ * canonical pools, and one `getPool` per route, ever. Answers are cached by
+ * verdict (SELL_CHECK_TTL_MS), a failed read included, and concurrent asks for
+ * the same coin share one call.
  *
  * Verified against Robinhood Chain's public RPC, 2026-11-06: it serves eth_call
  * state overrides (it does not serve eth_createAccessList, which is why the slot
@@ -232,25 +250,32 @@ export async function findBalanceSlot(
   holder: Address,
 ): Promise<{ ok: true; slot: Hex } | { ok: false; transient: boolean; detail: string }> {
   const candidates = balanceSlotCandidates(holder);
-  const read = async (stateDiff: { slot: Hex; value: Hex }[]): Promise<bigint | { failed: string }> => {
+  // A REVERT or an answer that does not decode is the coin's own, and asked
+  // again it says the same: settled. Only a request that failed is transient.
+  const read = async (stateDiff: { slot: Hex; value: Hex }[]): Promise<bigint | { failed: string; transient: boolean }> => {
+    let data: Hex | undefined;
     try {
-      const { data } = await client.call({
+      ({ data } = await client.call({
         to: token,
         data: encodeFunctionData({ abi: erc20Abi, functionName: "balanceOf", args: [holder] }),
         stateOverride: [{ address: token, stateDiff }],
-      });
+      }));
+    } catch (e) {
+      return { failed: describe(e), transient: !chainReverted(e) };
+    }
+    try {
       return decodeFunctionResult({ abi: erc20Abi, functionName: "balanceOf", data: data ?? "0x" });
     } catch (e) {
-      return { failed: describe(e) };
+      return { failed: describe(e), transient: false };
     }
   };
   const all = await read(candidates.map((slot, i) => ({ slot, value: word(MARK + BigInt(i)) })));
-  if (typeof all !== "bigint") return { ok: false, transient: true, detail: `its balance could not be read (${all.failed})` };
+  if (typeof all !== "bigint") return { ok: false, transient: all.transient, detail: `its balance could not be read (${all.failed})` };
   const at = all >= MARK && all < MARK + BigInt(candidates.length) ? Number(all - MARK) : -1;
   if (at < 0) return { ok: false, transient: false, detail: "its balances are not kept in a layout a simulated sale can set" };
   const slot = candidates[at]!;
   const alone = await read([{ slot, value: word(MARK) }]);
-  if (typeof alone !== "bigint") return { ok: false, transient: true, detail: `its balance could not be read (${alone.failed})` };
+  if (typeof alone !== "bigint") return { ok: false, transient: alone.transient, detail: `its balance could not be read (${alone.failed})` };
   if (alone !== MARK) return { ok: false, transient: false, detail: "its balances are not kept in a layout a simulated sale can set" };
   return { ok: true, slot };
 }
@@ -350,7 +375,34 @@ export function sellRefusal(check: SellCheck, label: string): { rule: SellRefusa
         rule: "sell-unverified",
         detail: `not buying ${label}: ${check.detail}, and a coin that cannot be shown to sell back is not bought`,
       };
+    default:
+      // Anything this switch does not name refuses: only `sellable` buys.
+      return { rule: "sell-unverified", detail: `not buying ${label}: its test sale gave no answer this gate knows` };
   }
+}
+
+/**
+ * DOES THIS BUY GET ASKED? Pure, so the line is tested rather than read.
+ *
+ * Fails CLOSED on the token: every buy is asked unless what it buys is the
+ * cash, the bridge, or a token the watch set names as a stock or an ETF (an
+ * issuer-run contract, not this risk). A Trencher vault buy is always asked,
+ * and a token the watch set does not know is asked too. Never an exit: a sale
+ * into the cash or the bridge, which must always be attemptable.
+ */
+export function sellGateApplies(args: {
+  isExit: boolean;
+  buyToken: string;
+  custody?: string;
+  cash: readonly string[];
+  watch: readonly { address: string; kind?: string }[];
+}): boolean {
+  if (args.isExit) return false;
+  const bought = args.buyToken.toLowerCase();
+  if (args.cash.some((c) => c.toLowerCase() === bought)) return false;
+  if (args.custody === "trencher") return true;
+  const known = args.watch.find((t) => t.address.toLowerCase() === bought);
+  return !known || known.kind === "memecoin" || known.kind === undefined;
 }
 
 const V3_FACTORY_ABI = parseAbi(["function getPool(address a, address b, uint24 fee) view returns (address)"]);
@@ -377,11 +429,11 @@ export interface RouteRef {
  * factory never moves one.
  */
 export class SellLockGate {
-  private readonly verdicts = new Map<string, { token: string; check: SellCheck; until: number }>();
+  private readonly verdicts = new Map<string, { token: string; check: SellCheck; until: number; amount: bigint }>();
   private readonly inflight = new Map<string, Promise<SellCheck>>();
   private readonly slots = new Map<string, Hex>();
   private readonly poolAt = new Map<string, Address>();
-  private readonly canonical = new Map<string, { pools: Address[]; until: number }>();
+  private readonly canonical = new Map<string, { result: { ok: true; pools: Address[] } | { ok: false; detail: string }; until: number }>();
   private readonly now: () => number;
   private readonly ttl: Record<keyof typeof SELL_CHECK_TTL_MS, number>;
 
@@ -406,7 +458,9 @@ export class SellLockGate {
     const key = [token, holder, req.heldRaw === undefined ? "entry" : "held", ...req.pools.map((p) => p.toLowerCase()).sort()].join("|");
     const now = this.now();
     const cached = this.verdicts.get(key);
-    if (cached && cached.until > now) return cached.check;
+    // A SALE SHOWN AT ONE SIZE IS NOT SHOWN AT A BIGGER ONE: a coin can cap
+    // what a holder may sell. A refusal stands at any size.
+    if (cached && cached.until > now && (cached.check.verdict !== "sellable" || req.amount <= cached.amount)) return cached.check;
     const running = this.inflight.get(key);
     if (running) return running;
     const slotKey = `${token}|${holder}`;
@@ -416,7 +470,7 @@ export class SellLockGate {
       );
       const { slot, ...check } = result as SellCheck & { slot?: Hex };
       if (slot) this.slots.set(slotKey, slot);
-      this.remember(key, token, check);
+      this.remember(key, token, check, req.amount);
       return check;
     })();
     this.inflight.set(key, run);
@@ -435,21 +489,32 @@ export class SellLockGate {
    */
   async checkEntry(
     client: PublicClient,
-    req: { route: RouteRef; holder: Address; amount: bigint; venue: { v3Factory: Address; v4PoolManager: Address } },
+    req: {
+      route: RouteRef;
+      holder: Address;
+      amount: bigint;
+      venue: { v3Factory: Address; v4PoolManager: Address; quotes: readonly Address[]; fees: readonly number[] };
+    },
   ): Promise<SellCheck> {
-    const at = await this.routePool(client, req.route, req.venue);
-    if (!at.ok) {
-      const check: SellCheck = { verdict: "unknown", transient: true, detail: at.detail };
+    const refuse = (detail: string): SellCheck => {
+      const check: SellCheck = { verdict: "unknown", transient: true, detail };
       this.remember(`${req.route.token}|${req.holder}|route`.toLowerCase(), req.route.token.toLowerCase(), check);
       return check;
-    }
-    return this.check(client, { token: req.route.token, holder: req.holder, pools: [at.pool], amount: req.amount });
+    };
+    const at = await this.routePool(client, req.route, req.venue);
+    if (!at.ok) return refuse(at.detail);
+    // AND EVERY OTHER POOL IT COULD BE SOLD INTO: the exit is routed by the
+    // quoter, which cannot see a blocked pool.
+    const others = await this.canonicalPools(client, req.route.token, req.venue);
+    if (!others.ok) return refuse(others.detail);
+    const pools = [...new Map([at.pool, ...others.pools].map((p) => [p.toLowerCase(), p])).values()];
+    return this.check(client, { token: req.route.token, holder: req.holder, pools, amount: req.amount });
   }
 
-  private remember(key: string, token: string, check: SellCheck): void {
+  private remember(key: string, token: string, check: SellCheck, amount = 0n): void {
     const now = this.now();
     this.prune(now);
-    this.verdicts.set(key, { token, check, until: now + this.ttlOf(check) });
+    this.verdicts.set(key, { token, check, until: now + this.ttlOf(check), amount });
   }
 
   /**
@@ -518,7 +583,15 @@ export class SellLockGate {
     const key = `${venue.v3Factory}|${token}`.toLowerCase();
     const now = this.now();
     const known = this.canonical.get(key);
-    if (known && known.until > now) return { ok: true, pools: known.pools };
+    if (known && known.until > now) return known.result;
+    // A FAILED READ IS REMEMBERED TOO, for the transient window: a coin left
+    // unrestored is asked every tick, and without this a failing RPC is asked
+    // once a tick, per coin, for as long as it fails.
+    const failed = (detail: string) => {
+      const result = { ok: false as const, detail };
+      this.canonical.set(key, { result, until: now + this.ttl.unknownTransient });
+      return result;
+    };
     const asks = venue.quotes.flatMap((q) => venue.fees.map((fee) => ({ q, fee })));
     try {
       const rows = await client.multicall({
@@ -527,13 +600,14 @@ export class SellLockGate {
       });
       const pools: Address[] = [];
       for (const r of rows) {
-        if (r.status !== "success") return { ok: false, detail: "its pools could not be read" };
+        if (r.status !== "success") return failed("its pools could not be read");
         if ((r.result as string).toLowerCase() !== ZERO) pools.push(r.result as Address);
       }
-      this.canonical.set(key, { pools, until: now + this.ttl.locked });
-      return { ok: true, pools };
+      const result = { ok: true as const, pools };
+      this.canonical.set(key, { result, until: now + this.ttl.locked });
+      return result;
     } catch (e) {
-      return { ok: false, detail: `its pools could not be read (${describe(e)})` };
+      return failed(`its pools could not be read (${describe(e)})`);
     }
   }
 
