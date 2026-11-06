@@ -136,6 +136,9 @@ const EXEC_PREFIXES: readonly string[] = ["couldn't submit:", "fence-", PAPER_FI
 const MARKET_RULES: ReadonlySet<string> = new Set([
   "impact-cap",
   "impact-unknown",
+  // The coin, not the owner's wall: its simulated sale was refused or could not be run (sell-lock.ts).
+  "sell-locked",
+  "sell-unverified",
   "energy-no-quote",
   "energy-tax",
   "energy-tax-unreadable",

@@ -90,6 +90,7 @@ import {
 } from "../../packages/core/src/index";
 import { fetchRialtoQuote, resolveRialtoRouter } from "./venues/rialto";
 import { impactBps, judgeImpact, probeAmountIn } from "./impact";
+import { SellLockGate, sellRefusal } from "./sell-lock";
 import { checkEnergySwapCalls, checkV3SwapCalls } from "./final-fence";
 import { readPeers } from "./peer-files";
 import { peerLabel, peerView } from "./strategist/peer-view";
@@ -1075,6 +1076,10 @@ async function main() {
   let autoTrenchContext = "";
   let autoTrenchNext = 0;
   let autoTrenchBalances = new Map<string,bigint>();
+  // WHETHER A COIN CAN BE SOLD BACK, asked before it is bought (sell-lock.ts):
+  // one per worker, so its answers, slots and pools are cached across ticks,
+  // and the candidate list can skip what the buy path just turned back.
+  const sellLock = new SellLockGate();
   // Pools proved canonical stay proved across passes (trencher-discovery.ts).
   // Grant changes keep these chain facts; connection changes replace the cache
   // because another RPC can serve a different chain or fork.
@@ -6478,6 +6483,16 @@ async function main() {
           }
           continue;
         }
+        // A COIN THE BUY PATH HAS JUST TURNED BACK (sell-lock.ts) — a test sale
+        // into its pool refused, or one that could not be run — is not offered
+        // again while that answer stands, so the Brain is not paid to review a
+        // buy that will be refused and the slot goes to the next coin. No chain
+        // read here: only what the buy path already learned, and the buy path
+        // said so to the owner when it refused.
+        if (sellLock.refusalFor(t.address)) {
+          funnel.note(t.address, t.symbol, classifyStage({ kind: "candidate-skip", skip: "sell-locked" }));
+          continue;
+        }
         const quote = lastPrices.get(t.symbol);
         out.push({ symbol: t.symbol, token: t.address, decimals: t.decimals ?? 18,
           ...(autonomous ? {custodyVault: autoTrench!.custody.vault} : {}),
@@ -6511,6 +6526,9 @@ async function main() {
         (t) => t.kind === "memecoin" && t.symbol === c.symbol && t.address.toLowerCase() === c.address.toLowerCase(),
       );
       const quote = sameToken ? lastPrices.get(c.symbol) : undefined;
+      // The same skip as the fast path above: a coin the buy path just turned
+      // back on its simulated sale is not this tick's one entry again.
+      if (sellLock.refusalFor(c.address)) continue;
       out.push({
         symbol: c.symbol,
         token: c.address as `0x${string}`,
@@ -10154,6 +10172,57 @@ async function main() {
         // An exit above the cap still goes through, but it does not go through
         // quietly — the tape has to show what getting out cost.
         if (verdict.note) await addEvent(agentId, "warn", verdict.note);
+
+        // ── CAN WHAT THIS BUYS BE SOLD BACK? (sell-lock.ts) ─────────────────
+        //
+        // GATO, 2026-11-04: a coin whose transfer into its only pool reverts
+        // for everyone but its deployer passed every check above, because the
+        // quoter never moves the token, and it has sat unsellable in Shogun's
+        // vault since. So before a memecoin buy, its SALE is simulated: the
+        // amount this route would deliver, from the account that would hold it
+        // (given a balance by a state override, so it never depends on already
+        // holding the coin), into the pool this route buys from. Locked refuses
+        // the buy by name; a simulation that could not be run refuses it too.
+        //
+        // HERE, after the route is priced and before anything is built, because
+        // this is the one point every buy passes — the Trencher's, the
+        // strategist's, an owner's order — and the first where the pool it would
+        // sell into is known. Never on an exit: getting out is always attempted.
+        // Memecoins only: a stock token's issuer-run contract is not this risk.
+        {
+          const bought = intent.buyToken.toLowerCase();
+          const coin =
+            !isExit &&
+            bought !== (CASH.USDG as string).toLowerCase() &&
+            bought !== (CASH.WETH as string).toLowerCase() &&
+            (intent.custody === "trencher" || watchTokens.some((t) => t.kind === "memecoin" && t.address.toLowerCase() === bought));
+          if (coin) {
+            const check = await sellLock.checkEntry(active.client, {
+              route: { tokenIn: intent.sellToken, token: intent.buyToken, fee: quote.fee, path: quote.path, v4: quote.v4 },
+              holder: intent.custody === "trencher" ? grantTrencher(active.grant)!.vault : executor.address,
+              amount: quote.amountOut,
+              venue: { v3Factory: UNISWAP.v3Factory as `0x${string}`, v4PoolManager: UNISWAP.v4PoolManager as `0x${string}` },
+            });
+            const refusal = sellRefusal(check, symbolOfToken(intent.buyToken) ?? short(intent.buyToken));
+            if (refusal) {
+              console.log(`[sell-lock] ${refusal.rule}: ${refusal.detail}`);
+              await addEvent(agentId, "warn", refusal.detail);
+              await recordTrade({
+                agent_id: agentId,
+                kind: intent.kind,
+                target: intent.target,
+                sell_token: intent.sellToken,
+                buy_token: intent.buyToken,
+                amount_usdg: usdgNum(notional),
+                status: "rejected",
+                reject_rule: refusal.rule,
+                sim_quote_out: quote.amountOut.toString(),
+                sim_fee_tier: quote.fee,
+              });
+              return;
+            }
+          }
+        }
 
         const minOut = minOutWithSlippage(quote.amountOut, cfg.slippageBps);
         sim = {
