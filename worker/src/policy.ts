@@ -530,6 +530,24 @@ export interface AgentState {
    */
   perpLastKnownMicro?: bigint | null;
   /**
+   * HELD COINS WHOSE BALANCE COULD NOT BE READ on the latest tick that read the
+   * book (index.ts heldUnreadNow; unread-held.ts unreadHeldOf) — by symbol, and
+   * by lowercased token address.
+   *
+   * Left out of the book whole, they make equity unknown, and unknown equity
+   * switches the drawdown rule below OFF. So this is its stand-in, as
+   * `perpVenueUnread` is for the venue, with no "last known zero" escape: the
+   * books say these are held. While it is non-empty:
+   *
+   *   - every NON-EXIT is refused (`holding-unread`);
+   *   - every intent that SELLS one of these coins is refused too, exits
+   *     included — its size could only come from a balance nobody read;
+   *   - every exit of anything else still goes out.
+   *
+   * Absent or empty refuses nothing.
+   */
+  heldUnread?: { symbols: readonly string[]; tokens: ReadonlyMap<string, string> };
+  /**
    * EVERYTHING THE PERP BRANCH JUDGES AN OPEN BY, supplied by the caller —
    * never by the intent, for the reason ScoutContext gives: a flag on the
    * intent saying "the venue reads isolated at this leverage" would be a flag
@@ -662,6 +680,46 @@ export function perpsWalletRefusal(wallet: "spot" | "perps", intent: Pick<TradeI
 }
 
 /**
+ * WHICH TOKEN THIS INTENT SELLS, when it sells a watched one — or null.
+ *
+ * Asked by `holding-unread`: a coin whose balance did not read cannot be sold,
+ * because the only size on hand for it is a stale row or a remembered one, and
+ * a sell sized from either turns an unknown balance into a guessed one. A sell
+ * that reverts also suppresses its pair for the arm (revert.ts suppressionKey),
+ * which would block the right sell once the balance reads again.
+ *
+ * Only the SOLD leg: a curve exit from a readable coin INTO an unread quote
+ * sizes nothing from the unread balance. The other kinds sell no watched coin:
+ * a transfer moves USDG (its target is the USDG contract), a vault move and a
+ * margin move are USDG, an energy buy spends USDG, an equity order is the
+ * broker's, and a perp order is a venue position.
+ *
+ * A SWITCH WITH A `never` DEFAULT, like isExitIntent below, so a new kind does
+ * not compile until someone decides what it sells.
+ */
+export function soldTokenOf(intent: TradeIntent): `0x${string}` | null {
+  switch (intent.kind) {
+    case "swap":
+      return intent.sellToken;
+    case "curve-trade":
+      return intent.assetIn;
+    case "transfer":
+    case "vault-deposit":
+    case "vault-withdraw":
+    case "equity-order":
+    case "energy-buy":
+    case "perp-order":
+    case "perp-margin":
+      return null;
+    default: {
+      const unhandled: never = intent;
+      void unhandled;
+      return null;
+    }
+  }
+}
+
+/**
  * IS THIS INTENT MONEY COMING HOME? The drawdown breaker's exit test, lifted
  * out of checkPolicy VERBATIM so the energy gate (worker/src/energy.ts,
  * index.ts) asks the one question the breaker asks, rather than a second copy
@@ -781,7 +839,8 @@ export function isExitIntent(
 // money at risk and pass every brake there is: the rail, the incident flag,
 // the halt, the market, the grant's remaining life, leverage as the venue reads
 // it, a stop that beats liquidation, the owner's perp caps, and then the SHARED
-// brakes every entry passes (ops, per-trade, daily, perp-unpriced, breaker).
+// brakes every entry passes (ops, per-trade, daily, perp-unpriced,
+// holding-unread, breaker).
 // Exits — a reduce-only reduce or close, a withdrawal, a claim — are judged
 // here and RETURNED before any of those brakes, and before the session key's
 // expiry: an L2 close and an L2 withdrawal are signed with the Lighter key,
@@ -999,8 +1058,8 @@ function checkPerpMarginHome(intent: PerpMarginIntent, limits: AgentLimits, stat
 /**
  * A MARGIN DEPOSIT — the mirror of the wall's deposit permission, plus the
  * contract's bounds on what may sit at the venue. Returns null when the shared
- * brakes (ops, per-trade at perTradeUsdg, daily, perp-unpriced, breaker)
- * should judge it next.
+ * brakes (ops, per-trade at perTradeUsdg, daily, perp-unpriced, holding-unread,
+ * breaker) should judge it next.
  */
 function checkPerpDeposit(intent: PerpMarginIntent, limits: AgentLimits, state: AgentState): Verdict | null {
   const p = state.perp;
@@ -1976,6 +2035,40 @@ export function checkPolicy(
         "Lighter could not be read this tick, and money was at the venue when it last was — without it the book " +
         "cannot be totalled or its drawdown judged, so nothing new is opened until it reads. Exits still go out.",
     };
+  }
+
+  // THE SAME STAND-IN WHILE A HELD COIN'S BALANCE IS UNREAD (AgentState
+  // heldUnread). Same place and the same `isExit`, so a cap breach still says
+  // so first and the sell that clears a readable position is never what a
+  // failed read blocks. No read-zero escape: the books say it is held.
+  const unread = state.heldUnread;
+  if (unread && (unread.symbols.length > 0 || unread.tokens.size > 0)) {
+    // ITS OWN SALE FIRST, EXITS INCLUDED. The coin left the tick's book whole
+    // (unread-held.ts withoutUnreadHeld) even when one custody's row read, so
+    // no size for it was read this tick; deliberate, and the same for every
+    // producer — a strategy, a custom one, the owner, the Brain.
+    const sold = soldTokenOf(intent);
+    const soldUnread = sold === null ? undefined : unread.tokens.get(sold.toLowerCase());
+    if (soldUnread !== undefined) {
+      return {
+        ok: false,
+        rule: "holding-unread",
+        detail:
+          `the balance of ${soldUnread} could not be read, so a trade that sells it cannot be sized — nothing in ` +
+          `${soldUnread} goes out until it reads. Exits of everything else still go out.`,
+      };
+    }
+    if (!isExit) {
+      const coins = unread.symbols.length > 0 ? unread.symbols : [...new Set(unread.tokens.values())].sort();
+      return {
+        ok: false,
+        rule: "holding-unread",
+        detail:
+          `the balance of ${coins.join(", ")} could not be read, and the books say ${coins.length === 1 ? "it is" : "they are"} ` +
+          `held — without it the book cannot be totalled or its drawdown judged, so nothing new is opened until it ` +
+          `reads. Exits still go out.`,
+      };
+    }
   }
 
   if (!isExit && state.highWaterMarkUsdg > 0n && state.equityKnown !== false) {

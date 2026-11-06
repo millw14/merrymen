@@ -29,6 +29,9 @@ export const ACCOUNT_WIDE_RULES: ReadonlySet<string> = new Set([
   // Lighter unread (policy.ts, docs/perps.md rule 11): every non-exit is
   // refused for the one reason, so it is one piece of news, not one per coin.
   "perp-unpriced",
+  // A held coin's balance unread (policy.ts holding-unread): the same — every
+  // non-exit is refused for the one reason, whichever coin was proposed.
+  "holding-unread",
   "scout-budget",
   "transfer-not-permitted",
   "non-positive",

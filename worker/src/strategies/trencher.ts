@@ -22,7 +22,7 @@
 import type { PriceQuote } from "../../../packages/core/src/index";
 import { ENTRY_GATE_WHY, entryGateFor } from "../entry-gates";
 import type { TradeIntent } from "../policy";
-import { breakerIdle, type Snapshot, type Strategy, type Tick } from "./types";
+import { entryBrake, type Snapshot, type Strategy, type Tick } from "./types";
 import type { Why } from "./reasons";
 import type { TrenchBrainOrder } from "../trencher-brain";
 
@@ -579,7 +579,13 @@ export function makeTrencher(deps: TrencherDeps): Strategy {
       // allowed to buy. Seen on the live feed: thirty refused buys in fifteen
       // minutes, each in fresh model words. So the candidates are not read and
       // the Brain is not asked; exits above ran first and are untouched.
-      const brake = breakerIdle(snap);
+      //
+      // NOR WHILE A HELD COIN'S BALANCE IS UNREAD (entryBrake), for the same
+      // reason: the wall refuses every entry then too (holding-unread), and a
+      // vault coin's owner cannot unwatch it, so the gap can last as long as
+      // its balanceOf keeps failing. The unread coin itself is skipped by the
+      // exit loop above: absent from holdings and never in `unpriceable`.
+      const brake = entryBrake(snap);
       if (brake) return intents.length === 0 ? { intents, why, idle: brake } : { intents, why };
 
       // ── entries, only with what's left ─────────────────────────────────

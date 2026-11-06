@@ -12,7 +12,7 @@ import { entryGateFor } from "../entry-gates";
 import { liqDistanceBps, type PerpKey } from "../../../packages/core/src/perps";
 import type { PerpRouteIntent } from "../perps/route";
 import type { TradeIntent } from "../policy";
-import { breakerIdle, energyEntriesSpent, type PerpsView, type Snapshot, type Strategy, type Tick } from "../strategies/types";
+import { energyEntriesSpent, entryBrake, type PerpsView, type Snapshot, type Strategy, type Tick } from "../strategies/types";
 import type { Why } from "../strategies/reasons";
 import {
   PERP_STOP_FLOOR_PCT,
@@ -616,7 +616,10 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       }
       // A holding that has left the book has filled (or been sold another way),
       // so the latch is released and the floor can arm again if it returns.
-      for (const s of [...floorFired]) if (!snap.holdings.has(s)) floorFired.delete(s);
+      // AN UNREAD ONE HAS NOT LEFT IT: it is absent only because its balance did
+      // not come back (Snapshot.unreadHeld). Released on that, the floor would
+      // fire a second full sell the tick it reads again.
+      for (const s of [...floorFired]) if (!snap.holdings.has(s) && !snap.unreadHeld?.has(s)) floorFired.delete(s);
 
       // ── NO BUYS WHILE THE DRAWDOWN BREAKER IS TRIPPED ─────────────────
       //
@@ -636,7 +639,10 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
       // because the idle channel says a reason once per CHANGE: a quiet tick
       // with no reason reads as a change, and the owner would be told again at
       // every window for as long as the breaker stays tripped.
-      const brake = breakerIdle(snap);
+      //
+      // AND WHILE A HELD COIN'S BALANCE IS UNREAD (entryBrake): the wall refuses
+      // every buy then too (holding-unread), for as long as the row fails.
+      const brake = entryBrake(snap);
       const braked: Tick | null = brake ? { intents: [], why: [], idle: brake } : null;
 
       // ── PERPS, WHEN THIS STRATEGIST DRIVES THEM ─────────────────────────
@@ -933,14 +939,16 @@ export function makeLlmStrategist(cfg: LlmStrategistConfig): Strategy {
 
       if (thesis) note("ok", `strategist: ${thesis}`);
       if (withheld > 0) {
+        // Which brake, said as the one it is: an unread holding is not a tripped breaker.
+        const braking = brake?.code === "holding-unread" ? "a held coin's balance could not be read" : "the drawdown breaker is tripped";
         note(
           "ok",
           perpWithheld === 0
             ? brake
-              ? `strategist: ${withheld} buy proposal(s) withheld — the drawdown breaker is tripped; sells still run`
+              ? `strategist: ${withheld} buy proposal(s) withheld — ${braking}; sells still run`
               : `strategist: ${withheld} buy proposal(s) withheld — today's energy for new trades is used up; sells still run`
             : brake
-              ? `strategist: ${withheld} new position(s) withheld — the drawdown breaker is tripped; sells and perp closes still run`
+              ? `strategist: ${withheld} new position(s) withheld — ${braking}; sells and perp closes still run`
               : `strategist: ${withheld} new position(s) withheld — today's energy for new trades is used up; sells and perp closes still run`,
         );
       }

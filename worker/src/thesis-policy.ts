@@ -515,6 +515,11 @@ export const ACCOUNT_HALT_RULES = [
   // refusal on it says nothing about the coin — and, published, it would say
   // the agent trades perps, which nothing public may (rule 17). Withheld below.
   "perp-unpriced",
+  // AND ITS SPOT TWIN, WHILE A HELD COIN'S BALANCE IS UNREAD (policy.ts
+  // holding-unread): every non-exit is refused for the same reason, so a
+  // refusal on it says nothing about the coin it names — and, left in the
+  // feed, a read gap that can last days would be the feed.
+  "holding-unread",
 ] as const;
 const IS_ACCOUNT_HALT: ReadonlySet<string> = new Set<string>(ACCOUNT_HALT_RULES);
 
@@ -829,6 +834,11 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   "daily-cap": "past today's spending cap",
   "ops-cap": "past today's number of trades",
   "drawdown-breaker": "the drawdown breaker was tripped",
+  // The breaker's stand-in while a held coin's balance cannot be read — said
+  // as the read gap it is, never as a loss. Its per-tick refusals leave the
+  // feed (ACCOUNT_HALT_RULES above); this is the sentence a surface that names
+  // the rule reads.
+  "holding-unread": "a coin it holds could not be read, so its book could not be totalled and nothing new was opened",
   "asset-allowlist": "that asset is not in its signed permissions",
   "target-allowlist": "that venue is not in its signed permissions",
   "transfer-recipient-allowlist": "that recipient is not in its signed permissions",
@@ -1302,6 +1312,12 @@ export function rejectRuleRemedy(rule: string | null | undefined): string | null
       return "Send $MERRYMEN to the agent's account on Robinhood Chain directly — it counts the moment it lands.";
     case "would-exhaust-contributions":
       return "Send USDG to the agent's account first, then ask for energy again — or send $MERRYMEN to the agent's account on Robinhood Chain directly.";
+    // TWO REMEDIES, BY WHERE THE COIN COMES FROM: a watched coin can be fixed
+    // or unwatched; a coin from the Trencher vault's own token list cannot be
+    // unwatched, so its owner is not sent looking for a control that is not
+    // there. The event that opens the outage names which applies.
+    case "holding-unread":
+      return "Nothing to do if it clears within a few minutes — selling everything else still works. If it lasts, check that coin's token address in /settings, or stop watching it; a coin from your Trencher vault's own token list cannot be unwatched, so contact support.";
     default:
       // The withheld rules carry their remedy beside their owner sentence, so
       // the two cannot be edited apart. Owner register only, like every other

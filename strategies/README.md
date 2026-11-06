@@ -32,6 +32,11 @@ balance + USDG value + staleness), `prices` (Chainlink, stale-flagged),
 `pausedTokens`, `staleFeeds`, `sequencerUp`. Units: USDG = 6dp bigint,
 stock balances = 18dp bigint, prices = 8dp bigint.
 
+`unreadHeld`, when present, is a `Set` of symbols you hold whose balance could
+not be read this tick. They are missing from `holdings` because their size is
+unknown, not because they were sold: do not treat them as zero. While it is
+non-empty the policy layer refuses every buy, and any sale of those coins.
+
 See [example-dip-buyer.mjs](./example-dip-buyer.mjs) for a fully commented
 walkthrough including sell / vault intents.
 

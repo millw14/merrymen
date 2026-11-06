@@ -10,7 +10,7 @@
 
 import { entryGateFor, lockedLegs } from "../entry-gates";
 import type { TradeIntent } from "../policy";
-import { breakerIdle, opsSpent, type Snapshot, type Strategy, type Tick } from "./types";
+import { entryBrake, opsSpent, type Snapshot, type Strategy, type Tick } from "./types";
 
 export interface DipHunterConfig {
   legs: { symbol: string; token: `0x${string}` }[];
@@ -101,8 +101,9 @@ export function makeDipHunter(cfg: DipHunterConfig): Strategy {
       // The drawdown breaker, on the same terms and for the same reasons: after
       // the loop so the highs keep moving, ahead of `!best` so the sentence
       // does not flicker with the price. This strategy only ever buys, so
-      // tripped, there is nothing it may propose.
-      const brake = breakerIdle(snap);
+      // tripped, there is nothing it may propose. Nor while a held coin's
+      // balance is unread (entryBrake), which the wall refuses buys for too.
+      const brake = entryBrake(snap);
       if (brake) return { intents: [], why: [], idle: brake };
 
       if (!best) {

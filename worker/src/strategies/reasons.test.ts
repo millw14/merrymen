@@ -32,6 +32,8 @@ const ALL: Why[] = [
   { code: "trench-exit", symbol: "WIF", cause: "unpriceable" },
   { code: "ops-spent" },
   { code: "breaker-tripped", limitBps: 1_000 },
+  { code: "holding-unread", holdings: 1 },
+  { code: "holding-unread", holdings: 2 },
   { code: "legs-locked", legs: 3, locked: 3 },
   { code: "legs-locked", legs: 5, locked: 2 },
   { code: "legs-locked", legs: 1, locked: 1 },
@@ -279,5 +281,7 @@ describe("the perp reasons", () => {
     // …and the rest of the idle channel is untouched.
     assert.equal(publishesIdle({ code: "ops-spent" }), true);
     assert.equal(publishesIdle({ code: "breaker-tripped", limitBps: 1_000 }), false);
+    // An unread holding is account state like the breaker: the owner's warning, never a post.
+    assert.equal(publishesIdle({ code: "holding-unread", holdings: 1 }), false);
   });
 });

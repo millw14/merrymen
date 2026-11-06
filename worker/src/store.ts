@@ -4250,7 +4250,16 @@ export async function addEquity(
   }
 }
 
-/** Latest holdings snapshot — replaces, then prunes symbols no longer held. */
+/**
+ * Latest holdings snapshot — replaces, then prunes symbols no longer held.
+ *
+ * `keep`: symbols whose balance could not be read this tick (unread-held.ts).
+ * Their last row stands — neither upserted nor deleted. Pruned, a held coin
+ * would read as gone on the dashboard and in Telegram, the mirror would spread
+ * that, and a rebuild would not re-seed its basis (ledger-resume.ts
+ * planAttestedSeed reads this table's symbols). Its value is the last one read,
+ * and `updated_at` says how old that is.
+ */
 export async function setPositions(
   agentId: string,
   positions: readonly {
@@ -4264,6 +4273,7 @@ export async function setPositions(
     priceSource: string;
     valueUsdg: number;
   }[],
+  keep: readonly string[] = [],
 ): Promise<void> {
   try {
     const db = getDb();
@@ -4276,7 +4286,9 @@ export async function setPositions(
          price_source = excluded.price_source,
          value_usdg = excluded.value_usdg, updated_at = excluded.updated_at`,
     );
+    const kept = new Set(keep);
     for (const p of positions) {
+      if (kept.has(p.symbol)) continue;
       await upsert.run(
         agentId,
         p.symbol,
@@ -4289,7 +4301,7 @@ export async function setPositions(
         p.valueUsdg,
       );
     }
-    const held = positions.map((p) => p.symbol);
+    const held = [...new Set([...positions.map((p) => p.symbol), ...kept])];
     const placeholders = held.map(() => "?").join(",");
     await db
       .prepare(

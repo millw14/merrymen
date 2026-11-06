@@ -203,6 +203,10 @@ describe("readPositions — a held holding is never silently valued at zero", ()
  * readPositions skipped such a row exactly like a zero and reported
  * `readFailed: false`, so the tick's stranded-basis sweep read a held token as
  * gone and closed its basis (Shogun's GATO, 2026-11-04 08:36 UTC).
+ *
+ * The rows here are bare failures, as a token's own call failing looks. A chunk
+ * whose REQUEST viem says failed is the whole read failing — see "a refused
+ * request is the whole read" below, over viem's real errors.
  */
 describe("readPositions — one failed balance row among good ones", () => {
   const GATO: StockToken = { ...feedless("GATO", "0x436b01e41314d4b010edd24cf7c997a7d111c0ab"), kind: "memecoin" };
@@ -245,6 +249,58 @@ describe("readPositions — one failed balance row among good ones", () => {
     assert.deepEqual(r.unreadBalances, ["AAPL"]);
     assert.deepEqual(r.positions, []);
     assert.deepEqual(r.missingPrice, []);
+  });
+});
+
+/**
+ * THE RAW BALANCE OF EVERY ROW THAT ANSWERED, for the Trencher vault's routing.
+ *
+ * The tick used to read the vault twice — this read for the valuation, and a
+ * second raw `balanceOf` multicall for the custody routing — and the second
+ * one turned ONE failed row into `readFailed`, which froze every exit on the
+ * agent for as long as that row kept failing. The routing is built from this
+ * map now, so it must carry everything the raw read did: a held coin whether
+ * or not it can be valued, and nothing for a row that failed or read zero.
+ */
+describe("readPositions — balances, every row that answered", () => {
+  const MEME: StockToken = { ...feedless("MEME", "0x00000000000000000000000000000000000000C4"), kind: "memecoin" };
+  const GATO: StockToken = { ...feedless("GATO", "0x436B01E41314d4b010edd24cf7c997a7d111c0ab"), kind: "memecoin" };
+  const ZERO: StockToken = { ...feedless("ZERO", "0x00000000000000000000000000000000000000c5"), kind: "memecoin" };
+  const rateLimited = () => ({ status: "failure" as const, error: new Error("HTTP request failed. Status: 429") });
+
+  it("a priced holding and an unpriced one are both there, by lowercased address; a failed row and a zero are not", async () => {
+    const r = await readPositions(
+      // AAPL: balance + multiplier; MEME, GATO, ZERO: balance only.
+      client([good(5n * ONE), good(ONE), good(7n * ONE), rateLimited(), good(0n)]),
+      ACCT,
+      [AAPL, MEME, GATO, ZERO],
+      new Map([["AAPL", px(200)]]),
+    );
+    assert.deepEqual(
+      [...r.balances.entries()].sort(),
+      [
+        ["0x00000000000000000000000000000000000000a1", 5n * ONE],
+        ["0x00000000000000000000000000000000000000c4", 7n * ONE],
+      ],
+    );
+    assert.ok(!r.balances.has(GATO.address.toLowerCase()), "a failed row is no balance");
+    assert.ok(!r.balances.has(ZERO.address.toLowerCase()), "a zero is no balance");
+    // ONE FAILED ROW IS THAT TOKEN, UNREAD — never the whole read failing.
+    assert.deepEqual(r.unreadBalances, ["GATO"]);
+    assert.equal(r.readFailed, false);
+  });
+
+  it("a held Stock Token whose multiplier failed is a missing price AND a balance — it is held, only unvalued", async () => {
+    const r = await readPositions(client([good(5n * ONE), bad()]), ACCT, [AAPL], new Map([["AAPL", px(200)]]));
+    assert.deepEqual(r.missingPrice, ["AAPL"]);
+    assert.equal(r.balances.get(AAPL.address.toLowerCase()), 5n * ONE);
+  });
+
+  it("a whole read that failed has no balances at all, and says so", async () => {
+    const broken = { multicall: async () => { throw new Error("rpc down"); } } as unknown as PublicClient;
+    const r = await readPositions(broken, ACCT, [AAPL, MEME], new Map());
+    assert.equal(r.readFailed, true);
+    assert.equal(r.balances.size, 0);
   });
 });
 
@@ -463,5 +519,88 @@ describe("mayRatchetHwm", () => {
 
   it("treats a broker price as ordinary — it has a venue behind it", () => {
     assert.equal(mayRatchetHwm([pos("AAPL", "broker")]), true);
+  });
+});
+
+/**
+ * A REFUSED REQUEST IS THE WHOLE READ; A FAILED CALL IS ONE TOKEN.
+ *
+ * Over viem's own multicall and its own error objects (a custom transport), so
+ * the shapes are the ones the tick meets, not a guess at them. A 429, a 5xx, a
+ * timeout or a JSON-RPC "limit exceeded" fails the aggregate3 request, and
+ * viem reports it as every row failing, not as a throw. Read per token, a
+ * rate-limit blip made every held coin "unread" and told the owner each one's
+ * balance check was failing on-chain, then that it reads again, once per blip.
+ *
+ * But a chunk the CHAIN failed stays per token: a coin whose balanceOf burns
+ * all the gas fails the whole eth_call, and holding the tick on that would let
+ * one coin switch off every exit for good.
+ */
+describe("readPositions — a refused request is the whole read", async () => {
+  const { createPublicClient, custom, decodeFunctionData, encodeFunctionResult, erc20Abi, multicall3Abi, HttpRequestError, TimeoutError } =
+    await import("viem");
+  const { robinhoodChain } = await import("../../packages/core/src/chain");
+  const { multicallRequestFailed } = await import("./positions");
+  const GATO: StockToken = { ...feedless("GATO", "0x436b01e41314d4b010edd24cf7c997a7d111c0ab"), kind: "memecoin" };
+  const PEPE: StockToken = { ...feedless("PEPE", "0x5555555555555555555555555555555555555555"), kind: "memecoin" };
+  const throwing = (e: unknown) =>
+    createPublicClient({ chain: robinhoodChain, transport: custom({ async request() { throw e; } }) }) as unknown as PublicClient;
+  const rpcError = (code: number, message: string) => Object.assign(new Error(message), { code });
+
+  for (const [name, error] of [
+    ["an HTTP 429", new HttpRequestError({ url: "https://rpc.example", status: 429, body: {} })],
+    ["an HTTP 503", new HttpRequestError({ url: "https://rpc.example", status: 503, body: {} })],
+    ["a timeout", new TimeoutError({ body: {}, url: "https://rpc.example" })],
+    ["a JSON-RPC limit exceeded (-32005)", rpcError(-32005, "limit exceeded")],
+  ] as const) {
+    it(`${name} fails the whole read, never one coin at a time`, async () => {
+      const r = await readPositions(throwing(error), ACCT, [GATO, PEPE], new Map());
+      assert.equal(r.readFailed, true);
+      assert.deepEqual(r.unreadBalances, ["GATO", "PEPE"]);
+      assert.deepEqual(r.balances, new Map());
+    });
+  }
+
+  it("A CHUNK THE CHAIN FAILED (out of gas) STAYS PER TOKEN — one gas-burning coin must not hold every exit", async () => {
+    const r = await readPositions(throwing(rpcError(-32000, "out of gas")), ACCT, [GATO, PEPE], new Map());
+    assert.equal(r.readFailed, false);
+    assert.deepEqual(r.unreadBalances, ["GATO", "PEPE"]);
+  });
+
+  it("a token whose own call reverts, or has no code, is that token's gap, and the rest is read", async () => {
+    const answered = createPublicClient({
+      chain: robinhoodChain,
+      transport: custom({
+        async request({ method, params }: { method: string; params: unknown }) {
+          if (method !== "eth_call") throw new Error(method);
+          decodeFunctionData({ abi: multicall3Abi, data: (params as [{ data: `0x${string}` }])[0].data });
+          const five = encodeFunctionResult({ abi: erc20Abi, functionName: "balanceOf", result: 5n * ONE });
+          return encodeFunctionResult({
+            abi: multicall3Abi,
+            functionName: "aggregate3",
+            result: [
+              { success: false, returnData: "0x" }, // GATO: balanceOf reverts for the holder
+              { success: true, returnData: five }, // PEPE: held
+            ],
+          });
+        },
+      }),
+    }) as unknown as PublicClient;
+    const r = await readPositions(answered, ACCT, [GATO, PEPE], new Map());
+    assert.equal(r.readFailed, false);
+    assert.deepEqual(r.unreadBalances, ["GATO"]);
+    assert.deepEqual(r.unpricedByDesign, ["PEPE"]);
+    assert.equal(r.balances.get(PEPE.address.toLowerCase()), 5n * ONE);
+  });
+
+  it("multicallRequestFailed reads only the aggregate3 request, and only a transport failure of it", () => {
+    assert.equal(multicallRequestFailed(new Error("HTTP request failed. Status: 429")), false, "no function named: a token's own row");
+    const viaRow = Object.assign(new Error("x"), { functionName: "balanceOf", cause: new HttpRequestError({ url: "u", status: 429, body: {} }) });
+    assert.equal(multicallRequestFailed(viaRow), false, "a row's own call is that token's");
+    const viaRequest = Object.assign(new Error("x"), { functionName: "aggregate3", cause: { name: "CallExecutionError", cause: new HttpRequestError({ url: "u", status: 429, body: {} }) } });
+    assert.equal(multicallRequestFailed(viaRequest), true);
+    const chainSaidNo = Object.assign(new Error("x"), { functionName: "aggregate3", cause: { name: "ExecutionRevertedError" } });
+    assert.equal(multicallRequestFailed(chainSaidNo), false);
+    assert.equal(multicallRequestFailed(null), false);
   });
 });
