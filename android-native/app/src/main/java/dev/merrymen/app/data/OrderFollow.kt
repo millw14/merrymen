@@ -183,6 +183,8 @@ val REJECT_RULE_LABELS: Map<String, String> = mapOf(
   "no-route" to "no route to trade it",
   "no-quote" to "no price could be quoted",
   "no-liquidity" to "not enough liquidity to fill",
+  "sell-locked" to "a test sale of that coin into its pool was refused, so it could have been bought but not sold back",
+  "sell-unverified" to "a test sale of that coin into its pool could not be shown to go through, so it was not bought blind",
   "slippage" to "the price moved too far between quote and fill",
   "insufficient-balance" to "it did not hold what it tried to spend",
   "curve-graduated" to "that launch had already graduated",
