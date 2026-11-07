@@ -92,6 +92,25 @@ describe("parseSlash — pure slash parser", () => {
     assert.equal(parseSlash("how am I doing?"), null);
     assert.equal(parseSlash("  hi there"), null);
   });
+
+  it("parses /ghost: bare is pnl, per-trader ops need a handle and a shape", () => {
+    assert.deepEqual(parseSlash("/ghost"), { kind: "ghost", op: "pnl", handle: null, amountMicro: null, mode: null });
+    assert.deepEqual(parseSlash("/ghost pnl"), { kind: "ghost", op: "pnl", handle: null, amountMicro: null, mode: null });
+    assert.deepEqual(parseSlash("/ghost on @unipcs"), { kind: "ghost", op: "on", handle: "unipcs", amountMicro: null, mode: null });
+    assert.deepEqual(parseSlash("/ghost off unipcs"), { kind: "ghost", op: "off", handle: "unipcs", amountMicro: null, mode: null });
+    assert.deepEqual(parseSlash("/ghost size @unipcs 100"), { kind: "ghost", op: "size", handle: "unipcs", amountMicro: 100_000_000, mode: null });
+    assert.deepEqual(parseSlash("/ghost size @unipcs $250.50"), { kind: "ghost", op: "size", handle: "unipcs", amountMicro: 250_500_000, mode: null });
+    assert.deepEqual(parseSlash("/ghost mode @unipcs flat"), { kind: "ghost", op: "mode", handle: "unipcs", amountMicro: null, mode: "flat" });
+    assert.deepEqual(parseSlash("/ghost cap @unipcs 500"), { kind: "ghost", op: "cap", handle: "unipcs", amountMicro: 500_000_000, mode: null });
+    assert.deepEqual(parseSlash("/ghost stop"), { kind: "ghost", op: "stop", handle: null, amountMicro: null, mode: null });
+    assert.deepEqual(parseSlash("/ghost reset"), { kind: "ghost", op: "reset", handle: null, amountMicro: null, mode: null });
+    assert.equal(parseSlash("/ghost on")?.kind, "unknown", "no handle, no ghosting");
+    assert.equal(parseSlash("/ghost size @unipcs")?.kind, "unknown", "no amount, no size");
+    assert.equal(parseSlash("/ghost size @unipcs abc")?.kind, "unknown");
+    assert.equal(parseSlash("/ghost size @unipcs 0")?.kind, "unknown", "dust never sizes");
+    assert.equal(parseSlash("/ghost mode @unipcs turbo")?.kind, "unknown");
+    assert.equal(parseSlash("/ghost frobnicate")?.kind, "unknown");
+  });
 });
 
 describe("coerceLlmCommand — the model can only pick from the enum", () => {
