@@ -846,6 +846,12 @@ const R: Readonly<Record<string, string>> = Object.freeze({
   "no-route": "no route to trade it",
   "no-quote": "no price could be quoted",
   "no-liquidity": "not enough liquidity to fill",
+  // A buy turned back because a simulated SALE of the coin into its pool was
+  // refused while a plain transfer went through, or could not be run at all
+  // (sell-lock.ts). Said as what was tested and what it showed — never as a
+  // judgement of anyone behind the coin.
+  "sell-locked": "a test sale of that coin into its pool was refused, so it could have been bought but not sold back",
+  "sell-unverified": "a test sale of that coin into its pool could not be shown to go through, so it was not bought blind",
   slippage: "the price moved too far between quote and fill",
   "insufficient-balance": "it did not hold what it tried to spend",
   "curve-graduated": "that launch had already graduated",
@@ -991,6 +997,9 @@ const MARKET_REFUSALS: ReadonlySet<string> = new Set([
   "slippage",
   "curve-graduated",
   "insufficient-balance",
+  // The coin, tested before the buy (sell-lock.ts), not the owner's permissions.
+  "sell-locked",
+  "sell-unverified",
 ]);
 
 export function isMarketRefusal(rule: string | null | undefined): boolean {

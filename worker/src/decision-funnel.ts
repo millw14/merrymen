@@ -72,7 +72,9 @@ export type CandidateSkip =
   | "missing-fdv"
   | "autonomous-budget-spent"
   | "autonomous-budget-unread"
-  | "token-paused";
+  | "token-paused"
+  /** The buy path's simulated sale of it was refused, or could not be shown (sell-lock.ts), and that answer still stands. */
+  | "sell-check-refused";
 
 /** Discovery's own screens: the tape screen, the verified slice, and the venue. */
 export type DiscoveryScreen = TrenchScreen | "beyond-discovery-slice" | "pool-not-verified" | "venue-not-supported";
@@ -168,6 +170,10 @@ const RULE_STAGE: Readonly<Record<string, FunnelStage>> = {
   "no-route": "UNSUPPORTED_ROUTE",
   "impact-cap": "UNSUPPORTED_ROUTE",
   "impact-unknown": "UNSUPPORTED_ROUTE",
+  // A buy whose simulated sale into its pool was refused, or could not be
+  // run (sell-lock.ts): no way out on the venue it would be bought from.
+  "sell-locked": "UNSUPPORTED_ROUTE",
+  "sell-unverified": "UNSUPPORTED_ROUTE",
   "no-quote": "UNSUPPORTED_ROUTE",
   "router-migrated": "UNSUPPORTED_ROUTE",
   "no-curve-adapter": "UNSUPPORTED_ROUTE",
@@ -299,6 +305,7 @@ const SKIP_STAGE: Readonly<Record<CandidateSkip, FunnelStage>> = {
   // fail closed, correctly — but the remedy is an RPC, not a day's wait.
   "autonomous-budget-unread": "RESEARCH_INCOMPLETE",
   "token-paused": "PERMISSION_BLOCKED",
+  "sell-check-refused": "UNSUPPORTED_ROUTE",
 };
 
 const BLOCK_STAGE: Readonly<Record<TickBlock, FunnelStage>> = {
