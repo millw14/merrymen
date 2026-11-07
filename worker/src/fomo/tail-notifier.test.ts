@@ -87,6 +87,58 @@ async function sendAll(n: ReturnType<typeof notifier>, sent: string[]): Promise<
   }
 }
 
+describe("tail call marks", () => {
+  const buy = [ev(1)];
+
+  it("a priced buy notice carries its entry mark; recordMark calls the owner-only tool", async () => {
+    const { port } = store();
+    const ops: string[] = [];
+    const { b, calls } = broker(() => ({ recorded: true }), ops);
+    const n = notifier({
+      port,
+      tails: [tail(buy)],
+      broker: () => b,
+      researched: () => false,
+      quoteMark: async () => ({ price8: "0.05000000", atMs: NOW, pool: "C1 / WETH" }),
+    });
+    const out = await n.next();
+    assert.equal(out.length, 1);
+    assert.deepEqual(out[0]!.mark, {
+      eventId: "ev-1",
+      traderUserId: UNI,
+      handle: "unipcs",
+      tokenId: out[0]!.mark!.tokenId,
+      entryPrice8: "0.05000000",
+      entryAtMs: NOW,
+      entryPool: "C1 / WETH",
+    });
+    assert.equal(await out[0]!.recordMark!(), true);
+    const records = calls.filter((c) => c.tool === "fomo_record_tail_mark");
+    assert.equal(records.length, 1, "one mark recorded for the told buy");
+    assert.equal(records[0]!.opts.audience, "owner");
+    assert.deepEqual(records[0]!.args, out[0]!.mark);
+    assert.ok(ops.includes("call:fomo_record_tail_mark"), "the mark call went out");
+  });
+
+  it("an unpriced buy is told without a mark, never mis-marked", async () => {
+    const { port } = store();
+    const { b } = broker(() => ({ recorded: true }), []);
+    const n = notifier({ port, tails: [tail(buy)], broker: () => b, researched: () => false, quoteMark: async () => null });
+    const out = await n.next();
+    assert.equal(out.length, 1, "the notice is told");
+    assert.equal(out[0]!.mark, undefined);
+    assert.equal(out[0]!.recordMark, undefined);
+  });
+
+  it("no quote source, no marks", async () => {
+    const { port } = store();
+    const n = notifier({ port, tails: [tail(buy)], researched: () => false });
+    const out = await n.next();
+    assert.equal(out.length, 1);
+    assert.equal(out[0]!.mark, undefined);
+  });
+});
+
 describe("the tail notifier", () => {
   it("fails closed: an unknown sent log sends nothing and writes nothing", async () => {
     const { s, port } = store();

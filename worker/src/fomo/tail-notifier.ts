@@ -61,6 +61,12 @@ export interface TailNotifierDeps {
   holds?(tokenKey: string): boolean;
   /** The operator's switch: false (MERRYMEN_FOMO_TAILS=0) sends nothing and reads nothing. Absent: on. */
   enabled?(): boolean;
+  /**
+   * One token's top-pool USD price as an 8dp mark string, or null when no
+   * pool quotes it. Absent: buy notices carry no entry price and no mark is
+   * recorded. A mark without a price is never made.
+   */
+  quoteMark?(chainSlug: string, address: string): Promise<{ price8: string; atMs: number; pool: string } | null>;
   now?(): number;
   log?(line: string): void;
   /** The durable key (default FOMO_STATE_KEYS.tailNotified). */
@@ -73,6 +79,14 @@ export type TailKeyboard = { text: string; callbackData: string }[][];
 export interface TailNoticeToSend {
   /** Code-written Telegram HTML; send with link previews off. */
   html: string;
+  /**
+   * The told buy's entry mark (buy notices priced this pass only): record it
+   * AFTER the send lands, never before. Absent on anything unsent or
+   * unpriced.
+   */
+  mark?: { eventId: string; traderUserId: string; handle: string | null; tokenId: string; entryPrice8: string; entryAtMs: number; entryPool: string };
+  /** Record the mark above through the owner-only tool. Never throws. */
+  recordMark?(): Promise<boolean>;
   /** Stop and +1h (`ftl:stop:<userId>`, `ftl:ext:<userId>`); empty for an end summary. */
   keyboard: TailKeyboard;
   kind: TailNotice["kind"];
@@ -201,12 +215,45 @@ export function createTailNotifier(deps: TailNotifierDeps): TailNotifier {
         // notice's claim records it and those before it only, so the ones
         // left out stay unclaimed and come back on the next pass.
         const { notices } = tailNotices(input(sent));
-        return notices.slice(0, TAIL_NOTICE_LIMITS.noticesPerPass).map((n) => ({
-          html: n.html,
-          kind: n.kind,
-          keyboard: n.buttons.length > 0 ? [n.buttons.map((x) => ({ text: x.text, callbackData: x.data }))] : [],
-          claim: () => write(n.logAfter),
-        }));
+        const out: TailNoticeToSend[] = [];
+        for (const n of notices.slice(0, TAIL_NOTICE_LIMITS.noticesPerPass)) {
+          const send: TailNoticeToSend = {
+            html: n.html,
+            kind: n.kind,
+            keyboard: n.buttons.length > 0 ? [n.buttons.map((x) => ({ text: x.text, callbackData: x.data }))] : [],
+            claim: () => write(n.logAfter),
+          };
+          // 4. A told buy's entry price, read now (at tell time): the sender
+          // records the mark only after this notice lands.
+          if (n.buyMark && deps.quoteMark) {
+            try {
+              const q = await deps.quoteMark(n.buyMark.chainSlug, n.buyMark.address);
+              if (q) {
+                const mark = {
+                  eventId: n.buyMark.eventKey, traderUserId: n.buyMark.traderUserId, handle: n.buyMark.handle,
+                  tokenId: n.buyMark.tokenKey, entryPrice8: q.price8, entryAtMs: q.atMs, entryPool: q.pool,
+                };
+                send.mark = mark;
+                send.recordMark = async () => {
+                  try {
+                    const b = deps.broker();
+                    if (!b) return false;
+                    const env = await b.call("fomo_record_tail_mark", { ...mark }, {
+                      surface: "background", audience: "owner", conversationKey: null, priority: "discovery",
+                    });
+                    return (env.data as { recorded?: unknown } | null)?.recorded === true;
+                  } catch {
+                    return false;
+                  }
+                };
+              }
+            } catch {
+              // Unpriced this pass: told without a mark, never mis-marked.
+            }
+          }
+          out.push(send);
+        }
+        return out;
       } catch (e) {
         once(`threw:${e instanceof Error ? e.name : "error"}`, `[fomo] tail notices skipped (${e instanceof Error ? e.name : "error"})`);
         return [];

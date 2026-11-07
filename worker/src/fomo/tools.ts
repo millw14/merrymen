@@ -100,7 +100,7 @@ export const READ_TOOL_NAMES: readonly FomoReadToolName[] = [
   "fomo_research_coin",
   "fomo_get_research_status",
 ];
-export const MUTATION_TOOL_NAMES: readonly FomoMutationToolName[] = ["fomo_watch_coin", "fomo_unwatch_coin", "fomo_tail_trader", "fomo_untail_trader", "fomo_extend_tail"];
+export const MUTATION_TOOL_NAMES: readonly FomoMutationToolName[] = ["fomo_watch_coin", "fomo_unwatch_coin", "fomo_tail_trader", "fomo_untail_trader", "fomo_extend_tail", "fomo_record_tail_mark"];
 export const TOOL_NAMES: readonly FomoToolName[] = [...READ_TOOL_NAMES, ...MUTATION_TOOL_NAMES];
 
 export function isFomoToolName(v: unknown): v is FomoToolName {
@@ -216,6 +216,32 @@ export interface UntailArgs {
   trader: TraderRef | null;
   all: boolean;
 }
+/** One told tail buy's entry mark (fomo_record_tail_mark). Owner only. */
+export interface MarkArgs {
+  /** Provider user id of the tailed trader (never a handle). */
+  traderUserId: string;
+  /** The tail buy notice's event id: one mark per told buy. */
+  eventId: string;
+  /** Display handle at mark time (display only). */
+  handle: string | null;
+  /** Token key (`namespace:network:address`), the storage/join key. */
+  tokenId: string;
+  /** USD entry price, 8dp decimal string, from a top pool quote. */
+  entryPrice8: string;
+  /** When the price was read. */
+  entryAtMs: number;
+  /** The pool that quoted it, e.g. "PONS / SOL 0%". */
+  entryPool: string | null;
+}
+
+/** A tail call mark recorded (fomo_record_tail_mark). Owner only. */
+export interface MarkData {
+  action: "mark";
+  eventId: string;
+  /** False when the mark already existed: a retried tell never double-books. */
+  recorded: boolean;
+}
+
 /** One running tail made longer: whole hours (TOOL_LIMITS.tailExtendHours), never past 12 from now. */
 export interface ExtendTailArgs {
   trader: TraderRef;
@@ -237,6 +263,7 @@ export interface ToolArgs {
   fomo_tail_trader: TailArgs;
   fomo_untail_trader: UntailArgs;
   fomo_extend_tail: ExtendTailArgs;
+  fomo_record_tail_mark: MarkArgs;
 }
 
 export type ValidateResult<A> = { ok: true; args: A } | { ok: false; reason: string };
@@ -1263,6 +1290,43 @@ export const FOMO_TOOL_DEFS: { [K in FomoToolName]: FomoToolDef<ToolArgs[K]> } =
             ? okv(o.hours as number)
             : bad("hours-out-of-range");
       return collect<ExtendTailArgs>({ trader: traderArg(o.trader, true) as Field<TraderRef>, hours });
+    },
+  },
+
+  fomo_record_tail_mark: {
+    description:
+      "Owner only: record one told tail buy's entry mark for the tail leaderboard (entry price from a top pool quote). " +
+      "One mark per event key; a repeat records nothing. Never a trade, never a permission.",
+    schema: schema(
+      {
+        traderUserId: { type: "string", maxLength: 128, description: "Provider user id of the tailed trader." },
+        eventId: { type: "string", maxLength: 128, description: "The tail buy notice's event id." },
+        handle: { type: "string", maxLength: 64, description: "Display handle at mark time." },
+        tokenId: { type: "string", maxLength: 128, description: "Token key (namespace:network:address)." },
+        entryPrice8: { type: "string", maxLength: 32, description: "USD entry price, 8dp decimal string." },
+        entryAtMs: { type: "integer", minimum: 1, maximum: 9007199254740991, description: "When the price was read." },
+        entryPool: { type: "string", maxLength: 160, description: "The pool that quoted it." },
+      },
+      ["traderUserId", "eventId", "tokenId", "entryPrice8", "entryAtMs"],
+    ),
+    freshness: null,
+    mutation: true,
+    ownerOnly: true,
+    validate(raw) {
+      const c = checkObject(raw, ["traderUserId", "eventId", "handle", "tokenId", "entryPrice8", "entryAtMs", "entryPool"]);
+      if (!c.ok) return c;
+      const o = c.obj;
+      const uid = str(o.traderUserId, "traderUserId", 128);
+      if (!uid.ok) return { ok: false, reason: uid.reason };
+      const ev = str(o.eventId, "eventId", 128);
+      if (!ev.ok) return { ok: false, reason: ev.reason };
+      const tk = str(o.tokenId, "tokenId", 128);
+      if (!tk.ok) return { ok: false, reason: tk.reason };
+      const px: Field<string> = typeof o.entryPrice8 === "string" && /^\d{1,24}(\.\d{1,8})?$/.test(o.entryPrice8) ? okv(o.entryPrice8) : bad("entry-price8-invalid");
+      const at: Field<number> = typeof o.entryAtMs === "number" && Number.isSafeInteger(o.entryAtMs) && o.entryAtMs > 0 ? okv(o.entryAtMs) : bad("entry-at-invalid");
+      const handle: Field<string | null> = o.handle === undefined || o.handle === null ? okv(null) : str(o.handle, "handle", 64);
+      const pool: Field<string | null> = o.entryPool === undefined || o.entryPool === null ? okv(null) : str(o.entryPool, "entryPool", 160);
+      return collect<MarkArgs>({ traderUserId: uid, eventId: ev, handle, tokenId: tk, entryPrice8: px, entryAtMs: at, entryPool: pool });
     },
   },
 };
