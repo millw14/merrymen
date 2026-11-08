@@ -15,8 +15,11 @@ type Wallet = {
 };
 type Call = { url: string; init?: RequestInit };
 let PrivySignIn: typeof import("./PrivySignIn").PrivySignIn;
+let startTimeout: number;
 let ui: ReturnType<typeof testDom>;
 let ready: boolean;
+let privyError: Error | null;
+let reloads: number;
 let authenticated: boolean;
 let walletsReady: boolean;
 let modalOpen: boolean;
@@ -79,7 +82,7 @@ before(() => {
   const intercepted = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, isMain: boolean) {
     if (parent?.filename === path) {
       if (id === "@privy-io/react-auth") return {
-        usePrivy: () => ({ ready, authenticated, login, logout, getAccessToken, createWallet, user }),
+        usePrivy: () => ({ ready, authenticated, login, logout, getAccessToken, createWallet, user, error: privyError }),
         useWallets: () => ({ ready: walletsReady, wallets }),
         useCreateWallet: () => ({ createWallet }),
         useLogin: (callbacks: { onError?: (error: string) => void }) => {
@@ -91,10 +94,16 @@ before(() => {
         getEmbeddedConnectedWallet: (list: Wallet[]) => list.find((item) => item.walletClientType === "privy") ?? null,
       };
       if (id === "./HostedControls") return require(fileURLToPath(new URL("./request-json.ts", import.meta.url)));
+      // The real Privy-only reset runs against jsdom's storage and cookies;
+      // only the reload, which jsdom cannot perform, is counted instead.
+      if (id === "./privy-reset") return {
+        ...require(fileURLToPath(new URL("./privy-reset.ts", import.meta.url))),
+        reloadPage: () => { reloads++; },
+      };
     }
     return load.call(this, id, parent, isMain);
   });
-  try { PrivySignIn = require(path).PrivySignIn; }
+  try { ({ PrivySignIn, PRIVY_START_TIMEOUT_MS: startTimeout } = require(path)); }
   finally { intercepted.mock.restore(); }
 });
 
@@ -102,6 +111,8 @@ beforeEach(() => {
   ui = testDom();
   mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_800_000_000_000 });
   ready = true;
+  privyError = null;
+  reloads = 0;
   authenticated = true;
   walletsReady = true;
   modalOpen = false;
@@ -529,4 +540,71 @@ describe("Privy sign-in wallet provisioning and proof", () => {
       });
     }
   }
+});
+
+describe("Privy start-up that never becomes ready", () => {
+  const buttons = () => Array.from(ui.container.querySelectorAll("button")).map((b) => ({ text: b.textContent?.trim(), disabled: b.disabled }));
+  const wayOut = [{ text: "Try again", disabled: false }, { text: "Reset sign-in", disabled: false }];
+
+  it("shows Privy's start-up error and a way out instead of Loading forever", async () => {
+    ready = false;
+    privyError = new Error("Origin not allowed");
+    connectOwner();
+    await render();
+    await drain();
+    assert.match(ui.container.querySelector('[role="alert"]')?.textContent ?? "", /Sign-in couldn’t start: Origin not allowed/);
+    assert.deepEqual(buttons(), wayOut);
+    assert.equal(tokens, 0, "nothing may be proven before Privy is ready");
+    assert.equal(requests.length, 0);
+    assert.equal(creations, 0);
+  });
+
+  it("offers the way out once a silent start-up passes its deadline, and not before", async () => {
+    ready = false;
+    await render();
+    await advance(startTimeout - 1);
+    assert.deepEqual(buttons(), [{ text: "Loading…", disabled: true }]);
+    await advance(1);
+    assert.match(ui.container.querySelector('[role="status"]')?.textContent ?? "", /taking longer than usual/);
+    assert.deepEqual(buttons(), wayOut);
+    ready = true;
+    authenticated = false;
+    await render();
+    assert.deepEqual(buttons().map(({ text }) => text), ["Continue with email", "Continue with X"], "a late start still signs in normally");
+  });
+
+  it("tries again by reloading, without clearing anything", async () => {
+    ready = false;
+    privyError = new Error("Failed to fetch");
+    localStorage.setItem("privy:refresh_token", JSON.stringify("kept"));
+    document.cookie = "privy-session=t; Path=/";
+    await render();
+    await ui.click("Try again");
+    assert.equal(reloads, 1);
+    assert.equal(localStorage.getItem("privy:refresh_token"), JSON.stringify("kept"));
+    assert.match(document.cookie, /privy-session=t/);
+    assert.ok(buttons().every(({ disabled }) => disabled), "one restart at a time");
+  });
+
+  it("resets only Privy's saved sign-in, keeps stored grants and their owner keys, then reloads", async () => {
+    ready = false;
+    privyError = new Error("Failed to fetch");
+    const grant = JSON.stringify({ smartAccount: owner, demoOwnerPrivateKey: `0x${"b".repeat(64)}` });
+    localStorage.setItem("merrymen.grant.v1", grant);
+    localStorage.setItem("merrymen.grant.perps.v1", grant);
+    localStorage.setItem("privy:token", JSON.stringify("access"));
+    localStorage.setItem("privy:refresh_token", JSON.stringify("refresh"));
+    document.cookie = "privy-session=t; Path=/";
+    document.cookie = "privy-token=access; Path=/";
+    document.cookie = "merrymen-theme=dark; Path=/";
+    await render();
+    await ui.click("Reset sign-in");
+    assert.equal(reloads, 1);
+    assert.equal(localStorage.getItem("merrymen.grant.v1"), grant);
+    assert.equal(localStorage.getItem("merrymen.grant.perps.v1"), grant);
+    assert.equal(localStorage.getItem("privy:token"), null);
+    assert.equal(localStorage.getItem("privy:refresh_token"), null);
+    assert.equal(document.cookie, "merrymen-theme=dark");
+    assert.equal(logouts, 0, "Privy is not running, so the reset cannot wait on its logout");
+  });
 });

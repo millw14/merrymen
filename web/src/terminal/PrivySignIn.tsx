@@ -6,6 +6,8 @@
  * Email and X open Privy's standard modal for the chosen method. A restored
  * authenticated session may still lack its embedded wallet, so this component also repairs that state
  * after the modal closes. Creation and proof have deadlines and explicit retry.
+ * So does Privy's own start-up: if it fails or stalls, the page shows Privy's
+ * reason with "Try again" and a Privy-only "Reset sign-in" (privy-reset.ts).
  *
  * WHAT HAPPENS AFTER THE MODAL CLOSES is the part worth reading. Privy hands
  * back an authenticated user; an embedded wallet may still need creating or
@@ -38,9 +40,18 @@ import {
 } from "@privy-io/react-auth";
 import { requestJson } from "./request-json";
 import { createPrivyWalletOnce } from "./privy-wallet-creation";
+import { clearPrivySignIn, reloadPage } from "./privy-reset";
 
 export const PRIVY_WALLET_TIMEOUT_MS = 45_000;
 export const PRIVY_PROOF_TIMEOUT_MS = 60_000;
+/** How long Privy may take to start before the page offers a way out. */
+export const PRIVY_START_TIMEOUT_MS = 15_000;
+
+function startReason(error: Error): string {
+  const text = (error.message || error.name || "").trim();
+  if (!text) return "no reason given";
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+}
 
 type Phase = "idle" | "authorising" | "provisioning" | "proving" | "done" | "error" | "resetting";
 
@@ -64,7 +75,7 @@ interface Attempt {
 }
 
 export function PrivySignIn({ onDone, directX = false }: { onDone: () => void; directX?: boolean }) {
-  const { ready, authenticated, getAccessToken, user, logout } = usePrivy();
+  const { ready, authenticated, getAccessToken, user, logout, error: startError } = usePrivy();
   const { wallets, ready: walletsReady } = useWallets();
   const { createWallet } = useCreateWallet();
   const { isOpen } = useModalStatus();
@@ -72,6 +83,8 @@ export function PrivySignIn({ onDone, directX = false }: { onDone: () => void; d
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState("");
   const [revision, refresh] = useState(0);
+  const [slowStart, setSlowStart] = useState(false);
+  const [restarting, setRestarting] = useState(false);
   const attempt = useRef<Attempt | null>(null);
   const mounted = useRef(false);
   const session = useRef({ authenticated, userId: user?.id });
@@ -121,6 +134,16 @@ export function PrivySignIn({ onDone, directX = false }: { onDone: () => void; d
     mounted.current = true;
     return () => { mounted.current = false; cancelAttempt(); };
   }, [cancelAttempt]);
+
+  // Privy's start-up has no deadline of its own. A failed config load or
+  // session refresh leaves `ready` false for good with `error` set; a request
+  // that never answers leaves it false with no error. Either way the owner
+  // needs the reason and a way out, not "Loading…" forever.
+  useEffect(() => {
+    if (ready) { setSlowStart(false); return; }
+    const timer = setTimeout(() => setSlowStart(true), PRIVY_START_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [ready]);
 
   // A late token, wallet or signature from an old login cannot finish a new one.
   useEffect(() => {
@@ -244,7 +267,30 @@ export function PrivySignIn({ onDone, directX = false }: { onDone: () => void; d
     }
   }
 
-  if (!ready) return <div className="hosted-auth"><button className="flow-primary" disabled>Loading…</button></div>;
+  function restart(reset: boolean) {
+    setRestarting(true);
+    // Only Privy's own keys and cookies: stored grants, which can hold an
+    // owner key, stay exactly as they are.
+    if (reset) clearPrivySignIn();
+    reloadPage();
+  }
+
+  if (!ready) {
+    if (!startError && !slowStart) return <div className="hosted-auth"><button className="flow-primary" disabled>Loading…</button></div>;
+    return (
+      <div className="hosted-auth">
+        {startError
+          ? <p role="alert" className="flow-error">Sign-in couldn’t start: {startReason(startError)}</p>
+          : <p role="status" className="hosted-auth-note">Sign-in is taking longer than usual.</p>}
+        <p className="hosted-auth-note">A browser extension or network filter may be blocking the sign-in service. Try again, open this page in a private window, or reset sign-in on this browser.</p>
+        <div className="hosted-signin-methods" role="group" aria-label="Sign-in recovery">
+          <button className="flow-primary" disabled={restarting} onClick={() => restart(false)}>Try again</button>
+          <button className="flow-secondary" disabled={restarting} onClick={() => restart(true)}>Reset sign-in</button>
+        </div>
+        <p className="hosted-auth-note">Reset signs this browser out of the sign-in service only. Your agents and their saved keys stay.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="hosted-auth">
