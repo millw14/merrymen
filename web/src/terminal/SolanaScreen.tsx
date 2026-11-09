@@ -105,6 +105,27 @@ export const SOLANA_WRITE_OFF_SLIPPAGE_BPS = 100;
  */
 type DustLot = { mint: string; amountRaw: string; confirming: boolean };
 const RAW = /^(0|[1-9][0-9]*)$/;
+/** The portfolio's position count, in words. */
+export const openPositions = (count: number) => count === 0 ? "No open positions." : `${count} open position${count === 1 ? "" : "s"}.`;
+/**
+ * One recorded paper trade as its owner reads it: what went in, what came out, and when, in UTC like every time on this
+ * page. An amount is shown only where its decimals are known (USDG, wrapped SOL, or a lot still held). A malformed record
+ * still reads as its side and time; it never blanks the list.
+ */
+export function paperTradeLine(trade: { side?: unknown; createdAtMs?: unknown; inputAmountRaw?: unknown; outputAmountRaw?: unknown; intent?: { inputMint?: unknown; outputMint?: unknown } | null },
+  positions: readonly { mint: string; decimals: number }[]): string {
+  const leg = (mint: unknown, raw: unknown) => {
+    if (typeof mint !== "string" || !mint) return null;
+    const label = mint === SOLANA_USDG_MINT ? "USDG" : mint === WSOL ? "wrapped SOL" : `${mint.slice(0, 4)}…${mint.slice(-4)}`;
+    const decimals = mint === SOLANA_USDG_MINT ? 6 : mint === WSOL ? 9 : positions.find((lot) => lot.mint === mint)?.decimals;
+    const amount = typeof decimals === "number" && Number.isInteger(decimals) && decimals >= 0 && decimals <= 18 ? displaySolanaAmountOrNull(raw, decimals) : null;
+    return amount === null ? label : `${amount} ${label}`;
+  };
+  const from = leg(trade.intent?.inputMint, trade.inputAmountRaw), to = leg(trade.intent?.outputMint, trade.outputAmountRaw);
+  const at = typeof trade.createdAtMs === "number" && Number.isFinite(new Date(trade.createdAtMs).getTime())
+    ? `${new Date(trade.createdAtMs).toISOString().slice(0, 16).replace("T", " ")} UTC` : null;
+  return [trade.side === "sell" ? "Sell" : trade.side === "buy" ? "Buy" : "Trade", from && to ? `${from} → ${to}` : null, at].filter(Boolean).join(" · ");
+}
 type WrittenOffBook = Partial<SolanaPaperSnapshot> & Pick<SolanaPaperSnapshot, "cashRaw" | "positions">;
 /**
  * The paper book in a write-off's 200 answer ({ paper, writtenOff }), if it
@@ -170,7 +191,7 @@ export async function solanaRequestJson<T>(url: string, init: RequestInit = {}):
 
 export function SolanaScreen() {
   return <section className="solana-screen" aria-labelledby="solana-title">
-    <header><p className="solana-eyebrow">Solana · mainnet</p><h1 id="solana-title">Your Solana account</h1><p>Practice at live prices, or authorize a bounded trading session for real funds.</p></header>
+    <header><p className="solana-eyebrow">Solana · mainnet</p><h1 id="solana-title">Your Solana account</h1><p>Trade SOL against USDG at live prices, within limits you set.</p></header>
     {privyEnabled() ? <ConnectedSolana /> : <p role="status">Protected wallet sign-in must be configured before using Solana.</p>}
   </section>;
 }
@@ -299,6 +320,9 @@ function ConnectedSolana() {
   const paused = saidByServer(SOLANA_LIVE_PAUSED_NO_PERMISSION) ? SOLANA_LIVE_PAUSED_NO_PERMISSION : SOLANA_LIVE_PAUSED;
   const misconfigured = saidByServer(SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION) ? SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION : SOLANA_LIVE_ROLLOUT_MISCONFIGURED;
   const liveClosed = !liveAccess ? null : liveAccess.misconfigured ? misconfigured : !liveAccess.onList ? (wentLive ? paused : SOLANA_LIVE_NOT_OPEN) : null;
+  // The mode switch only for an account with a choice: one that may go live, went live (it keeps live for its exits) or saved
+  // live. Any other account can only paper trade, so the page offers no switch and says nothing about live.
+  const offersLive = !liveClosed || wentLive || binding?.requestedMode === "live";
   // The caps a new live permission must fit: only while this account may register one.
   const liveCaps = !liveClosed && liveAccess?.caps ? liveAccess.caps : null;
   // Its registered permission allows more than the caps (the server says so, as a buys-only blocker): its live limits may keep
@@ -448,7 +472,7 @@ function ConnectedSolana() {
     const lot = zeroOutputFor(e, sale);
     if (!lot) return false;
     setDust({ mint: lot.mint, amountRaw: lot.amountRaw, confirming: false });
-    setNotice("No route buys back this whole lot, so it cannot be sold. Nothing was sent or recorded. You can write it off in your paper portfolio.");
+    setNotice("No route buys back this whole lot, so it cannot be sold. Nothing was sent or recorded. You can write it off in your portfolio.");
     return true;
   };
   /** For a lot the trade form cannot sell: a preview of selling all of it, which records nothing. Only its zero-output answer offers the write-off. */
@@ -480,7 +504,7 @@ function ConnectedSolana() {
     }
     const epoch = accountEpoch.current;
     setDust(null); showWrittenOff(answer.paper, lot.mint);
-    const done = "The lot was written off at zero and removed from your paper portfolio.";
+    const done = "The lot was written off at zero and removed from your portfolio.";
     setNotice(done);
     try { await refresh(); }
     catch (e) {
@@ -509,7 +533,7 @@ function ConnectedSolana() {
   const receiptAmounts = (trade: Receipt): string | null => {
     const out = trade.intent?.outputMint ?? (side === "buy" ? WSOL : SOLANA_USDG_MINT), decimals = out === SOLANA_USDG_MINT ? 6 : 9, label = tokenLabel(out);
     if (trade.mode === "paper" && trade.outputAmountRaw && RAW.test(trade.outputAmountRaw) && trade.quote?.minOutAmount && RAW.test(trade.quote.minOutAmount))
-      return `Simulated output: ${display(trade.outputAmountRaw, decimals)} ${label}, against a quoted minimum of ${display(trade.quote.minOutAmount, decimals)} ${label}.`;
+      return `Received ${display(trade.outputAmountRaw, decimals)} ${label}, against a quoted minimum of ${display(trade.quote.minOutAmount, decimals)} ${label}.`;
     if (trade.mode !== "paper" && trade.minOutAmount && RAW.test(trade.minOutAmount) && trade.quotedOutAmount && RAW.test(trade.quotedOutAmount))
       return `Quoted output: ${display(trade.quotedOutAmount, decimals)} ${label}. Minimum enforced on chain: ${display(trade.minOutAmount, decimals)} ${label}.`;
     return null;
@@ -701,13 +725,14 @@ function ConnectedSolana() {
     {binding && <>
       <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(async () => {
         await api("settings", { mode, limits: policy(), revision: binding.revision, liveConsent: consent }); invalidate(); await refresh();
-      }); }}><h2>Solana trading mode</h2>
-        <fieldset disabled={busy}><legend>Choose how this account trades</legend>
+      }); }}><h2>{offersLive ? "Solana trading mode" : "Trading limits"}</h2>
+        {/* No switch while this account may not go live; one that went live keeps it for its exits, and a saved live mode stays shown. */}
+        {offersLive && <fieldset disabled={busy}><legend>Choose how this account trades</legend>
           <label><input type="radio" name="solana-mode" checked={mode === "paper"} onChange={() => chooseMode("paper")} /> Paper · simulated funds</label>
-          {/* No live switch while this account may not go live; one that went live keeps it for its exits, and a saved live mode stays shown. */}
-          {(!liveClosed || wentLive || binding.requestedMode === "live") && <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => chooseMode("live")} /> Live · real funds</label>}
-        </fieldset>
-        {liveClosed && <p role="status">{liveClosed}</p>}
+          <label><input type="radio" name="solana-mode" checked={mode === "live"} onChange={() => chooseMode("live")} /> Live · real funds</label>
+        </fieldset>}
+        {/* "Not open yet" is no news to an account that can only paper trade; a pause or a misconfigured rollout still is. */}
+        {liveClosed && liveClosed !== SOLANA_LIVE_NOT_OPEN && <p role="status">{liveClosed}</p>}
         <div className="solana-fields">
           <label>USDG per trade<input inputMode="decimal" value={perTrade} onChange={(e) => setPerTrade(e.target.value)} /></label>
           <label>USDG per 24 hours<input inputMode="decimal" value={daily} onChange={(e) => setDaily(e.target.value)} /></label>
@@ -724,11 +749,11 @@ function ConnectedSolana() {
         {mode === "live" && <p>Sales back to USDG count against these USDG limits as buys do, and against the SOL sold limits. So a buy is refused once it would leave too little of them to sell your whole SOL position within the same 24 hours: a day&apos;s buys stop at about half the USDG limit. Withdrawing is never limited.</p>}
         {mode === "live" && <p>Each live trade must be worth at least 1 USDG; only a sale of your whole SOL position may be smaller. Set at least 1 USDG per trade, and SOL sold per trade worth at least 1 USDG: registering checks it against the independent SOL price.</p>}
         {mode === "live" && <label><input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> I authorize real Solana trades within these limits after registering the permission with my wallet.</label>}
-        <button disabled={busy || (mode === "live" && !consent)}>Save Solana mode and limits</button>
-        <p>Saved preference: {binding.requestedMode}. A saved live preference becomes executable only after a verified wallet permission.</p>
+        <button disabled={busy || (mode === "live" && !consent)}>{offersLive ? "Save Solana mode and limits" : "Save limits"}</button>
+        {offersLive && <p>Saved preference: {binding.requestedMode}. A saved live preference becomes executable only after a verified wallet permission.</p>}
       </form>
-      {binding.requestedMode === "paper" ? <div className="solana-card"><h2>Paper portfolio</h2>
-        {status?.runtime?.paper ? <><p className="solana-value">{display(status.runtime.paper.cashRaw)} USDG</p><p>Simulated cash. {status.runtime.paper.positions.length} open position(s).</p>
+      {binding.requestedMode === "paper" ? <div className="solana-card"><h2>Portfolio <span className="solana-chip">Paper</span></h2>
+        {status?.runtime?.paper ? <><p className="solana-value">{display(status.runtime.paper.cashRaw)} USDG</p><p>{openPositions(status.runtime.paper.positions.length)}</p>
           {status.runtime.paper.positions.map((position) => {
             const label = position.mint === WSOL ? "Wrapped SOL" : position.mint, amountShown = display(position.amountRaw, position.decimals);
             const offered = dust && dust.mint === position.mint && dust.amountRaw === position.amountRaw ? dust : null;
@@ -736,7 +761,7 @@ function ConnectedSolana() {
               {/* The trade form sells only wrapped SOL; any other lot can be checked for dust here. */}
               {position.mint !== WSOL && !offered && <> <button type="button" className="solana-secondary" disabled={busy} onClick={() => void act(() => checkDust(position))}>Check for write-off</button></>}</p>
               {offered && (offered.confirming
-                ? <div className="solana-warning" role="group" aria-label="Confirm the write-off"><p>Write off this whole lot of {amountShown} {position.mint === WSOL ? "wrapped SOL" : "tokens"}? It is booked at zero: removed from your paper portfolio at no value, which frees its position slot. This cannot be undone.</p>
+                ? <div className="solana-warning" role="group" aria-label="Confirm the write-off"><p>Write off this whole lot of {amountShown} {position.mint === WSOL ? "wrapped SOL" : "tokens"}? It is booked at zero: removed from your portfolio at no value, which frees its position slot. This cannot be undone.</p>
                   <button type="button" disabled={busy} onClick={() => void act(writeOffDust)}>Write off at zero</button>
                   <button type="button" className="solana-secondary" disabled={busy} onClick={() => setDust(null)}>Keep it</button></div>
                 : <p>No route buys back this whole lot: the market quotes nothing for it, so it cannot be sold. <button type="button" disabled={busy} onClick={() => setDust({ ...offered, confirming: true })}>Write off…</button></p>)}</div>;
@@ -744,10 +769,10 @@ function ConnectedSolana() {
           {/* The check is a paper preview, which the server refuses once the book's limits (the saved ones) have expired; its write-off does not need them. */}
           {status.runtime.paper.positions.length > 0 && binding.limits && binding.limits.expiresAtMs <= Date.now()
             && <p role="status">Your saved limits expired at {permissionExpiry(binding.limits.expiresAtMs)}. Checking a lot for write-off previews selling all of it, which needs current limits: save new limits above, then check it.</p>}
-          <p>Network fees and account rent are excluded from paper results.</p>
-          {!!status.runtime.paper.trades?.length && <details><summary>Recent simulated trades</summary><ul>{status.runtime.paper.trades.slice(0, 20).map((trade) => <li key={trade.requestId}>{trade.side === "buy" ? "Buy" : "Sell"} · {trade.requestId} · simulated</li>)}</ul></details>}
-          </> : <><label>Starting simulated USDG<input inputMode="decimal" value={initialCash} onChange={(e) => setInitialCash(e.target.value)} /></label>
-            <button disabled={busy || !binding.limits} onClick={() => void act(async () => { await api("paper", { initialCashRaw: units(initialCash, 6) }); await refresh(); })}>Create paper portfolio</button></>}
+          <p className="create-note">Results exclude network fees and account rent.</p>
+          {!!status.runtime.paper.trades?.length && <details><summary>Recent trades</summary><ul>{status.runtime.paper.trades.slice(0, 20).map((trade) => <li key={trade.requestId}>{paperTradeLine(trade, paperLots)}</li>)}</ul></details>}
+          </> : <><label>Starting balance (USDG)<input inputMode="decimal" value={initialCash} onChange={(e) => setInitialCash(e.target.value)} /></label>
+            <button disabled={busy || !binding.limits} onClick={() => void act(async () => { await api("paper", { initialCashRaw: units(initialCash, 6) }); await refresh(); })}>Create portfolio</button></>}
       </div> : <div className="solana-card"><h2>Live permission</h2>
         <p>{status?.runtime?.live.ready ? "Registered permission ready." : "Live trading is not active yet."}</p>
         {binding.limits?.perTradeWsol && binding.limits.dailyWsol && <p>Sales are limited to {display(binding.limits.perTradeWsol, 9)} SOL per trade and {display(binding.limits.dailyWsol, 9)} SOL per 24 hours, whatever the price.</p>}
@@ -785,15 +810,16 @@ function ConnectedSolana() {
       <form className="solana-card" onSubmit={(event) => { event.preventDefault(); void act(previewTrade); }}><h2>USDG ↔ wrapped SOL</h2>
         <label>Direction<select disabled={busy} value={side} onChange={(e) => { setSide(e.target.value as "buy" | "sell"); invalidate(); }}><option value="buy">Buy wrapped SOL</option><option value="sell">Sell wrapped SOL</option></select></label>
         <label>{side === "buy" ? "USDG to spend" : "Wrapped SOL to sell"}<input disabled={busy} inputMode="decimal" value={amount} onChange={(e) => { setAmount(e.target.value); invalidate(); }} /></label>
-        <p>Slippage limit: 0.5%. Saved mode: {binding.requestedMode}.</p>
+        <p>Slippage limit: 0.5%.</p>
+        {mode !== binding.requestedMode && <p>Save the trading mode above before trading in it.</p>}
         <button disabled={busy || !!receipt || mode !== binding.requestedMode || !binding.limits || (mode === "live" && !(side === "sell" ? status?.runtime?.live.canExit : status?.runtime?.live.ready))}>Preview trade</button>
         {preview && (receipt || quoteFresh ? <>{preview.movedFrom && !receipt
           ? <p role="status">The price moved, so nothing was sent. The current quote guarantees at least {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}, below the {display(preview.movedFrom, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)} you previewed. Place the same trade at this new minimum, or preview again.</p>
           : <p>Minimum received: {display(preview.quote.minOutAmount, preview.quote.outputMint === SOLANA_USDG_MINT ? 6 : 9)} {tokenLabel(preview.quote.outputMint)}.</p>}
           {!receipt && <p>This {preview.movedFrom ? "minimum" : "quote"} is valid for about {secondsUntil(preview.deadline)}. The trade is quoted again when placed, with the same 0.5% slippage limit; the receipt shows the minimum actually enforced.</p>}
-          <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Simulate trade" : "Place live trade"}{preview.movedFrom ? " at the new minimum" : ""}</button></>
+          <button type="button" disabled={busy || !!receipt || !quoteFresh || mode !== binding.requestedMode} onClick={() => void act(placeTrade)}>{mode === "paper" ? "Place trade" : "Place live trade"}{preview.movedFrom ? " at the new minimum" : ""}</button></>
           : <p role="status">This quote expired. Preview again to see a current minimum before trading.</p>)}
-        {receipt && <p role="status">{receipt.mode === "paper" ? "Simulated trade recorded." : `Live request recorded${receipt.status ? `: ${receipt.status}` : ""}.`} {receipt.signature && <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(receipt.signature)}`}>View transaction</a>}</p>}
+        {receipt && <p role="status">{receipt.mode === "paper" ? "Trade recorded." : `Live request recorded${receipt.status ? `: ${receipt.status}` : ""}.`} {receipt.signature && <a target="_blank" rel="noreferrer" href={`https://solscan.io/tx/${encodeURIComponent(receipt.signature)}`}>View transaction</a>}</p>}
         {receipt && receiptAmounts(receipt) && <p>{receiptAmounts(receipt)}</p>}
         {receipt && <button type="button" className="solana-secondary" disabled={busy} onClick={invalidate}>Start a new trade</button>}
       </form>

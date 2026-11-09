@@ -193,7 +193,7 @@ test("paper creation uses exact raw USDG and never sends a browser-declared owne
     if (path === "paper") { assert.deepEqual(body, { initialCashRaw: "1000000000" }); state.runtime.paper = paper; return json({ paper }); }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Create paper portfolio");
+  await render(); await ui.click("Create portfolio");
   assert.match(ui.container.textContent!, /1000 USDG/);
   assert.equal(signCount, 0);
 });
@@ -212,12 +212,12 @@ test("an uncertain paper response retries the same request ID instead of creatin
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Preview trade"); await ui.click("Simulate trade"); await ui.click("Simulate trade");
+  await render(); await ui.click("Preview trade"); await ui.click("Place trade"); await ui.click("Place trade");
   assert.equal(trades.length, 2); assert.deepEqual(trades[0], trades[1]);
   assert.equal("owner" in trades[0]!, false); assert.equal("tenant" in trades[0]!, false);
-  assert.match(ui.container.textContent!, /Simulated trade recorded/);
-  assert.equal(button("Simulate trade").disabled, true);
-  await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Simulate trade");
+  assert.match(ui.container.textContent!, /Trade recorded/);
+  assert.equal(button("Place trade").disabled, true);
+  await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Place trade");
   assert.equal(trades.length, 3);
   assert.notEqual((trades[2]!.intent as { requestId: string }).requestId, (trades[0]!.intent as { requestId: string }).requestId);
 });
@@ -1292,15 +1292,15 @@ test("a previewed minimum expires with its quote and the trade needs a new previ
     };
     await render(); await ui.click("Preview trade");
     assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
-    assert.equal(button("Simulate trade").disabled, false);
+    assert.equal(button("Place trade").disabled, false);
     // The page re-renders when the quote's lifetime has passed (its timer fires a millisecond after).
     await act(async () => { mock.timers.tick(lifetime + 1); });
     // Its minimum is no longer offered and nothing can be traded on it.
     assert.ok(!ui.container.textContent!.includes("Minimum received"));
     assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
-    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Place trade"), false);
     assert.equal(trades.length, 0);
-    await ui.click("Preview trade"); await ui.click("Simulate trade");
+    await ui.click("Preview trade"); await ui.click("Place trade");
     assert.equal(trades.length, 1);
     // The trade carries exactly the minimum the owner was shown: the server refuses it, sending nothing, below that.
     assert.equal((trades[0]!.intent as { minOutAmount?: string }).minOutAmount, "9950000");
@@ -1334,15 +1334,15 @@ test("a trade carries the minimum of its own preview, and nothing is sent withou
     throw new Error("Unexpected fixture route");
   };
   await render(); await ui.click("Preview trade");
-  assert.equal(button("Simulate trade").disabled, false);
+  assert.equal(button("Place trade").disabled, false);
   // A different amount drops the preview: its minimum belonged to another trade.
   await type("USDG to spend", "2");
-  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Place trade"), false);
   assert.doesNotMatch(ui.container.textContent!, /Minimum received/);
   assert.equal(trades.length, 0);
   // The new amount's own preview, and its own minimum, travel with its trade.
   minimum = "19900000";
-  await ui.click("Preview trade"); await ui.click("Simulate trade");
+  await ui.click("Preview trade"); await ui.click("Place trade");
   assert.equal(trades.length, 1);
   const intent = trades[0]!.intent as { amountRaw: string; minOutAmount?: string };
   assert.equal(intent.amountRaw, "2000000"); assert.equal(intent.minOutAmount, "19900000");
@@ -1407,17 +1407,17 @@ test("a paced preview or trade (429) is a wait, not a failure: nothing more is s
   pacePreview = false;
   await ui.click("Preview trade");
   assert.equal(ui.container.querySelector(".solana-notice")?.textContent ?? null, null, "the next request clears the wait");
-  await ui.click("Simulate trade");
+  await ui.click("Place trade");
   assert.equal(alert(), null);
   assert.match(ui.container.querySelector(".solana-notice[role=status]")!.textContent!, /^Too many Solana trade requests\. This request was not processed/);
   assert.equal(trades.length, 1);
   // The preview the owner saw is still there, to try again with the same request and minimum.
   assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
-  assert.equal(button("Simulate trade").disabled, false);
+  assert.equal(button("Place trade").disabled, false);
   paceTrade = false;
-  await ui.click("Simulate trade");
+  await ui.click("Place trade");
   assert.equal(trades.length, 2); assert.deepEqual(trades[1], trades[0]);
-  assert.match(ui.container.textContent!, /Simulated trade recorded/);
+  assert.match(ui.container.textContent!, /Trade recorded/);
 });
 const PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
 test("the page's price-moved and too-small sentences, and its write-off slippage, are the server's own", async () => {
@@ -1440,13 +1440,13 @@ test("a price-moved refusal drops the stale preview and offers the fresh minimum
   };
   const moved = (fresh?: unknown) => () => json({ error: PRICE_MOVED, ownerFacing: true, ...(fresh === undefined ? {} : { freshMinOutAmount: fresh }) }, 409);
   const alert = () => ui.container.querySelector('[role="alert"]')?.textContent ?? null;
-  const offer = () => [...ui.container.querySelectorAll("button")].find((item) => item.textContent === "Simulate trade at the new minimum");
+  const offer = () => [...ui.container.querySelectorAll("button")].find((item) => item.textContent === "Place trade at the new minimum");
   answers = [moved("9000000")];
-  await render(); await ui.click("Preview trade"); await ui.click("Simulate trade");
+  await render(); await ui.click("Preview trade"); await ui.click("Place trade");
   assert.equal(trades.length, 1); assert.equal((trades[0]!.intent as { minOutAmount: string }).minOutAmount, "9950000");
   // Nothing went wrong and nothing was sent: no alert, and the refused minimum is never offered again.
   assert.equal(alert(), null);
-  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Place trade"), false);
   assert.match(ui.container.textContent!, /The price moved, so nothing was sent\. The current quote guarantees at least 0\.009 wrapped SOL, below the 0\.00995 wrapped SOL you previewed\./);
   assert.doesNotMatch(ui.container.textContent!, /Minimum received/);
   // Nothing more is sent until the owner clicks.
@@ -1455,16 +1455,16 @@ test("a price-moved refusal drops the stale preview and offers the fresh minimum
   assert.equal(offer()!.disabled, false);
   // The click sends exactly the fresh minimum, as the same trade: same request ID, same amount.
   answers = [() => json({ receipt: { mode: "paper", requestId: (trades[0]!.intent as { requestId: string }).requestId } })];
-  await ui.click("Simulate trade at the new minimum");
+  await ui.click("Place trade at the new minimum");
   assert.equal(trades.length, 2);
   const [first, second] = trades.map((trade) => trade.intent as Record<string, unknown>);
   assert.equal(second!.minOutAmount, "9000000");
   assert.deepEqual({ ...second, minOutAmount: undefined }, { ...first, minOutAmount: undefined });
-  assert.match(ui.container.textContent!, /Simulated trade recorded/);
+  assert.match(ui.container.textContent!, /Trade recorded/);
   // If it moves again, the server refuses again, and the next fresh minimum is offered against the one just refused.
   await ui.click("Start a new trade"); await ui.click("Preview trade");
   answers = [moved("9500000"), moved("9400000")];
-  await ui.click("Simulate trade"); await ui.click("Simulate trade at the new minimum");
+  await ui.click("Place trade"); await ui.click("Place trade at the new minimum");
   assert.equal(trades.length, 4);
   assert.equal((trades[3]!.intent as { minOutAmount: string }).minOutAmount, "9500000");
   assert.match(ui.container.textContent!, /guarantees at least 0\.0094 wrapped SOL, below the 0\.0095 wrapped SOL you previewed/);
@@ -1484,9 +1484,9 @@ test("a price-moved refusal without a usable fresh minimum offers nothing to tra
   // Missing, malformed, not canonical, or not below the refused minimum of 9950000: never offered.
   for (const value of [undefined, "0", "09000000", "-9000000", "9e6", "9000000.0", " 9000000", 9_000_000, "1".repeat(40), "9950000", "9950001"]) {
     fresh = value;
-    await ui.click("Preview trade"); await ui.click("Simulate trade");
+    await ui.click("Preview trade"); await ui.click("Place trade");
     const buttons = [...ui.container.querySelectorAll("button")].map((item) => item.textContent);
-    assert.ok(!buttons.some((text) => text?.startsWith("Simulate trade")), JSON.stringify(value));
+    assert.ok(!buttons.some((text) => text?.startsWith("Place trade")), JSON.stringify(value));
     assert.doesNotMatch(ui.container.textContent!, /Minimum received|new minimum|guarantees at least/);
     assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null);
     assert.equal(ui.container.querySelector(".solana-notice")?.textContent, PRICE_MOVED);
@@ -1504,10 +1504,10 @@ test("a fresh minimum expires like a preview, and is then never sent", async () 
       if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ error: PRICE_MOVED, ownerFacing: true, freshMinOutAmount: "9000000" }, 409); }
       throw new Error("Unexpected fixture route");
     };
-    await render(); await ui.click("Preview trade"); await ui.click("Simulate trade");
-    assert.ok([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade at the new minimum"));
+    await render(); await ui.click("Preview trade"); await ui.click("Place trade");
+    assert.ok([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Place trade at the new minimum"));
     await act(async () => { mock.timers.tick(20_001); });
-    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent?.startsWith("Simulate trade")), false);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent?.startsWith("Place trade")), false);
     assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
     assert.equal(trades.length, 1);
   } finally { mock.timers.reset(); }
@@ -1553,7 +1553,7 @@ test("a paper lot is offered for write-off only after the market answers its who
   assert.match(text(), /Wrapped SOL: 0\.000000005No route buys back this whole lot: the market quotes nothing for it, so it cannot be sold\./);
   // Nothing is sent until the owner confirms, and "Keep it" sends nothing.
   await ui.click("Write off…");
-  assert.match(text(), /Write off this whole lot of 0\.000000005 wrapped SOL\? It is booked at zero: removed from your paper portfolio at no value, which frees its position slot\. This cannot be undone\./);
+  assert.match(text(), /Write off this whole lot of 0\.000000005 wrapped SOL\? It is booked at zero: removed from your portfolio at no value, which frees its position slot\. This cannot be undone\./);
   assert.equal(writeOffs.length, 0);
   await ui.click("Keep it");
   assert.equal(hasButton("Write off at zero"), false); assert.equal(hasButton("Write off…"), false);
@@ -1648,10 +1648,10 @@ test("a booked write-off says so and shows the lot gone, even when the status re
     // The success is said first, the failed read after it, and nothing reads as a failure.
     assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null, label);
     assert.equal(ui.container.querySelector(".solana-notice")!.textContent,
-      `The lot was written off at zero and removed from your paper portfolio. Your account could not be read again just now: ${failure}`, label);
+      `The lot was written off at zero and removed from your portfolio. Your account could not be read again just now: ${failure}`, label);
     // The lot is gone from the portfolio, with nothing left to check or write off.
     assert.doesNotMatch(ui.container.textContent!, new RegExp(BONK), label);
-    assert.match(ui.container.textContent!, /Paper portfolio1000 USDGSimulated cash\. 0 open position\(s\)\./, label);
+    assert.match(ui.container.textContent!, /Portfolio Paper1000 USDGNo open positions\./, label);
     assert.equal(hasButton("Check for write-off"), false, label);
     assert.equal(hasButton("Write off…"), false, label); assert.equal(hasButton("Write off at zero"), false, label);
   }
@@ -1721,8 +1721,8 @@ test("receipts show the minimum the recorded trade enforced, not the earlier pre
     if (path === "intent" && body?.action === "trade") return json({ receipt: { mode: "paper", requestId: "r", intent: { outputMint: OWNER }, quote: { minOutAmount: "9950000" }, outputAmountRaw: "9990000" } });
     throw new Error("Unexpected fixture route");
   };
-  await ui.click("Refresh account"); await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Simulate trade");
-  assert.match(ui.container.textContent!, /Simulated output: 0\.00999 wrapped SOL, against a quoted minimum of 0\.00995 wrapped SOL\./);
+  await ui.click("Refresh account"); await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Place trade");
+  assert.match(ui.container.textContent!, /Received 0\.00999 wrapped SOL, against a quoted minimum of 0\.00995 wrapped SOL\./);
 });
 
 const EXPORT_FLAG = "NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT";
@@ -2456,7 +2456,7 @@ const liveSwitch = () => [...ui.container.querySelectorAll("label")].find((item)
 /** The live rollout as status reports it. */
 const access = (onList: boolean, misconfigured = false) => ({ onList, misconfigured, caps: misconfigured ? null : { ...SOLANA_LIVE_CAP_DEFAULTS } });
 
-test("off the live list a paper account is told why and offered no live switch; on it the page names the caps and refuses a live limit above one before sending anything", async () => {
+test("off the live list a paper account sees only its limits, with no mode switch and no word about live; on it the page names the caps and refuses a live limit above one before sending anything", async () => {
   const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
   runtime.liveAccess = access(false);
   const saved: Array<Record<string, unknown>> = [];
@@ -2466,8 +2466,12 @@ test("off the live list a paper account is told why and offered no live switch; 
     throw new Error("Unexpected fixture route");
   };
   await render();
+  // Paper is all this account can do: nothing to choose, nothing said about live, and its limits saved as just that.
   assert.equal(!!liveSwitch(), false, "no live switch");
-  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN));
+  assert.equal(ui.container.querySelectorAll("input[type=radio]").length, 0, "no mode switch at all");
+  assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN));
+  assert.ok(ui.container.textContent!.includes("Trading limits")); assert.ok(!ui.container.textContent!.includes("Saved preference"));
+  assert.ok([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Save limits"));
   // A list or cap setting the server cannot read: said, and no switch either.
   runtime.liveAccess = access(false, true); await press("Refresh account");
   assert.equal(!!liveSwitch(), false); assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED));
@@ -2649,4 +2653,19 @@ test("on the list, while the server says the registered permission allows more t
   await ui.click("Save Solana mode and limits");
   assert.equal(saved.length, 1, "nothing sent");
   assert.ok(ui.container.textContent!.includes(solanaLiveCapRefusal(state.binding.limits!, SOLANA_LIVE_CAP_DEFAULTS, "save")!), ui.container.textContent!);
+});
+
+test("a paper trade reads as what went in, what came out and when; open positions read as words", () => {
+  const WRAPPED = "So11111111111111111111111111111111111111112", token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+  const at = Date.UTC(2026, 10, 9, 11, 50);
+  const buy = { side: "buy", createdAtMs: at, inputAmountRaw: "10000000", outputAmountRaw: "111234567", intent: { inputMint: SOLANA_USDG_MINT, outputMint: WRAPPED } };
+  assert.equal(screen.paperTradeLine(buy, []), "Buy · 10 USDG → 0.111234567 wrapped SOL · 2026-11-09 11:50 UTC");
+  // Another token's amount needs its decimals: from a lot still held, otherwise the row names the token alone.
+  const sell = { side: "sell", createdAtMs: at, inputAmountRaw: "250000", outputAmountRaw: "1500000", intent: { inputMint: token, outputMint: SOLANA_USDG_MINT } };
+  assert.equal(screen.paperTradeLine(sell, [{ mint: token, decimals: 5 }]), "Sell · 2.5 DezX…B263 → 1.5 USDG · 2026-11-09 11:50 UTC");
+  assert.equal(screen.paperTradeLine(sell, []), "Sell · DezX…B263 → 1.5 USDG · 2026-11-09 11:50 UTC");
+  // A malformed record still reads as its side; it never throws and blanks the list.
+  assert.equal(screen.paperTradeLine({ side: "buy", createdAtMs: Number.NaN, inputAmountRaw: "x", intent: null }, []), "Buy");
+  assert.equal(screen.paperTradeLine({ side: "buy", createdAtMs: 1e20 }, []), "Buy");
+  assert.deepEqual([0, 1, 2].map((count) => screen.openPositions(count)), ["No open positions.", "1 open position.", "2 open positions."]);
 });
