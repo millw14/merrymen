@@ -16,6 +16,7 @@ import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionE
 import { deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
 import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
+import { count as groupedCount } from "../lib/format";
 import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION,
   solanaLiveCapRefusal, solanaLiveCapsExceeded, solanaLiveCapsText, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps, type SolanaLiveCaps } from "../lib/solana-live-caps";
 import "./SolanaScreen.css";
@@ -804,7 +805,7 @@ function ConnectedSolana() {
   // only for an account that can only paper trade, since one with a mode choice has decisions on that card.
   const limitsExpired = !!binding?.limits && binding.requestedMode === "paper" && binding.limits.expiresAtMs <= Date.now();
   const limitsFolded = !offersLive && !!binding?.limits && !limitsExpired && !editingLimits && formMatchesSaved();
-  const cashShown = /^[0-9]+$/.test(initialCash) ? Number(initialCash).toLocaleString("en-US") : initialCash;
+  const cashShown = /^[0-9]+$/.test(initialCash) ? groupedCount(Number(initialCash)) : initialCash;
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
     {error && <p role="alert" className="solana-error">{error}</p>}
