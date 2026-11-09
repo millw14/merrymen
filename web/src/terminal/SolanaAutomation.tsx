@@ -5,7 +5,11 @@ import { solanaUnits, displaySolanaAmount } from "../lib/solana-amounts";
 import { pacedAnswer } from "./SolanaOwnerActions";
 
 export type SolanaApi = <T>(path: string, body?: unknown, signal?: AbortSignal) => Promise<T>;
-export function SolanaAutomation({ binding, api, refresh, workerOnline }: { binding: SolanaBinding; api: SolanaApi; refresh: () => Promise<void>; workerOnline: boolean }) {
+/**
+ * `modeSwitch`: whether this account can choose its mode at all (SolanaScreen's offersLive). One that can only paper trade
+ * is told nothing about modes; live is always named, since it trades real funds.
+ */
+export function SolanaAutomation({ binding, api, refresh, workerOnline, modeSwitch = true }: { binding: SolanaBinding; api: SolanaApi; refresh: () => Promise<void>; workerOnline: boolean; modeSwitch?: boolean }) {
   const [enabled, setEnabled] = useState(false), [target, setTarget] = useState("50"), [threshold, setThreshold] = useState("5");
   const [size, setSize] = useState("1"), [interval, setInterval] = useState("60");
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
@@ -30,11 +34,12 @@ export function SolanaAutomation({ binding, api, refresh, workerOnline }: { bind
     })
       .finally(() => { inFlight.current = false; setBusy(false); });
   }}><h2>Autonomous rebalancing</h2>
-    <p>Keep a target balance of USDG and wrapped SOL. The agent uses this account’s saved mode and trading limits. Switching modes disables the strategy until you enable it again.</p>
+    {modeSwitch ? <p>Keep a target balance of USDG and wrapped SOL. The agent uses this account’s saved mode and trading limits. Switching modes disables the strategy until you enable it again.</p>
+      : <p>Keep a target balance of USDG and wrapped SOL, within this account’s saved trading limits.</p>}
     {error && <p role="alert" className="solana-error">{error}</p>}
     {notice && <p role="status" className="solana-notice">{notice}</p>}
     <fieldset disabled={busy}><legend>Strategy settings</legend>
-      <label><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enable autonomous trading in {binding.requestedMode} mode</label>
+      <label><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Enable autonomous trading{modeSwitch || binding.requestedMode === "live" ? ` in ${binding.requestedMode} mode` : ""}</label>
       <div className="solana-fields">
         <label>Target wrapped SOL (%)<input inputMode="decimal" value={target} onChange={(e) => setTarget(e.target.value)} /></label>
         <label>Rebalance threshold (%)<input inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} /></label>
