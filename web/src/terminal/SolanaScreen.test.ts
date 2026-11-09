@@ -122,6 +122,8 @@ let walletOpen = 0;
 /** What the fixture wallet returns for a signature request (a promise: the wallet stays open until it settles). */
 let signedBytes: () => Uint8Array | Promise<Uint8Array>;
 let signerDid = "did:privy:alice";
+/** The fixture wallet's address: null until create() makes one, as Privy shows a new wallet on a later render. */
+let signerAddress: string | null = OWNER, createCount = 0;
 /** The release pin SolanaRecovery reads (SOLANA_VAULT_RELEASES); undefined reads the real one. */
 let releases: Array<{ programId: string; sha256: string }> | undefined;
 let respond: (path: string, body: Record<string, unknown> | undefined) => Promise<Response>;
@@ -158,8 +160,8 @@ before(async () => {
       if (id === "@/lib/privy-client") return { privyEnabled: () => true };
       if (id === "./HostedControls") return { SignIn: () => React.createElement("p", null, "Sign in") };
       if (id === "./useSolanaOwner") return { useSolanaOwner: () => ({
-        ready: true, authenticated: true, did: signerDid, address: OWNER, ambiguous: false,
-        getAccessToken: async () => "fixture-token", create: async () => {}, signBinding: async () => "fixture-signature",
+        ready: true, authenticated: true, did: signerDid, address: signerAddress, ambiguous: false,
+        getAccessToken: async () => "fixture-token", create: async () => { createCount++; signerAddress = OWNER; }, signBinding: async () => "fixture-signature",
         signSetup: async () => { signCount++; walletOpen++; try { return await signedBytes(); } finally { walletOpen--; } },
         exportKey: async () => { exportCount++; },
       }) };
@@ -170,7 +172,7 @@ before(async () => {
   finally { intercept.mock.restore(); }
 });
 beforeEach(() => {
-  ui = testDom(); signerDid = "did:privy:alice"; state = initial(); calls = []; signCount = 0; exportCount = 0; walletOpen = 0; signedBytes = () => Uint8Array.from([1, 2, 3]); releases = undefined;
+  ui = testDom(); signerDid = "did:privy:alice"; signerAddress = OWNER; createCount = 0; state = initial(); calls = []; signCount = 0; exportCount = 0; walletOpen = 0; signedBytes = () => Uint8Array.from([1, 2, 3]); releases = undefined;
   respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
   globalThis.fetch = async (url, init) => {
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-token");
@@ -303,7 +305,7 @@ test("a delayed response from the previous identity never populates a new accoun
   signerDid = "did:privy:bob"; await render();
   await act(async () => { old.resolve(json(state)); });
   assert.ok(!ui.container.textContent!.includes("Solana trading mode"));
-  assert.match(ui.container.textContent!, /Verify Solana wallet/);
+  assert.match(ui.container.textContent!, /Set up my account/);
 });
 
 /** How many times the page says `text`. */
@@ -312,11 +314,11 @@ test("a status answer that another sign-in verified this account's wallet offers
   respond = async (path) => { if (path === "status") return json({ error: SOLANA_OTHER_SIGN_IN }, 403); throw new Error("Unexpected fixture route"); };
   await render(); await settle();
   assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1, "said once, in the wallet card");
-  assert.equal(button("Verify Solana wallet"), undefined); assert.equal(button("Create Solana wallet"), undefined);
+  assert.equal(button("Set up my account"), undefined);
   assert.ok(button("Refresh account"), "a refresh is still offered");
   // Still that answer on a refresh: still no wallet offered.
   await press("Refresh account");
-  assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1); assert.equal(button("Verify Solana wallet"), undefined);
+  assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1); assert.equal(button("Set up my account"), undefined);
   // The login that verified it: the account shows, and the message goes.
   respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
   signerDid = "did:privy:bob"; await render(); await settle();
@@ -330,10 +332,10 @@ test("a verify the bind route refuses as another sign-in's stops offering create
     throw new Error("Unexpected fixture route");
   };
   await render();
-  assert.ok(button("Verify Solana wallet"));
-  await press("Verify Solana wallet");
+  assert.ok(button("Set up my account"));
+  await press("Set up my account");
   assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1);
-  assert.equal(button("Verify Solana wallet"), undefined); assert.equal(button("Create Solana wallet"), undefined);
+  assert.equal(button("Set up my account"), undefined);
   assert.equal(calls.filter((call) => call.path === "bind").length, 0, "nothing was signed or posted");
   // Any other refusal of a verify is shown as before, and the button stays.
   ui = (await ui.close(), testDom());
@@ -342,9 +344,9 @@ test("a verify the bind route refuses as another sign-in's stops offering create
     if (path.startsWith("bind?owner=")) return json({ error: "That Solana wallet is already bound to another account." }, 409);
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Verify Solana wallet");
+  await render(); await press("Set up my account");
   assert.match(ui.container.textContent!, /already bound to another account/);
-  assert.ok(button("Verify Solana wallet"));
+  assert.ok(button("Set up my account"));
 });
 test("the live permission card names a revocation signed beside the owner transaction", async () => {
   state = initial("live"); state.runtime.live.programId = PROGRAM;
@@ -2476,7 +2478,11 @@ test("off the live list a paper account sees only its limits, with no mode switc
   assert.equal(ui.container.querySelectorAll("input[type=radio]").length, 0, "no mode switch at all");
   assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN));
   assert.ok(ui.container.textContent!.includes("Trading limits")); assert.ok(!ui.container.textContent!.includes("Saved preference"));
-  assert.ok([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Save limits"));
+  // Saved limits fold to one line, and the form opens only when asked for.
+  assert.match(ui.container.textContent!, /Trading limits10 USDG a trade · 50 USDG a day · 20 trades a day · 20% maximum drawdown · until \d{4}-\d\d-\d\d \d\d:\d\d UTC/);
+  assert.equal(button("Save limits"), undefined);
+  await press("Change limits");
+  assert.ok(button("Save limits"));
   // A list or cap setting the server cannot read: said, and no switch either.
   runtime.liveAccess = access(false, true); await press("Refresh account");
   assert.equal(!!liveSwitch(), false); assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED));
@@ -2699,4 +2705,78 @@ test("owner controls show only where they act on something: none for a paper acc
   // A status without its runtime is not proof of nothing to act on: the card stays.
   state = initial(); (state as { runtime: unknown }).runtime = null; await press("Refresh account");
   assert.equal(ownerCard(), true, "no runtime in the status");
+});
+
+/** A server for a new account: no binding until bind, then whatever settings and paper saved. */
+function freshAccount(options: { failSettingsOnce?: string } = {}) {
+  let bound: Record<string, unknown> | null = null, book: unknown = null, failSettings = options.failSettingsOnce;
+  respond = async (path, body) => {
+    if (path === "status") return json(bound ? { binding: bound, runtime: { ...initial().runtime, paper: book } } : { binding: null, runtime: null });
+    if (path === `bind?owner=${encodeURIComponent(OWNER)}`) return json({ nonce: "nonce-1", message: "Verify this wallet" });
+    if (path === "bind") { bound = { ...initial().binding, limits: null, revision: 1 }; return json({ binding: bound }); }
+    if (path === "settings") {
+      if (failSettings) { const said = failSettings; failSettings = undefined; return json({ error: said }, 400); }
+      bound = { ...bound!, limits: body!.limits, revision: 2 }; return json({ binding: bound });
+    }
+    if (path === "paper") { book = { ...paper }; return json({ paper: book }); }
+    throw new Error(`Unexpected fixture route ${path}`);
+  };
+}
+
+test("one press sets a new account up: wallet, one signature, a week of default paper limits and a 1,000 USDG portfolio, then one status read", async () => {
+  signerAddress = null; freshAccount();
+  await render();
+  assert.match(ui.container.textContent!, /a paper portfolio of 1,000 USDG/);
+  const started = Date.now();
+  await press("Set up my account"); await settle();
+  assert.equal(createCount, 1, "the wallet is created first, and once");
+  // Verified, limits saved and portfolio opened on the routes' own answers; the status is read once, at the end.
+  assert.deepEqual(calls.map((call) => call.path), ["status", `bind?owner=${encodeURIComponent(OWNER)}`, "bind", "settings", "paper", "status"]);
+  assert.deepEqual(calls[2]!.body, { owner: OWNER, nonce: "nonce-1", signature: "fixture-signature" });
+  const settings = calls[3]!.body!, saved = settings.limits as Record<string, unknown>;
+  assert.equal(settings.mode, "paper"); assert.equal(settings.liveConsent, false); assert.equal(settings.revision, 1);
+  assert.deepEqual({ ...saved, expiresAtMs: 0 }, { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: 0 });
+  assert.ok(Math.abs(Number(saved.expiresAtMs) - (started + 168 * 3_600_000)) < 60_000, "paper limits last a week");
+  assert.deepEqual(calls[4]!.body, { initialCashRaw: "1000000000" });
+  assert.equal(button("Set up my account"), undefined);
+  assert.match(ui.container.textContent!, /Wallet ownership.*Verified wallet connected/);
+  assert.match(ui.container.textContent!, /Portfolio Paper1000 USDGNo open positions\./);
+  assert.equal(signCount, 0, "verifying signs a message, never a transaction");
+});
+
+test("a setup stopped part way carries on from the step that failed, and never verifies the wallet twice", async () => {
+  freshAccount({ failSettingsOnce: "These limits could not be saved." });
+  await render(); await press("Set up my account");
+  assert.match(ui.container.textContent!, /These limits could not be saved\./);
+  // What it did save shows: the verified wallet, and the portfolio card finishes the rest in one press.
+  assert.match(ui.container.textContent!, /Verified wallet connected/);
+  calls = [];
+  await press("Create portfolio");
+  assert.deepEqual(calls.map((call) => call.path), ["settings", "paper", "status"]);
+  assert.match(ui.container.textContent!, /Portfolio Paper1000 USDG/);
+  assert.equal(createCount, 0, "the fixture wallet already existed");
+});
+
+test("paper limits that ran out renew as they were, for a week, in one press, and then fold to one line", async () => {
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  state.binding.limits = { ...limits, expiresAtMs: Date.now() - 60_000 };
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); state.binding = { ...state.binding, limits: body!.limits as typeof limits, revision: 1 }; return json({ binding: state.binding }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.match(ui.container.textContent!, /Your limits expired at \d{4}-\d\d-\d\d \d\d:\d\d UTC\. Trading resumes once they are renewed\./);
+  const started = Date.now();
+  await press("Renew for 7 days");
+  assert.equal(saved.length, 1); assert.equal(saved[0]!.mode, "paper"); assert.equal(saved[0]!.liveConsent, false);
+  const renewed = saved[0]!.limits as typeof limits;
+  assert.deepEqual({ ...renewed, expiresAtMs: 0 }, { ...limits, expiresAtMs: 0 }, "the same limits");
+  assert.ok(Math.abs(renewed.expiresAtMs - (started + 168 * 3_600_000)) < 60_000, "for another week");
+  assert.match(ui.container.textContent!, /Trading limits10 USDG a trade · 50 USDG a day · 20 trades a day · 20% maximum drawdown · until /);
+  assert.equal(button("Save limits"), undefined);
+  await press("Change limits");
+  assert.ok(button("Save limits"));
 });
