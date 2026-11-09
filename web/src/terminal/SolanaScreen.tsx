@@ -693,7 +693,7 @@ function ConnectedSolana() {
   // OWNER DECISION (the stricter option, as briefed): a paper binding gets no
   // card even when its account still has a live book or session from trading
   // live before. Its owner controls (revoke and withdraw) stay on this page
-  // in paper mode. The alternative shows the card for a paper binding with a
+  // in paper mode (ownerControls). The alternative shows the card for a paper binding with a
   // live book or session (a vault funded while live keeps its funds after the
   // switch back): replace `binding.requestedMode === "live" && vaultSeen` with
   // `(binding.requestedMode === "live" ? vaultSeen : !!live.book || !!live.session)`
@@ -710,6 +710,15 @@ function ConnectedSolana() {
   // needs the flag as a Docker build argument (solana-glue-build's Dockerfile).
   const recoveryCard = ownerKeyExportEnabled() && sameWallet && recoveryVault && signer.address && live?.programId && live.vault
     ? { owner: signer.address, programId: live.programId, vault: live.vault } : null;
+  // THE OWNER CONTROLS (revoke, resume buys, withdraw, withdrawals made outside Merrymen) only where they act on something.
+  // OWNER DECISION (Milla, 2026-11-09): a paper account that never went live has no session to revoke and no vault to
+  // withdraw from, so it gets no card. The rule follows the server's own for reading live vault state (status's liveReads:
+  // live mode, a session, a live book, a setup or a pending trade). Any of those, an owner record, live history or anything
+  // read from Solana (balances, the owner wallet, recoverable SOL) shows the card, and so does a status without its live
+  // part. An account that went live keeps its controls in paper mode, as before. No owner flow can be under way without
+  // one of these, so the card never unmounts with signed bytes in hand.
+  const ownerControls = !live || binding?.requestedMode === "live" || !!live.session || !!live.book || !!live.balances || !!live.ownerTransaction
+    || live.pending.length > 0 || !!live.history?.length || !!live.ownerWallet || !!live.recoverable;
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
   return <>
     {error && <p role="alert" className="solana-error">{error}</p>}
@@ -824,11 +833,11 @@ function ConnectedSolana() {
         {receipt && <button type="button" className="solana-secondary" disabled={busy} onClick={invalidate}>Start a new trade</button>}
       </form>
       <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} modeSwitch={offersLive} />
-      <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} owner={sameWallet ? binding.owner : null} programId={live?.programId ?? null}
+      {ownerControls && <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} owner={sameWallet ? binding.owner : null} programId={live?.programId ?? null}
         api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord}
         serverTransaction={live?.ownerTransaction ?? null} ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null}
         confirmationUnavailable={!!live?.blockers.includes(OWNER_CONFIRMATION_UNAVAILABLE)}
-        recovery={recoveryCard ? (releasedProgramSha256(recoveryCard.programId) ? "send" : "plan") : null} />
+        recovery={recoveryCard ? (releasedProgramSha256(recoveryCard.programId) ? "send" : "plan") : null} />}
       {recoveryCard && <SolanaRecovery key={`recovery-${signer.did}`} owner={recoveryCard.owner}
         programId={recoveryCard.programId} vault={recoveryCard.vault} exportKey={signer.exportKey} />}
     </>}

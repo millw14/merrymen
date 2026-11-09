@@ -131,6 +131,11 @@ function initial(mode: "paper" | "live" = "paper") {
     runtime: { owner: OWNER, requestedMode: mode, paper: null as typeof paper | null, limits,
       live: { ready: false, blockers: ["Deploy and verify the vault program before enabling live trading."], programId: null as string | null, vault: null, session: null, pending: [] } } };
 }
+/**
+ * A paper account that registered a live permission before (a session on record): the only kind of paper account the
+ * owner controls show for (SolanaScreen ownerControls), as on the server, which reads live vault state only for such accounts.
+ */
+function wentLiveBefore() { Object.assign(state.runtime.live, { session: OWNER }); }
 before(async () => {
   // React DOM checks input-event support when it first loads. Supply a DOM
   // before importing the harness so typing exercises real React onChange.
@@ -350,7 +355,7 @@ test("the live permission card names a revocation signed beside the owner transa
   assert.equal(link.getAttribute("href"), "https://solscan.io/tx/revoke-sig");
 });
 test("owner recovery stays available in paper mode and retries exact signed bytes", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   const submissions: unknown[] = [];
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -432,7 +437,7 @@ test("a paced answer is a wait wherever it is read: the first status load, owner
   assert.equal(card("Autonomous rebalancing").querySelector('[role="status"].solana-notice')?.textContent, "Too many Solana strategy changes. Try again in 9 seconds.");
 });
 test("resuming buys requires a separate owner signature without changing trading limits", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
@@ -610,7 +615,7 @@ const unsaved = (error: string, status = 409) => json({ error, ownerFacing: true
 /** Signed wire bytes the server records by their owner signature (signatureOf), and that signature. */
 const WIRE = Uint8Array.from([1, ...new Uint8Array(64).fill(7), 9, 9, 9]), WIRE_SIGNATURE = base58Encode(new Uint8Array(64).fill(7));
 test("a refused owner submission discards the stale signed bytes and leaves Revoke usable", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
@@ -653,7 +658,7 @@ const ownerPrepare = (body: Record<string, unknown> | undefined) => {
 const revokeBeside = (signature: string, status: string, more: { revokeAgain?: boolean } = {}) => Object.assign(state.runtime.live, { ownerTransaction: { ...serverOwnerRecord()!, revoke: { signature, status, kind: "revoke", ...more } } });
 const ownerTransaction = (signature: string, status: string, kind: string) => Object.assign(state.runtime.live, { ownerTransaction: { signature, status, kind } });
 test("withdrawal bytes the server never saved do not hold back Revoke: the revocation replaces them", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
@@ -681,7 +686,7 @@ test("withdrawal bytes the server never saved do not hold back Revoke: the revoc
 });
 
 test("signed bytes the server never saved, next to a different pending server record: Revoke is prepared beside it, and only a revocation beside it, pending or landed, holds Revoke back", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
@@ -729,7 +734,7 @@ test("signed bytes the server never saved, next to a different pending server re
 });
 
 test("while the server holds a submitted withdrawal every other owner action waits for it, Revoke is prepared beside it, and then everything waits for the revocation", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
@@ -816,7 +821,7 @@ test("a Revoke pressed before the page knew of a pending owner transaction is re
 
 const ownerCalls = () => calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit");
 test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports the server's record, never 'not accepted'", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   let submits = 0;
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -851,7 +856,7 @@ test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports th
 });
 
 test("a 4xx after an unknown outcome clears bytes the server holds no record of, without claiming they were never sent", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   // Real wire bytes: one owner signature, then a message.
   const signature = new Uint8Array(64).fill(9), wire = Uint8Array.from([1, ...signature, 0x80, 1, 2, 3]);
   let submits = 0;
@@ -907,7 +912,7 @@ test("a revocation saved beside a pending withdrawal is found in the server's re
 });
 
 test("withdrawals made outside Merrymen are recorded by their signatures, read by the server, and nothing is signed", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   const first = base58Encode(new Uint8Array(64).fill(3)), second = base58Encode(new Uint8Array(64).fill(4));
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -936,7 +941,7 @@ test("withdrawals made outside Merrymen are recorded by their signatures, read b
 });
 
 test("a refused retry keeps the signed bytes when the server's record cannot be read", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   let submits = 0, statusUp = true;
   respond = async (path, body) => {
     if (path === "status") return statusUp ? json(state) : json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503);
@@ -955,7 +960,7 @@ test("a refused retry keeps the signed bytes when the server's record cannot be 
 });
 
 test("a first owner submission refused without notSaved is decided by the server's record, never assumed unsaved", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   signedBytes = () => WIRE;
   let submits = 0, record: "pending" | "unheld" | "unreadable" = "pending", statusUp = true;
   respond = async (path, body) => {
@@ -979,7 +984,7 @@ test("a first owner submission refused without notSaved is decided by the server
   assert.match(ui.container.textContent!, /Owner transaction: finalized/);
   assert.equal(signCount, 1); assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit"]);
   // The server's record cannot be read: kept, and the next refusal is a retry.
-  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unreadable"; statusUp = true;
+  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; wentLiveBefore(); calls = []; submits = 0; record = "unreadable"; statusUp = true;
   await render(); await ownerPress("Withdraw to my wallet");
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /The server could not say whether it saved this signed withdrawal, so it was kept\. This does not mean it failed/);
@@ -990,14 +995,14 @@ test("a first owner submission refused without notSaved is decided by the server
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /already saved\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
   // The server holds no record of them: discarded, and the owner starts again.
-  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unheld"; statusUp = true;
+  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; wentLiveBefore(); calls = []; submits = 0; record = "unheld"; statusUp = true;
   await render(); await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /just recorded\. The server holds no record of this signed withdrawal, so it has been discarded\. Start it again to review and sign a new one\./);
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
   assert.equal(button("Withdraw to my wallet").disabled, false);
 });
 test("a refused retry marked notSaved still keeps bytes the server's record holds, and never says they were not sent", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   signedBytes = () => WIRE;
   let submits = 0;
   respond = async (path, body) => {
@@ -1025,7 +1030,7 @@ test("a refused retry marked notSaved still keeps bytes the server's record hold
   assert.equal(signCount, 1);
 });
 test("a 404 or a sign-in answer to signed owner bytes is not a refusal: the bytes are kept", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   const answers = [refusal("Solana trading is not available.", 404), refusal("Your sign-in expired.", 401), refusal("Too many requests.", 429), refusal(SOLANA_OTHER_SIGN_IN, 403), refusal("Request timed out.", 408)];
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -1826,7 +1831,7 @@ test("owner controls show the owner wallet's SOL against what revoke and withdra
 });
 
 test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and shows what the owner wallet must hold", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
@@ -1851,7 +1856,7 @@ test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and s
 });
 const COST = /needs your owner wallet to hold at least/;
 test("the owner-controls cost line describes only the action in flight: gone once it finishes, and after a refused prepare", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   let prepare: (body: Record<string, unknown>) => Promise<Response> = async (body) =>
     json({ prepared: { transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880", ownerLamports: "10000000" } });
   respond = async (path, body) => {
@@ -1886,7 +1891,7 @@ test("the owner-controls cost line describes only the action in flight: gone onc
   assert.equal(calls.filter((call) => call.path === "owner" && call.body?.stage === "submit").length, 1, "only the revocation was ever submitted");
 });
 test("every owner action is reviewed before the wallet opens: what it does, its fee and what the wallet must hold", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
@@ -1931,7 +1936,7 @@ test("every owner action is reviewed before the wallet opens: what it does, its 
   assert.doesNotMatch(text(), /Review before your wallet opens/);
 });
 test("a reviewed owner transaction not signed in time is discarded without opening the wallet", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
   try {
     respond = async (path, body) => {
@@ -1957,7 +1962,7 @@ test("a reviewed owner transaction not signed in time is discarded without openi
 });
 
 test("a click on Sign with my wallet after the review's deadline, before its timer has run, opens no wallet and sends nothing", () => onTestClock(async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
@@ -1986,7 +1991,7 @@ test("a click on Sign with my wallet after the review's deadline, before its tim
 }));
 
 test("owner transaction bytes that do anything but what the owner asked never reach the wallet, and the fee shown is the one they carry", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   const vault = await deriveSolanaVaultAddress(PROGRAM, OWNER), stranger = base58Encode(new Uint8Array(32).fill(9));
   const usdgAccount = (wallet: string) => deriveSolanaAta(wallet, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
   const wsolAccount = (wallet: string) => deriveSolanaAta(wallet, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
@@ -2668,4 +2673,30 @@ test("a paper trade reads as what went in, what came out and when; open position
   assert.equal(screen.paperTradeLine({ side: "buy", createdAtMs: Number.NaN, inputAmountRaw: "x", intent: null }, []), "Buy");
   assert.equal(screen.paperTradeLine({ side: "buy", createdAtMs: 1e20 }, []), "Buy");
   assert.deepEqual([0, 1, 2].map((count) => screen.openPositions(count)), ["No open positions.", "1 open position.", "2 open positions."]);
+});
+
+test("owner controls show only where they act on something: none for a paper account that never went live", async () => {
+  state.runtime.live.programId = PROGRAM;
+  respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
+  const ownerCard = () => [...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Revoke all Solana sessions");
+  await render();
+  assert.equal(ownerCard(), false, "a paper account with no session, book, vault, record or pending trade has nothing to revoke or withdraw");
+  // Every sign of live state the server reports brings the card back, as it reads live vault state for exactly these accounts.
+  const signs: Array<[string, Record<string, unknown>]> = [
+    ["a session", { session: OWNER }], ["a live book", { book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "0" } }],
+    ["vault balances", { balances: { slot: 1, cashUsdg: "0", wsolRaw: "0" } }], ["an owner record", { ownerTransaction: { signature: "owner-proof", status: "pending" } }],
+    ["a pending trade", { pending: [{ requestId: "r1" }] }], ["live history", { history: [{ requestId: "r1", status: "finalized" }] }],
+    ["the owner wallet read", { ownerWallet: { lamports: "1", revokeLamports: "1", withdrawLamports: "1" } }],
+    ["recoverable SOL read", { recoverable: { nativeLamports: "0", unsyncedWsolLamports: "0" } }],
+  ];
+  for (const [label, sign] of signs) {
+    state = initial(); state.runtime.live.programId = PROGRAM; Object.assign(state.runtime.live, sign);
+    await press("Refresh account");
+    assert.equal(ownerCard(), true, label);
+  }
+  state = initial("live"); state.runtime.live.programId = PROGRAM; await press("Refresh account");
+  assert.equal(ownerCard(), true, "live mode");
+  // A status without its runtime is not proof of nothing to act on: the card stays.
+  state = initial(); (state as { runtime: unknown }).runtime = null; await press("Refresh account");
+  assert.equal(ownerCard(), true, "no runtime in the status");
 });
