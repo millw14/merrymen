@@ -24,3 +24,6 @@
 .solana-stats{display:flex;flex-wrap:wrap;gap:4px 18px;margin:12px 0 0;color:#c3c9ce;font-size:14px}
 .solana-meter{display:block;width:100%;height:6px;margin:8px 0 14px;border:0;border-radius:999px;background:#262b31;overflow:hidden;-webkit-appearance:none;appearance:none}.solana-meter::-webkit-progress-bar{background:#262b31}.solana-meter::-webkit-progress-value{background:#14f195;border-radius:999px}.solana-meter::-moz-progress-bar{background:#14f195;border-radius:999px}
 @media (max-width:1099px){.solana-screen .solana-dock button,.solana-screen button.solana-small{min-height:44px}.solana-screen button.solana-small{padding:6px 16px}}
+.solana-top>.solana-card{margin-bottom:0}
+#solana-trade>button:not(.solana-secondary){display:block;width:100%;margin-right:0;padding:13px 16px}
+@media (max-width:560px){.solana-presets span{flex:1 0 100%}.solana-screen .solana-presets button{flex:1}}
