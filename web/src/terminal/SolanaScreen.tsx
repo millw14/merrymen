@@ -769,7 +769,7 @@ function ConnectedSolana() {
           {/* The check is a paper preview, which the server refuses once the book's limits (the saved ones) have expired; its write-off does not need them. */}
           {status.runtime.paper.positions.length > 0 && binding.limits && binding.limits.expiresAtMs <= Date.now()
             && <p role="status">Your saved limits expired at {permissionExpiry(binding.limits.expiresAtMs)}. Checking a lot for write-off previews selling all of it, which needs current limits: save new limits above, then check it.</p>}
-          <p className="create-note">Results exclude network fees and account rent.</p>
+          <p className="solana-fine">Results exclude network fees and account rent.</p>
           {!!status.runtime.paper.trades?.length && <details><summary>Recent trades</summary><ul>{status.runtime.paper.trades.slice(0, 20).map((trade) => <li key={trade.requestId}>{paperTradeLine(trade, paperLots)}</li>)}</ul></details>}
           </> : <><label>Starting balance (USDG)<input inputMode="decimal" value={initialCash} onChange={(e) => setInitialCash(e.target.value)} /></label>
             <button disabled={busy || !binding.limits} onClick={() => void act(async () => { await api("paper", { initialCashRaw: units(initialCash, 6) }); await refresh(); })}>Create portfolio</button></>}
@@ -823,7 +823,7 @@ function ConnectedSolana() {
         {receipt && receiptAmounts(receipt) && <p>{receiptAmounts(receipt)}</p>}
         {receipt && <button type="button" className="solana-secondary" disabled={busy} onClick={invalidate}>Start a new trade</button>}
       </form>
-      <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} />
+      <SolanaAutomation key={`strategy-${signer.did}`} binding={binding} api={api} refresh={refresh} workerOnline={status?.runtime?.automation?.workerOnline ?? false} modeSwitch={offersLive} />
       <SolanaOwnerActions key={`owner-${signer.did}`} available={sameWallet && !!status?.runtime?.live.programId} owner={sameWallet ? binding.owner : null} programId={live?.programId ?? null}
         api={api} sign={signer.signSetup} refresh={refresh} readRecord={readRecord}
         serverTransaction={live?.ownerTransaction ?? null} ownerWallet={live?.ownerWallet ?? null} recoverable={live?.recoverable ?? null}
