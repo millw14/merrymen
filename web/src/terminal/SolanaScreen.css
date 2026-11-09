@@ -10,3 +10,20 @@
 .solana-notice{border:1px solid #2f5d4a;background:#13261d;padding:14px;border-radius:8px}
 .solana-chip{display:inline-block;margin-left:10px;padding:2px 9px;border:1px solid #30353b;border-radius:999px;color:#9aa3ab;font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;vertical-align:middle}
 .solana-fine{color:#9aa3ab;font-size:13px}
+.solana-dock{position:sticky;top:8px;z-index:6;display:flex;align-items:center;gap:4px;overflow-x:auto;margin:18px 0 0;padding:6px;border:1px solid #30353b;border-radius:999px;background:rgba(14,16,19,.9);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);scrollbar-width:none}.solana-dock::-webkit-scrollbar{display:none}
+.solana-screen .solana-dock button{flex:none;margin:0;padding:8px 14px;border-radius:999px;background:transparent;color:#d9dde1;font-size:14px;font-weight:500;white-space:nowrap}.solana-screen .solana-dock button:hover:not(:disabled){background:#262b31;color:#fff}
+.solana-dock-end{display:flex;flex:none;gap:4px;margin-left:auto;padding-left:8px}.solana-screen .solana-dock-end button{background:#1d2227;font-family:monospace}.solana-screen .solana-dock-end button:last-child{font-family:inherit}
+.solana-card{scroll-margin-top:76px}
+.solana-top{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:0 20px;align-items:start}
+.solana-screen h2 .solana-fine{margin-left:8px;font-weight:400}
+.solana-segment{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;border:1px solid #30353b;border-radius:12px;background:#14181c}
+.solana-screen .solana-segment button{margin:0;padding:10px 12px;border-radius:9px;background:transparent;color:#d9dde1;font-weight:600}.solana-screen .solana-segment button[aria-pressed=true]{background:#14f195;color:#071c11}.solana-screen .solana-segment button[aria-pressed=true]:last-child{background:#ff7a70;color:#2b0906}
+.solana-presets{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:-2px 0 10px;color:#9aa3ab;font-size:13px}.solana-presets span{margin-right:auto}
+.solana-screen button.solana-small{margin:0;padding:6px 13px;border-radius:999px;font-size:13px}
+.solana-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-top:8px}.solana-row a{font-size:14px}
+.solana-stats{display:flex;flex-wrap:wrap;gap:4px 18px;margin:12px 0 0;color:#c3c9ce;font-size:14px}
+.solana-meter{display:block;width:100%;height:6px;margin:8px 0 14px;border:0;border-radius:999px;background:#262b31;overflow:hidden;-webkit-appearance:none;appearance:none}.solana-meter::-webkit-progress-bar{background:#262b31}.solana-meter::-webkit-progress-value{background:#14f195;border-radius:999px}.solana-meter::-moz-progress-bar{background:#14f195;border-radius:999px}
+@media (max-width:1099px){.solana-screen .solana-dock button,.solana-screen button.solana-small{min-height:44px}.solana-screen button.solana-small{padding:6px 16px}}
+.solana-top>.solana-card{margin-bottom:0}
+#solana-trade>button:not(.solana-secondary){display:block;width:100%;margin-right:0;padding:13px 16px}
+@media (max-width:560px){.solana-presets span{flex:1 0 100%}.solana-screen .solana-presets button{flex:1}}

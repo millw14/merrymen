@@ -652,6 +652,11 @@ export function DesktopPortfolio({
           Chat with {mine.name}
           <ArrowUpRight size={15} />
         </button>
+        {/* The wallet and the stop, without opening the account menu. Links only: both controls stay on their screen. */}
+        <p className="desktop-quick-links">
+          <Link href="/grant">Wallet &amp; permissions</Link>
+          <Link className="stop" href="/grant#permission-security">Stop {mine.name}</Link>
+        </p>
       </section>
     </aside>
   );

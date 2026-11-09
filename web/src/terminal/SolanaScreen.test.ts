@@ -388,6 +388,9 @@ test("autonomous strategy is disabled by default and saves explicit bounded sett
   };
   await render();
   assert.match(ui.container.textContent!, /Autonomous trading is disabled/);
+  // Folded to its status until asked for: no strategy field is on the page before that.
+  assert.equal(button("Save autonomous strategy"), undefined);
+  await ui.click("Set up automation");
   await ui.click("Save autonomous strategy");
   assert.deepEqual(saved, { revision: 0, strategy: { enabled: false, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 } });
   assert.equal(signCount, 0);
@@ -434,7 +437,7 @@ test("a paced answer is a wait wherever it is read: the first status load, owner
   // Saving the strategy.
   await fresh(); state = initial();
   respond = async (path) => { if (path === "status") return json(state); if (path === "strategy") return json({ error: "Too many Solana strategy changes. Try again in 9 seconds.", ownerFacing: true }, 429); throw new Error("Unexpected fixture route"); };
-  await render(); await press("Save autonomous strategy");
+  await render(); await press("Set up automation"); await press("Save autonomous strategy");
   assert.deepEqual(alerts(), []);
   assert.equal(card("Autonomous rebalancing").querySelector('[role="status"].solana-notice')?.textContent, "Too many Solana strategy changes. Try again in 9 seconds.");
 });
@@ -483,8 +486,7 @@ test("live buying breaker leaves authenticated exits available and displays actu
   state.runtime.live.blockers = ["The on-chain buying breaker is paused; exits remain available."];
   await render();
   assert.equal(button("Preview trade").disabled, true);
-  const direction = ui.container.querySelector<HTMLSelectElement>("select")!;
-  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  await ui.click("Sell");
   assert.equal(button("Preview trade").disabled, false);
   assert.match(ui.container.textContent!, /123\.456789 USDG/); assert.match(ui.container.textContent!, /1\.2 wrapped SOL/);
   assert.match(ui.container.textContent!, /-1\.500001 USDG/); assert.match(ui.container.textContent!, /0\.000005 SOL/);
@@ -1546,8 +1548,7 @@ test("a paper lot is offered for write-off only after the market answers its who
   assert.equal(hasButton("Check for write-off"), true);
   assert.equal([...ui.container.querySelectorAll("button")].filter((item) => item.textContent === "Check for write-off").length, 1, "never for the wrapped SOL lot the form sells");
   // Selling part of the wrapped SOL lot is just too small: no offer.
-  const direction = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Direction"))!.querySelector("select")!;
-  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  await ui.click("Sell");
   await type("Wrapped SOL to sell", "0.000000004");
   await ui.click("Preview trade");
   assert.equal(ui.container.querySelector('[role="alert"]')?.textContent, TOO_SMALL);
@@ -2554,8 +2555,7 @@ test("an account that went live and is off the list keeps its live switch for ex
   assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PAUSED));
   assert.doesNotMatch(ui.container.textContent!, /Live limits on this platform/, "no caps to fit: it cannot register while off the list");
   assert.equal(button("Preview trade").disabled, true, "no buy");
-  const direction = ui.container.querySelector<HTMLSelectElement>("select")!;
-  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  await ui.click("Sell");
   assert.equal(button("Preview trade").disabled, false, "a sale back to USDG");
   // Back on the list with saved limits above the caps: registration waits for limits within them.
   runtime.liveAccess = access(true); Object.assign(state.runtime.live, { session: null, blockers: [] });
@@ -2779,4 +2779,106 @@ test("paper limits that ran out renew as they were, for a week, in one press, an
   assert.equal(button("Save limits"), undefined);
   await press("Change limits");
   assert.ok(button("Save limits"));
+});
+
+test("quick amounts never exceed what one trade may be or what the account holds; usage counts the last 24 hours only", () => {
+  const now = Date.UTC(2026, 10, 10, 12), WRAPPED = "So11111111111111111111111111111111111111112";
+  const trades = [{ createdAtMs: now - 3_600_000, notionalUsdgRaw: "10000000" }, { createdAtMs: now - 23 * 3_600_000, notionalUsdgRaw: "2500000" },
+    { createdAtMs: now - 25 * 3_600_000, notionalUsdgRaw: "40000000" }, null, { createdAtMs: "yesterday" }];
+  assert.deepEqual(screen.paperUsage({ trades }, now), { usedRaw: "12500000", trades: 2 });
+  assert.equal(screen.paperUsage({}, now), null); assert.equal(screen.paperUsage(null, now), null);
+  const book = { cashRaw: "1000000000", positions: [{ mint: WRAPPED, amountRaw: "667234567" }], trades };
+  type Input = Parameters<typeof screen.quickMax>[0];
+  const max = (input: Partial<Input> & Pick<Input, "side">) => {
+    const answer = screen.quickMax({ mode: "paper", limits, paper: book, tradable: null, nowMs: now, ...input });
+    return answer && [answer.raw.toString(), answer.held.toString(), answer.decimals];
+  };
+  // A buy: the per-trade limit (10), below the cash (1000) and what is left of the day (50 - 12.5).
+  assert.deepEqual(max({ side: "buy" }), ["10000000", "1000000000", 6]);
+  assert.deepEqual(max({ side: "buy", limits: { ...limits, dailyUsdg: "15000000" } }), ["2500000", "1000000000", 6], "what is left of the day");
+  assert.deepEqual(max({ side: "buy", limits: { ...limits, dailyUsdg: "12000000" } }), ["0", "1000000000", 6], "a day already used up");
+  assert.deepEqual(max({ side: "buy", paper: { ...book, cashRaw: "1500000" } }), ["1500000", "1500000", 6], "the cash");
+  assert.deepEqual(max({ side: "buy", paper: { cashRaw: "1000000000", positions: [] } }), ["10000000", "1000000000", 6], "no trade list: cash and the per-trade limit");
+  // A sale: the whole wrapped SOL holding, and nothing where none is held.
+  assert.deepEqual(max({ side: "sell" }), ["667234567", "667234567", 9]);
+  assert.deepEqual(max({ side: "sell", paper: { ...book, positions: [] } }), ["0", "0", 9]);
+  // No trades left today: nothing to fill, either way.
+  assert.deepEqual(max({ side: "buy", limits: { ...limits, maxOpsPerDay: 2 } }), ["0", "1000000000", 6]);
+  assert.deepEqual(max({ side: "sell", limits: { ...limits, maxOpsPerDay: 2 } }), ["0", "667234567", 9]);
+  // Live: the session's tradable balances, a sale within the SOL-per-trade limit.
+  const tradable = { cashUsdg: "5000000", wsolRaw: "1200000000" };
+  assert.deepEqual(max({ side: "buy", mode: "live", paper: null, tradable }), ["5000000", "5000000", 6]);
+  assert.deepEqual(max({ side: "sell", mode: "live", paper: null, tradable, limits: liveLimits() }), ["250000000", "1200000000", 9]);
+  // A missing figure is no chips, never a guess.
+  assert.equal(max({ side: "buy", mode: "live", paper: null }), null); assert.equal(max({ side: "buy", limits: null }), null);
+  assert.equal(max({ side: "buy", paper: null }), null); assert.equal(max({ side: "buy", paper: { ...book, cashRaw: "-5" } }), null);
+});
+
+test("the trade form's quick amounts and Sell all only fill the field: nothing is previewed, traded or saved", async () => {
+  const WRAPPED = "So11111111111111111111111111111111111111112";
+  state.runtime.paper = { ...paper, positions: [{ mint: WRAPPED, decimals: 9, amountRaw: "667234567", costBasisUsdgRaw: "60000000" }] } as never;
+  await render();
+  const pressed = () => [...ui.container.querySelectorAll(".solana-segment button")].map((item) => `${item.textContent}:${item.getAttribute("aria-pressed")}`);
+  assert.deepEqual(pressed(), ["Buy:true", "Sell:false"]);
+  assert.match(ui.container.textContent!, /Cash: 1000 USDG/);
+  await ui.click("Max"); assert.equal(field("USDG to spend"), "10");
+  await ui.click("50%"); assert.equal(field("USDG to spend"), "5");
+  await ui.click("25%"); assert.equal(field("USDG to spend"), "2.5");
+  await ui.click("Sell"); assert.deepEqual(pressed(), ["Buy:false", "Sell:true"]);
+  assert.match(ui.container.textContent!, /Holding: 0\.667234567 wrapped SOL/);
+  await ui.click("All"); assert.equal(field("Wrapped SOL to sell"), "0.667234567");
+  await ui.click("50%"); assert.equal(field("Wrapped SOL to sell"), "0.333617283");
+  // From the portfolio: one press fills a sale of the whole holding, whichever side the form was on.
+  await ui.click("Buy"); await ui.click("Sell all");
+  assert.deepEqual(pressed(), ["Buy:false", "Sell:true"]); assert.equal(field("Wrapped SOL to sell"), "0.667234567");
+  assert.deepEqual(calls.map((call) => call.path), ["status"]);
+});
+
+test("the dock keeps every card, the wallet's address and the refresh one press away; a wallet that is not the verified one comes first", async () => {
+  const copied: string[] = [];
+  const clipboard = () => Object.defineProperty(ui.dom.window.navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { copied.push(text); } } });
+  const dock = () => [...ui.container.querySelectorAll(".solana-dock button")].map((item) => item.textContent);
+  const titles = () => [...ui.container.querySelectorAll("h2")].map((item) => item.textContent ?? "");
+  clipboard(); await render();
+  assert.deepEqual(dock(), ["Portfolio", "Trade", "Limits", "Automation", "Wallet", "So11…1112", "Refresh account"]);
+  for (const id of ["solana-book", "solana-trade", "solana-limits", "solana-automation", "solana-wallet"]) assert.ok(ui.container.querySelector(`#${id}`), id);
+  assert.equal([...ui.container.querySelectorAll("button")].filter((item) => item.textContent === "Refresh account").length, 1);
+  // What is traded and the form that trades it come before the settings and the wallet.
+  assert.deepEqual(titles(), ["Portfolio Paper", "Trade USDG ↔ wrapped SOL", "Solana trading mode", "Autonomous rebalancing", "Wallet ownership"]);
+  // The short address copies the whole one, and so does the wallet card's own button.
+  await press("So11…1112"); assert.deepEqual(copied, [OWNER]); assert.ok(button("Copied"));
+  await press("Copy address"); assert.deepEqual(copied, [OWNER, OWNER]);
+  assert.equal(ui.container.querySelector<HTMLAnchorElement>("#solana-wallet a")!.href, `https://solscan.io/account/${OWNER}`);
+  // A browser that refuses the clipboard is told so; nothing claims a copy.
+  await ui.close(); ui = testDom(); await render();
+  await press("Copy address");
+  assert.ok(button("Not copied. Select it instead")); assert.equal(button("Copied"), undefined);
+  // A connected wallet that is not the verified one: its card comes first, and the dock offers no address to copy.
+  await ui.close(); ui = testDom(); signerAddress = "Other11111111111111111111111111111111111111"; await render();
+  assert.equal(titles()[0], "Wallet ownership");
+  assert.deepEqual(dock(), ["Portfolio", "Trade", "Limits", "Automation", "Wallet", "Refresh account"]);
+  assert.match(ui.container.textContent!, /Connect the exact embedded wallet shown above/);
+});
+
+test("a paper-only account sees what it used of its 24-hour limits beside them, and its result line", async () => {
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  const now = Date.now();
+  state.runtime.paper = { ...paper, initialCashRaw: "1000000000", realizedPnlRaw: "-250000", trades: [
+    { requestId: "a", side: "buy", createdAtMs: now - 60_000, notionalUsdgRaw: "10000000" }, { requestId: "b", side: "sell", createdAtMs: now - 120_000, notionalUsdgRaw: "2500000" },
+    { requestId: "c", side: "buy", createdAtMs: now - 26 * 3_600_000, notionalUsdgRaw: "40000000" }] } as never;
+  await render();
+  assert.match(ui.container.textContent!, /Last 24 hours: 12\.5 of 50 USDG traded · 2 of 20 trades\./);
+  assert.equal(ui.container.querySelector("progress.solana-meter")!.getAttribute("value"), "25");
+  assert.deepEqual([...ui.container.querySelectorAll(".solana-stats span")].map((item) => item.textContent), ["Started with 1000 USDG", "Realized P&L -0.25 USDG"]);
+});
+
+test("the strategy card folds to its status: a saved strategy in one line, its fields one press away", async () => {
+  Object.assign(state.binding, { strategy: { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 } });
+  await render();
+  assert.match(ui.container.textContent!, /Keeps 50% in wrapped SOL, in trades of up to 1 USDG, checked every 60 seconds\./);
+  assert.match(ui.container.textContent!, /Waiting for Solana worker/);
+  assert.equal(button("Save autonomous strategy"), undefined);
+  await ui.click("Change strategy");
+  assert.ok(button("Save autonomous strategy"));
 });
