@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { PerformanceChart } from "../DitherChart";
-import { ArrowUpRight, ChartNoAxesCombined, MessageCircle, MessagesSquare, Plus, Shirt, Sparkles, Trophy } from "lucide-react";
+import { ArrowUpFromLine, ArrowUpRight, ChartNoAxesCombined, MessageCircle, MessagesSquare, OctagonX, Plus, Settings, Shirt, SlidersHorizontal, Sparkles, Trophy, Wallet } from "lucide-react";
 import { useGroupChatSupported } from "../groupchat";
 import type { LiveAgent, LiveMine, LiveToken, Thesis, TokenTab } from "../live";
 import { AgentStrip } from "../AgentStrip";
@@ -9,7 +9,7 @@ import { usd, usdParts } from "@/lib/format";
 import { pausedRecovery } from "../recovery-view";
 import { Board } from "./Board";
 import { MerrymanHero } from "@/merryman/MerrymanHero";
-import { moodOf, type MoodInput } from "@/merryman/mood";
+import { moodOf, wordOf, type MoodInput } from "@/merryman/mood";
 import { DRAFT, useOutfit } from "@/merryman/wardrobe-store";
 
 /**
@@ -119,6 +119,8 @@ export function Home({
   const { outfit } = useOutfit(outfitId, mine?.slug ?? mine?.name ?? DRAFT);
   const name = mine?.name ?? "Your merryman";
   const renew = mine && (mine.autonomy.rule === "expired" || mine.autonomy.expiresSoon) && !recovery && onResign;
+  // What he is doing, in the one word Me and the desk use for it.
+  const word = mine ? wordOf(mine.autonomy?.state, { recovery: recovery !== null, expired: mine.autonomy?.rule === "expired", needsOwner: mine.autonomy?.needsOwnerAction }) : null;
 
   return (
     <div className="home-page">
@@ -183,6 +185,18 @@ export function Home({
             </>
           )}
         </MerrymanHero>
+
+        {/* SHORTCUTS. What he is doing in one word, then the places an owner otherwise reaches through Me or a
+            menu: taking money out, his limits, his wallet and its permission, settings, and stopping him. Links
+            only. Every control stays on its own screen, behind its own confirmation. */}
+        {mine && <nav className="home-quick" aria-label="Shortcuts">
+          <span className="home-quick-status" title={recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}>{word}</span>
+          <Link className="home-quick-link" href="/withdraw"><ArrowUpFromLine size={16} aria-hidden="true"/> Withdraw</Link>
+          <Link className="home-quick-link" href="/limits"><SlidersHorizontal size={16} aria-hidden="true"/> Limits</Link>
+          <Link className="home-quick-link" href="/grant"><Wallet size={16} aria-hidden="true"/> Wallet</Link>
+          <Link className="home-quick-link" href="/settings"><Settings size={16} aria-hidden="true"/> Settings</Link>
+          <Link className="home-quick-link stop" href="/grant#permission-security"><OctagonX size={16} aria-hidden="true"/> Stop</Link>
+        </nav>}
 
         {mine && <Link className="owner-trades-link" href="/agent#trades">
           <ChartNoAxesCombined size={20} aria-hidden="true"/>

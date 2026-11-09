@@ -62,6 +62,8 @@ import { DRAFT, adoptDraft } from "@/merryman/wardrobe-store";
 import "@/merryman/merryman.css";
 import "@/merryman/wardrobe.css";
 import "./merryman-shell.css";
+import "./quick-access.css";
+import { CopyButton } from "./CopyButton";
 import { Home } from "./screens/Home";
 import { CreateAgent } from "./screens/CreateAgent";
 import Settings from "./screens/Settings";
@@ -813,6 +815,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
                 <span className="profile-session-who" title={account.session.address}>
                   signed in as <code>{account.session.address}</code>
                 </span>
+                <CopyButton text={account.session.address} label="Copy address" className="profile-session-copy" />
                 <SignOut
                   after={() => {
                     invalidateOwnerView();
