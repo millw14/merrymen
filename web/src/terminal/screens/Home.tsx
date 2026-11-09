@@ -9,7 +9,7 @@ import { usd, usdParts } from "@/lib/format";
 import { pausedRecovery } from "../recovery-view";
 import { Board } from "./Board";
 import { MerrymanHero } from "@/merryman/MerrymanHero";
-import { moodOf, wordOf, type MoodInput } from "@/merryman/mood";
+import { moodOf, type MoodInput } from "@/merryman/mood";
 import { DRAFT, useOutfit } from "@/merryman/wardrobe-store";
 
 /**
@@ -119,8 +119,6 @@ export function Home({
   const { outfit } = useOutfit(outfitId, mine?.slug ?? mine?.name ?? DRAFT);
   const name = mine?.name ?? "Your merryman";
   const renew = mine && (mine.autonomy.rule === "expired" || mine.autonomy.expiresSoon) && !recovery && onResign;
-  // What he is doing, in the one word Me and the desk use for it.
-  const word = mine ? wordOf(mine.autonomy?.state, { recovery: recovery !== null, expired: mine.autonomy?.rule === "expired", needsOwner: mine.autonomy?.needsOwnerAction }) : null;
 
   return (
     <div className="home-page">
@@ -186,11 +184,11 @@ export function Home({
           )}
         </MerrymanHero>
 
-        {/* SHORTCUTS. What he is doing in one word, then the places an owner otherwise reaches through Me or a
-            menu: taking money out, his limits, his wallet and its permission, settings, and stopping him. Links
-            only. Every control stays on its own screen, behind its own confirmation. */}
+        {/* SHORTCUTS. The places an owner otherwise reaches through Me or a menu: taking money out, his limits, his
+            wallet and its permission, settings, and stopping him. Five tiles that fit a phone without scrolling, so
+            the stop is never off screen. Links only: every control stays on its own screen, behind its own
+            confirmation. (What he is doing is already said in the hero, by his own status pill.) */}
         {mine && <nav className="home-quick" aria-label="Shortcuts">
-          <span className="home-quick-status" title={recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}>{word}</span>
           <Link className="home-quick-link" href="/withdraw"><ArrowUpFromLine size={16} aria-hidden="true"/> Withdraw</Link>
           <Link className="home-quick-link" href="/limits"><SlidersHorizontal size={16} aria-hidden="true"/> Limits</Link>
           <Link className="home-quick-link" href="/grant"><Wallet size={16} aria-hidden="true"/> Wallet</Link>

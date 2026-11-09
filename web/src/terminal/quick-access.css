@@ -3,42 +3,30 @@
  * under .terminal-host and uses its tokens (terminal.css). Phone targets are 44px, like every other control.
  */
 
-/* Home: his status in one word, then links to money out, limits, wallet, settings and the stop. One row that scrolls
-   sideways on a narrow phone instead of wrapping under the hero. */
+/* Home: links to money out, limits, wallet, settings and the stop. Five equal tiles, icon over label, so all of
+   them fit a 360px phone without scrolling and the stop is never off screen. */
 .terminal-host .home-quick {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
-  margin: 12px 0 0;
-  padding: 2px 0 4px;
-  overflow-x: auto;
-  scrollbar-width: none;
+  margin: 12px 0 10px;
 }
-.terminal-host .home-quick::-webkit-scrollbar { display: none; }
-.terminal-host .home-quick-status,
 .terminal-host .home-quick-link {
-  flex: none;
-  display: inline-flex;
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 7px;
-  min-height: 44px;
-  padding: 0 14px;
+  justify-content: center;
+  gap: 6px;
+  min-height: 62px;
+  padding: 8px 2px;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  white-space: nowrap;
-}
-.terminal-host .home-quick-status {
-  color: var(--tx-2);
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-.terminal-host .home-quick-link {
+  border-radius: 14px;
   background: rgb(255 255 255 / 0.04);
   color: var(--tx);
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
+  line-height: 1.1;
+  text-align: center;
   text-decoration: none;
   transition: background 140ms;
 }
@@ -49,8 +37,9 @@
 /* Me: copy the whole address behind the shortened label, and the stop by its own name. */
 .terminal-host .account-copy,
 .terminal-host .profile-session-copy {
-  min-height: 32px;
-  padding: 0 12px;
+  position: relative;
+  min-height: 28px;
+  padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: 999px;
   background: transparent;
@@ -62,6 +51,9 @@
 }
 .terminal-host .account-copy:hover,
 .terminal-host .profile-session-copy:hover { color: var(--tx); }
+/* Small to the eye, beside a line of text; 46px to the thumb. */
+.terminal-host .account-copy::after,
+.terminal-host .profile-session-copy::after { content: ""; position: absolute; inset: -9px -6px; }
 .terminal-host .account-control.account-stop { text-decoration: none; }
 .terminal-host .account-control.account-stop strong,
 .terminal-host .account-control.account-stop > svg:first-child { color: var(--down); }
@@ -77,8 +69,3 @@
 .terminal-host .desktop-quick-links a { color: var(--tx-2); text-underline-offset: 3px; }
 .terminal-host .desktop-quick-links a:hover { color: var(--tx); }
 .terminal-host .desktop-quick-links a.stop { color: var(--down); }
-
-@media (max-width: 1099px) {
-  .terminal-host .account-copy,
-  .terminal-host .profile-session-copy { min-height: 44px; padding: 0 16px; }
-}

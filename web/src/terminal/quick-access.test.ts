@@ -13,7 +13,6 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import { autonomyOf } from "@merrymen/core";
-import { wordOf } from "@/merryman/mood";
 import type { LiveMine } from "./live";
 import { shortAddress } from "./CopyButton";
 
@@ -40,14 +39,13 @@ async function me(mine: LiveMine | null) {
 }
 
 describe("quick access", () => {
-  it("Home gives an owner his status in one word and one press to money out, limits, wallet, settings and the stop", async () => {
-    const mine = owner(), page = await home(mine);
+  it("Home gives an owner one press to money out, limits, wallet, settings and the stop", async () => {
+    const page = await home(owner());
     const nav = page.querySelector('nav.home-quick[aria-label="Shortcuts"]')!;
     assert.ok(nav, "the shortcuts row");
-    assert.equal(nav.querySelector(".home-quick-status")!.textContent, wordOf(mine.autonomy.state, { recovery: false, expired: false, needsOwner: mine.autonomy.needsOwnerAction }));
     assert.deepEqual(hrefs(nav, "a"), ["Withdraw → /withdraw", "Limits → /limits", "Wallet → /grant", "Settings → /settings", "Stop → /grant#permission-security"]);
-    // Shortcuts only: nothing in the row is a button that could act by itself.
-    assert.equal(nav.querySelectorAll("button, input, form").length, 0);
+    // Shortcuts only: every child is a link, and nothing in the row could act by itself.
+    assert.equal(nav.children.length, 5); assert.equal(nav.querySelectorAll("button, input, form").length, 0);
   });
 
   it("a visitor with no agent, or an owner whose numbers have not landed, is offered no shortcuts", async () => {
@@ -89,8 +87,10 @@ describe("quick access", () => {
     const selectors = [...css.matchAll(/(^|\})\s*([^{}@]+)\{/g)].flatMap((match) => match[2]!.split(",")).map((selector) => selector.trim()).filter(Boolean);
     assert.ok(selectors.length > 10);
     for (const selector of selectors) assert.ok(selector.startsWith(".terminal-host "), `unscoped selector: ${selector}`);
-    const rule = (selector: string) => css.slice(css.indexOf(selector));
-    assert.match(rule(".terminal-host .home-quick-status,"), /min-height:\s*44px/);
-    assert.match(css.slice(css.indexOf("@media (max-width: 1099px)")), /\.account-copy[\s\S]*min-height:\s*44px/);
+    // Five tiles in one row, each tall enough for a thumb; the small copy buttons carry a larger hit area.
+    assert.match(css, /\.terminal-host \.home-quick \{[^}]*grid-template-columns:\s*repeat\(5,/);
+    const tile = /\.terminal-host \.home-quick-link \{[^}]*min-height:\s*(\d+)px/.exec(css);
+    assert.ok(tile && Number(tile[1]) >= 44, "a tile is at least 44px tall");
+    assert.match(css, /\.terminal-host \.account-copy::after,[^{]*\{[^}]*inset:\s*-9px/);
   });
 });
