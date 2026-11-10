@@ -21,7 +21,7 @@
 .perps-actions, .perps-metrics { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 16px 0; }
 .perps-actions a { color: var(--perps-muted); text-decoration: underline; text-underline-offset: 4px; }
 .perps-actions a:hover, .perps-panel-links a:hover { color: var(--perps-text); }
-.perps-desk button, .perps-desk select, .perps-desk input { min-height: 38px; padding: 9px 12px; border: 1px solid #3a493e; border-radius: 6px; background: var(--perps-raised); color: inherit; font: inherit; font-size: 13px; }
+.perps-desk button, .perps-desk select, .perps-desk input { min-height: 38px; padding: 9px 12px; border: 1px solid var(--perps-control-line, #3a493e); border-radius: 6px; background: var(--perps-raised); color: inherit; font: inherit; font-size: 13px; }
 .perps-desk button { cursor: pointer; transition: background-color 140ms ease, border-color 140ms ease; }
 .perps-desk button:hover:not(:disabled) { border-color: #5a6b5e; background: #202c23; }
 .perps-desk button:disabled { opacity: .5; cursor: not-allowed; }
@@ -150,7 +150,7 @@
 .perps-ledger-tabs button[aria-pressed="true"]::after { content: ""; position: absolute; right: 14px; bottom: -1px; left: 14px; height: 2px; background: var(--perps-accent); }
 .perps-ledger-tabs button > span { display: inline-block; min-width: 18px; margin-left: 7px; padding: 1px 4px; border-radius: 3px; background: #d1f56a14; font-family: var(--font-geist-mono), monospace; font-size: 11px; }
 .perps-ledger-tabs .perps-ledger-actions { flex-wrap: wrap; gap: 8px; padding: 8px 0; }
-.perps-ledger-tabs .perps-ledger-actions button { min-height: 30px; padding: 6px 9px; border: 1px solid #3a493e; border-radius: 4px; background: var(--perps-raised); color: var(--perps-text); font-size: 12px; }
+.perps-ledger-tabs .perps-ledger-actions button { min-height: 30px; padding: 6px 9px; border: 1px solid var(--perps-control-line, #3a493e); border-radius: 4px; background: var(--perps-raised); color: var(--perps-text); font-size: 12px; }
 .perps-ledger > p { margin: 16px; }
 .perps-empty-state { display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 170px; padding: 28px 24px; text-align: center; }
 .perps-empty-state > svg { width: 30px; height: 30px; margin-bottom: 13px; color: #6d8474; stroke-width: 1.25; }
