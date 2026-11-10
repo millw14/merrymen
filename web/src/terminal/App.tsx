@@ -102,6 +102,8 @@ import { ticksOf } from "./ticker";
 import { goTo } from "./navigate";
 import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
+// LAST: the look itself. Each rule in it restates one from the sheets above and wins on order.
+import "./ledger.css";
 
 const PerpsWorkspace = dynamic(() => import("./PerpsWorkspace").then(module => module.PerpsWorkspace), { ssr: false, loading: () => <p role="status">Loading Perps…</p> });
 const SolanaScreen = dynamic(() => import("./SolanaScreen").then((module) => module.SolanaScreen));

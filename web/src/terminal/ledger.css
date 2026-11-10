@@ -1,0 +1,195 @@
+/*
+ * LEDGER.
+ *
+ * The terminal's look since November 2026: quiet, so that the merryman and the
+ * figures are what a reader sees. Its palette is the token block in
+ * terminal.css. This sheet says what the look does with it, and loads after
+ * every other terminal sheet (App.tsx), so each rule here restates one that
+ * already exists and wins on order, not on weight.
+ *
+ * THE FIVE RULES
+ *   1. Cream on a warm black. No pure white, no pure black.
+ *   2. Large type is regular weight and set tight. Size carries the emphasis
+ *      a bold weight used to.
+ *   3. Hairlines, not boxes. A list is rows with a rule between them; a card
+ *      keeps a border only where it holds something apart (the hero, a form).
+ *   4. Labels are small, mono, upper case and faint: they name a figure and
+ *      then get out of its way.
+ *   5. The one thing to do next is a cream pill. Lime is kept for where money
+ *      moves (a trade being confirmed) and for small "on" signals.
+ *
+ * Perps keeps its own desk palette (perps-desk.css); the rules here stay out
+ * of `.perps-desk`.
+ */
+
+/* ───────── 1. Type ───────── */
+
+/* Every heading of 22px or more that was set bold. */
+.terminal-host h1,
+.terminal-host .top-title,
+.terminal-host .account-header h1,
+.terminal-host .public-agent-id h1,
+.terminal-host .flow-intro h1,
+.terminal-host .terminal-form-heading h1,
+.terminal-host .terminal-form-page .grant-title,
+.terminal-host .mm-hero .hero.empty h2,
+.terminal-host .hosted-entry h2 {
+  font-weight: 400;
+  letter-spacing: -0.04em;
+}
+.terminal-host .top-title,
+.terminal-host .account-header h1 {
+  font-size: 30px;
+  line-height: 1.05;
+}
+.terminal-host .mm-hero .hero.empty h2 { font-size: 32px; }
+@media (max-width: 1099px) {
+  .terminal-host .top-title,
+  .terminal-host .account-header h1 { font-size: 40px; }
+}
+
+/* Figures: the pixel face retires. Balances are the same sans as everything
+   else, regular and tight, a little larger since its digits are narrower. */
+.terminal-host .balance,
+.terminal-host .amt,
+.terminal-host .hero-fig,
+.terminal-host .desk-equity,
+.terminal-host .account-balance > strong,
+.terminal-host .public-return,
+.terminal-host .fund-amount-input,
+.terminal-host .fund-review-amount strong,
+.terminal-host .desktop-balance {
+  font-family: var(--sans);
+  font-weight: 400;
+  letter-spacing: -0.05em;
+}
+.terminal-host .balance,
+.terminal-host .account-balance > strong { font-size: 60px; line-height: 1; }
+.terminal-host .alpha-members,
+.terminal-host .alpha-brief header span {
+  font-family: var(--font-geist-mono), var(--mono);
+  letter-spacing: 0.08em;
+}
+
+/* Labels and section titles. */
+.terminal-host .mm-hero .home-balance-label,
+.terminal-host .account-label,
+.terminal-host .dither-caption,
+.terminal-host .account-section-title h2,
+.terminal-host .board-preview .board-head h2,
+.terminal-host .desktop-section-heading h2,
+.terminal-host .account-usage > div > span:first-child {
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.terminal-host .account-section-title span { font-family: var(--font-geist-mono), var(--mono); font-size: 11px; color: var(--faint); }
+
+/* A name beside a figure reads as a name, not a headline. */
+.terminal-host .mm-hero .mm-hero-name { font-weight: 500; color: var(--tx-2); }
+.terminal-host .account-person h2 { font-weight: 500; letter-spacing: -0.01em; }
+
+/* ───────── 2. Buttons ───────── */
+
+/* The one thing to do next: a cream pill. These are the rules that painted a
+   button lime. A trade's own confirm button (.desk-confirm-row) is not among
+   them: that is where money moves, and it stays lime. */
+.terminal-host .flow-primary:where(:not(.perps-desk *)),
+.terminal-host .mm-action.primary,
+.terminal-host .app .desktop-header-account .desktop-fund,
+.terminal-host .account-fund,
+.terminal-host .tour-next,
+.terminal-host .alpha-go,
+.terminal-host .proposal-resign,
+.terminal-host .desk-blocked button,
+.terminal-host .gc-composer button,
+.terminal-host .desk-composer button,
+.terminal-host .feed-pills button.on {
+  background: var(--tx);
+  border-color: transparent;
+  color: var(--ink);
+}
+.terminal-host .flow-primary:where(:not(.perps-desk *)):hover:not(:disabled),
+.terminal-host .mm-action.primary:hover,
+.terminal-host .app .desktop-header-account .desktop-fund:hover,
+.terminal-host .account-fund:hover,
+.terminal-host .tour-next:hover,
+.terminal-host .alpha-go:hover,
+.terminal-host .proposal-resign:hover { background: #fffdf0; }
+/* The form pages' primary already is cream; its hover went lime. */
+.terminal-host .terminal-form-page .mm-btn.primary:hover,
+.terminal-host .terminal-form-page .grant-btn:hover { background: #fffdf0; }
+
+/* Pills. */
+.terminal-host .mm-action,
+.terminal-host .flow-primary:where(:not(.perps-desk *, .desktop-portfolio *)),
+.terminal-host .flow-secondary:where(:not(.perps-desk *, .desktop-portfolio *)),
+.terminal-host .home-show-more,
+.terminal-host .account-balance .profile-funding .account-fund { border-radius: 999px; }
+.terminal-host .mm-action { font-weight: 500; background: transparent; border-color: #34342c; }
+.terminal-host .mm-action:hover { background: rgb(236 234 217 / 0.06); }
+.terminal-host .mm-action.primary { font-weight: 600; }
+.terminal-host .profile-funding .account-fund:last-child { background: transparent; border-color: #34342c; color: var(--tx); }
+.terminal-host .profile-funding .account-fund:last-child:hover { background: rgb(236 234 217 / 0.06); }
+.terminal-host .home-show-more { border-color: #34342c; color: var(--tx-2); }
+
+/* ───────── 3. Hairlines, not boxes ───────── */
+
+/* The hero keeps its frame: it holds the merryman's world apart from the page. */
+.terminal-host .mm-hero { border-radius: 20px; }
+.terminal-host .mm-chip {
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--tx-2);
+}
+.terminal-host .profile-mode {
+  border-radius: 999px;
+  padding: 6px 11px;
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+/* Rows. */
+.terminal-host .owner-trades-link {
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+.terminal-host .account-agent { background: transparent; }
+.terminal-host .profile-account .account-control { border-radius: 0; background: transparent; padding-left: 2px; padding-right: 2px; }
+.terminal-host .profile-account .account-control strong,
+.terminal-host .account-agent strong { font-weight: 500; }
+.terminal-host .account-avatar { background: transparent; border: 1px solid var(--line); }
+
+/* Me's daily meter: a hairline that fills. */
+.terminal-host .account-usage progress { height: 2px; }
+
+/* ───────── 4. Navigation ───────── */
+
+.terminal-host .tabbar .tab-label { font-weight: 500; letter-spacing: 0.01em; }
+
+/* ───────── 5. Loose ends the old palette hid ───────── */
+
+/* A link nobody styled showed the browser's blue and purple. It is cream and underlined, like every other one. */
+.terminal-host a:where(:not([class])) { color: var(--tx); text-underline-offset: 3px; }
+
+/* Me's "Trades & P&L" is a row like its neighbours, not the boxed link it is on Home. */
+.terminal-host .profile-account .account-control.owner-trades-link {
+  min-height: 64px;
+  gap: 14px;
+  padding: 14px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  font-size: inherit;
+}
+.terminal-host .profile-account .account-control.owner-trades-link > svg:first-child { width: 24px; height: 24px; }
+.terminal-host .profile-account .account-control.owner-trades-link strong { font-weight: 500; }
