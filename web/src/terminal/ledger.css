@@ -18,8 +18,9 @@
  *   5. The one thing to do next is a cream pill. Lime is kept for where money
  *      moves (a trade being confirmed) and for small "on" signals.
  *
- * Perps keeps its own desk palette (perps-desk.css); the rules here stay out
- * of `.perps-desk`.
+ * Perps keeps its own desk: its layout, its softer up and down, and lime on
+ * its actions, since the whole desk is where money moves. It takes only the
+ * terminal's neutrals (section 6), so the two no longer read as two products.
  */
 
 /* ───────── 1. Type ───────── */
@@ -119,6 +120,11 @@
 .terminal-host .tour-next:hover,
 .terminal-host .alpha-go:hover,
 .terminal-host .proposal-resign:hover { background: #fffdf0; }
+/* A send button with nothing to send stays quiet. The cream above outranks the
+   rule that dims it (equal weight, later sheet), so its disabled state is
+   restated here. */
+.terminal-host .gc-composer button:disabled,
+.terminal-host .desk-composer button:disabled { background: var(--raised); color: var(--faint); }
 /* The form pages' primary already is cream; its hover went lime. */
 .terminal-host .terminal-form-page .mm-btn.primary:hover,
 .terminal-host .terminal-form-page .grant-btn:hover { background: #fffdf0; }
@@ -193,3 +199,82 @@
 }
 .terminal-host .profile-account .account-control.owner-trades-link > svg:first-child { width: 24px; height: 24px; }
 .terminal-host .profile-account .account-control.owner-trades-link strong { font-weight: 500; }
+
+/* ───────── 6. The rest of the terminal ───────── */
+
+/* Large type on the screens the first pass did not reach: Create's own title,
+   Research's headings and its threshold figure. */
+.terminal-host .create-agent h1,
+.terminal-host .alpha-gate h2,
+.terminal-host .alpha-inside h2,
+.terminal-host .alpha-threshold strong {
+  font-weight: 400;
+  letter-spacing: -0.04em;
+}
+
+/* Research's gate. Its action is the next thing to do: a cream pill, where
+   phones painted it mint. */
+.terminal-host .alpha-gate .flow-primary {
+  border-radius: 999px;
+  background: var(--tx);
+  color: var(--ink);
+}
+.terminal-host .alpha-gate .flow-primary:hover:not(:disabled) { background: #fffdf0; }
+.terminal-host .alpha-gate > svg { color: var(--tx-2); }
+
+/* What is chosen is cream, like a chosen tab: the feed's view, a risk level,
+   an outfit. Lime and mint each said "selected" somewhere. */
+.terminal-host .risk-option.on { border-color: var(--tx); }
+/* The feed's chosen view is an underlined label on a phone only. On a desktop
+   it is already a cream pill with ink on it (polish.css), and cream text there
+   would be cream on cream: this stays inside the phone's query. */
+@media (max-width: 1099px) {
+  .terminal-host .feed-views button[aria-pressed="true"] {
+    color: var(--tx);
+    border-bottom-color: var(--tx);
+  }
+}
+.terminal-host .mm-wardrobe { --wd-accent: var(--tx); }
+.terminal-host .mm-chips button.on { color: var(--tx); }
+
+/* A token's sections are named like every other section. */
+.terminal-host .token-activity h3,
+.terminal-host .held-sec h3 {
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.terminal-host .token-mc b { font-weight: 500; }
+
+/* The Perps desk on the terminal's neutrals. It had a green-grey set of its
+   own (page, panel, rule, text); its accent was already this lime.
+
+   Its controls' resting border is a variable the desk's own base rule reads
+   (perps-desk.css), not a rule restated here. A rule for every button, select
+   and input of the desk would outrank the desk's own exceptions to that base:
+   its borderless market and chart tabs, the red edge of Stop all, the lime
+   edge of its actions. */
+.terminal-host .perps-desk {
+  --perps-bg: var(--bg);
+  --perps-panel: var(--card);
+  --perps-raised: var(--raised);
+  --perps-line: var(--line);
+  --perps-text: var(--tx);
+  --perps-muted: var(--tx-2);
+  --perps-accent: var(--lime);
+  --perps-control-line: #34342c;
+}
+/* The one place the desk wrote its old page colour by hand. */
+.terminal-host .app[data-wallet="perps"][data-screen="perps"] { background: var(--bg); }
+/* Signing in to the desk is not a trade: its button is the cream pill it is everywhere else. */
+.terminal-host .perps-desk .perps-access .flow-primary {
+  border-color: transparent;
+  border-radius: 999px;
+  background: var(--tx);
+  color: var(--ink);
+}
+.terminal-host .perps-desk .perps-access .flow-primary:hover:not(:disabled) { border-color: transparent; background: #fffdf0; color: var(--ink); }
+.terminal-host .perps-desk .perps-access .flow-secondary { border-radius: 999px; }

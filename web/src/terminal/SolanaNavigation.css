@@ -9,11 +9,12 @@
 .solana-network-nav a {
   padding: 7px 13px;
   border-radius: 999px;
-  color: var(--tx-2, #a5a396);
   font-size: 13px;
   text-decoration: none;
 }
-.solana-network-nav a:hover { color: var(--tx, #ecead9); }
+/* Stated with the attribute so it outweighs the terminal's rule for links nobody styled, which made both chains cream. */
+.solana-network-nav a:not([aria-current]) { color: var(--tx-2, #a5a396); }
+.solana-network-nav a:not([aria-current]):hover { color: var(--tx, #ecead9); }
 .solana-network-nav a[aria-current=page] {
   background: var(--raised, #171714);
   color: var(--tx, #ecead9);

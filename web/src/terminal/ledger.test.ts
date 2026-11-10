@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 
 const read = (name: string) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
 const bare = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -77,6 +77,78 @@ describe("Ledger, the terminal's look", () => {
     assert.match(css, /background:\s*var\(--tx\);\s*border-color:\s*transparent;\s*color:\s*var\(--ink\)/);
     // A trade's own confirm button is where money moves: Ledger leaves it as terminal.css paints it.
     assert.doesNotMatch(css, /\.desk-confirm-row button\s*\{/);
+  });
+
+  it("what is chosen is cream, and the Perps desk sits on the terminal's neutrals", () => {
+    const css = bare(read("ledger.css"));
+    // Each of these said "selected" in lime or mint before.
+    for (const rule of [
+      /\.feed-views button\[aria-pressed="true"\]\s*\{[^}]*border-bottom-color:\s*var\(--tx\)/,
+      /\.risk-option\.on\s*\{\s*border-color:\s*var\(--tx\)/,
+      /\.mm-wardrobe\s*\{\s*--wd-accent:\s*var\(--tx\)/,
+      /\.alpha-gate \.flow-primary\s*\{[^}]*background:\s*var\(--tx\)/,
+    ]) assert.match(css, rule);
+    // The desk keeps its accent and its softer up and down; its page, panels, rules and text are the terminal's.
+    const desk = /\.terminal-host \.perps-desk\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+    for (const [local, token] of [["bg", "bg"], ["panel", "card"], ["raised", "raised"], ["line", "line"], ["text", "tx"], ["muted", "tx-2"], ["accent", "lime"]])
+      assert.match(desk, new RegExp(`--perps-${local}:\\s*var\\(--${token}\\)`), `--perps-${local}`);
+    assert.doesNotMatch(desk, /--perps-(up|down)/, "the desk's own up and down stay");
+    // Its controls' resting border is a variable the desk's own base rule reads. A rule here for every button, select
+    // and input of the desk would outrank the desk's exceptions to that base: borderless tabs, Stop all's red edge.
+    assert.match(desk, /--perps-control-line:\s*#[0-9a-f]{6}/);
+    assert.doesNotMatch(css, /\.perps-desk\s+(button|select|input)\s*[,{]/, "no rule for every control of the desk");
+    const perps = bare(read("perps-desk.css"));
+    assert.equal(perps.match(/border:\s*1px solid var\(--perps-control-line, #3a493e\)/g)?.length, 2, "both of the desk's base control rules read it");
+    assert.doesNotMatch(perps, /border:\s*1px solid #3a493e/);
+    // The feed's chosen view is cream text only where it is an underlined label (a phone). On a desktop it is a cream
+    // pill with ink on it, so the same colour outside the phone's query would be cream on cream.
+    const outside = css.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, "");
+    assert.doesNotMatch(outside, /\.feed-views/, "no feed-view rule outside a media query");
+    assert.match(css, /@media \(max-width: 1099px\) \{\s*\.terminal-host \.feed-views button\[aria-pressed="true"\]\s*\{[^}]*color:\s*var\(--tx\)/);
+    // The chain that is not open is quieter than the one that is, and outweighs the rule for unstyled links.
+    assert.match(bare(read("SolanaNavigation.css")), /a:not\(\[aria-current\]\)\s*\{\s*color:\s*var\(--tx-2,/);
+  });
+
+  it("does not paint over a state of what it restyles: a disabled or pressed control keeps its own colours", () => {
+    // This sheet loads last, so `.terminal-host X` beats `:where(.terminal-host) X:disabled` (equal weight) on every
+    // property both set, and a send button with nothing to send showed as ready. Each such state is restated here.
+    // A state written with `.terminal-host` in front, or with two parts (`:hover:not(:disabled)`), outweighs this
+    // sheet and needs nothing.
+    const split = (list: string) => {
+      const out: string[] = []; let depth = 0, start = 0;
+      for (let i = 0; i < list.length; i++) {
+        if (list[i] === "(" || list[i] === "[") depth++; else if (list[i] === ")" || list[i] === "]") depth--;
+        else if (list[i] === "," && depth === 0) { out.push(list.slice(start, i)); start = i + 1; }
+      }
+      return [...out, list.slice(start)].map((selector) => selector.replace(/\s+/g, " ").replace(/"/g, "").trim()).filter(Boolean);
+    };
+    const rules = (css: string) => [...bare(css).matchAll(/(?<=^|[{}])\s*([^{}@]+?)\s*\{([^{}]*)\}/g)].flatMap((match) => {
+      const props = new Set([...match[2]!.matchAll(/(?:^|;)\s*([a-z-]+)\s*:/g)].map((declaration) => declaration[1]!));
+      return split(match[1]!).map((selector) => ({ selector, props }));
+    });
+    // The properties a state is told apart by, and the shorthand that also sets each.
+    const GROUPS = [["background", "background-color"], ["color"], ["border-color", "border"]];
+    const shares = (a: Set<string>, b: Set<string>) => GROUPS.some((group) => group.some((prop) => a.has(prop)) && group.some((prop) => b.has(prop)));
+    const mine = rules(read("ledger.css")), restated = new Set(mine.map((rule) => rule.selector));
+    const others = [new URL("./", import.meta.url), new URL("../merryman/", import.meta.url)].flatMap((dir) =>
+      readdirSync(dir).filter((name) => name.endsWith(".css") && name !== "ledger.css").flatMap((name) => rules(readFileSync(new URL(name, dir), "utf8"))));
+    assert.ok(others.length > 2000 && mine.length > 100, `rules read: ${others.length} and ${mine.length}`);
+    const STATE = /^(?::(?!:)[a-z-]+(?:\([^()]*\))?|\[[^\]]+\]|\.[\w-]+)$/;
+    const painted: string[] = [];
+    for (const rule of mine) {
+      if (!rule.selector.startsWith(".terminal-host ")) continue;
+      const thing = rule.selector.slice(".terminal-host ".length).replace(/:where\(:not\([^()]*\)\)/g, "");
+      for (const other of others) {
+        const theirs = other.selector.replace(/^:where\(\.terminal-host\) /, "");
+        if (theirs.startsWith(".terminal-host ") || !theirs.startsWith(thing)) continue;
+        const state = theirs.slice(thing.length);
+        if (!STATE.test(state) || !shares(rule.props, other.props)) continue;
+        if (!restated.has(`.terminal-host ${thing}${state}`)) painted.push(`${other.selector} is outranked by ${rule.selector}`);
+      }
+    }
+    assert.deepEqual([...new Set(painted)], []);
+    // The two that slipped through once.
+    assert.match(bare(read("ledger.css")), /\.gc-composer button:disabled,\s*\.terminal-host \.desk-composer button:disabled\s*\{\s*background:\s*var\(--raised\);\s*color:\s*var\(--faint\)/);
   });
 
   it("the Solana screen has no palette of its own: its colours are the terminal's, with matching fallbacks", () => {
