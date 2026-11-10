@@ -1,4 +1,7 @@
-.solana-screen{max-width:860px;margin:0 auto;padding:28px 20px 100px;color:var(--text,#f4f4f4)}
+/* The screen is a flex item of the app's column body, centred with auto margins, so it is sized to fit its content: without a
+   stated width its narrowest is the widest thing inside it that cannot wrap (the dock's row of buttons), and on a phone that made
+   the whole page wider than the screen. A full width with no minimum keeps it inside the body; the dock scrolls within it. */
+.solana-screen{box-sizing:border-box;width:100%;min-width:0;max-width:860px;margin:0 auto;padding:28px 20px 100px;color:var(--text,#f4f4f4)}
 .solana-screen h1{font-size:30px;margin:8px 0 12px}.solana-screen h2{font-size:19px;margin:0 0 16px}.solana-screen p{line-height:1.6;overflow-wrap:anywhere}
 .solana-eyebrow{color:#14f195;font-size:12px;letter-spacing:.12em;text-transform:uppercase}.solana-card{border:1px solid #30353b;border-radius:16px;padding:24px;margin:20px 0;background:rgba(255,255,255,.025)}
 .solana-screen fieldset{border:0;padding:0;margin:12px 0}.solana-screen legend{margin-bottom:10px}.solana-screen label{display:block;line-height:1.5;margin:12px 0}.solana-screen input:not([type=radio]):not([type=checkbox]),.solana-screen select{display:block;width:100%;padding:10px 12px;margin-top:6px;border:1px solid #454b51;border-radius:8px;background:#14181c;color:inherit;font:inherit;box-sizing:border-box}

@@ -2882,3 +2882,14 @@ test("the strategy card folds to its status: a saved strategy in one line, its f
   await ui.click("Change strategy");
   assert.ok(button("Save autonomous strategy"));
 });
+
+test("the Solana screen cannot be pushed wider than the app's body by its own dock", () => {
+  // In the app the screen is a flex item of a column body and centred with auto margins, which sizes it to fit its content.
+  // The dock is a row of buttons that does not wrap: without a stated width and a zero minimum, a phone's page became as wide
+  // as that row and scrolled sideways. jsdom lays nothing out, so this pins the rule itself.
+  const css = readFileSync(new URL("./SolanaScreen.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const screenRule = /(^|\})\s*\.solana-screen\{([^}]*)\}/.exec(css)?.[2] ?? "";
+  assert.match(screenRule, /(^|;)width:100%/); assert.match(screenRule, /(^|;)min-width:0/); assert.match(screenRule, /(^|;)box-sizing:border-box/);
+  const dockRule = /\.solana-dock\{([^}]*)\}/.exec(css)?.[1] ?? "";
+  assert.match(dockRule, /overflow-x:auto/, "the dock scrolls inside the screen rather than widening it");
+});
