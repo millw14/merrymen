@@ -81,7 +81,11 @@ describe("Ledger, the terminal's look", () => {
 
   it("the Solana screen has no palette of its own: its colours are the terminal's, with matching fallbacks", () => {
     const css = bare(read("SolanaScreen.css")), t = tokens();
-    assert.doesNotMatch(css, /#14f195/i, "Solana's green is gone");
+    // Solana's green is gone from the screen and from the switch between the two chains.
+    for (const sheet of [css, bare(read("SolanaNavigation.css"))]) assert.doesNotMatch(sheet, /#14f195|#223b32|#30353b/i);
+    assert.match(bare(read("SolanaNavigation.css")), /a\[aria-current=page\]\s*\{[^}]*color:\s*var\(--tx,/, "the chain you are on is cream");
+    // Of two sign-in buttons only the first is the cream pill.
+    assert.match(css, /\.solana-screen \.flow-secondary\s*\{[^}]*background:\s*transparent/);
     const mapped = [...css.matchAll(/--s-([a-z0-9]+):\s*var\(--([a-z0-9-]+),\s*(#[0-9a-f]{6})\)/g)];
     assert.ok(mapped.length >= 9);
     for (const [, local, token, fallback] of mapped) assert.equal(fallback, t[token!], `--s-${local} falls back to --${token}'s own value`);

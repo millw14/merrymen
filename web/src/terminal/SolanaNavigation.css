@@ -1,1 +1,20 @@
-.solana-network-nav{display:flex;gap:8px;padding:12px 20px;border-bottom:1px solid #30353b}.solana-network-nav a{padding:7px 12px;border-radius:20px;text-decoration:none;color:inherit;font-size:13px}.solana-network-nav a[aria-current=page]{background:#223b32;color:#14f195}
+/* The switch between the two chains, in the terminal's own look (Ledger): the chain you are on is a raised cream
+   label, the other a quiet one. It used to wear Solana's green whichever chain was open. */
+.solana-network-nav {
+  display: flex;
+  gap: 6px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line, #25251f);
+}
+.solana-network-nav a {
+  padding: 7px 13px;
+  border-radius: 999px;
+  color: var(--tx-2, #a5a396);
+  font-size: 13px;
+  text-decoration: none;
+}
+.solana-network-nav a:hover { color: var(--tx, #ecead9); }
+.solana-network-nav a[aria-current=page] {
+  background: var(--raised, #171714);
+  color: var(--tx, #ecead9);
+}

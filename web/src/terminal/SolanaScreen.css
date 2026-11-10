@@ -120,7 +120,8 @@
   cursor: pointer;
 }
 .solana-screen button:disabled { opacity: 0.45; cursor: not-allowed; }
-.solana-screen .solana-secondary { border-color: #34342c; background: transparent; color: var(--s-tx); font-weight: 500; }
+.solana-screen .solana-secondary,
+.solana-screen .flow-secondary { border-color: #34342c; background: transparent; color: var(--s-tx); font-weight: 500; }
 .solana-screen button.solana-small { margin: 0; padding: 6px 13px; font-size: 13px; }
 .solana-screen :focus-visible { outline: 2px solid var(--s-lime); outline-offset: 3px; }
 
