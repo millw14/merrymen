@@ -3,13 +3,15 @@
  * under .terminal-host and uses its tokens (terminal.css). Phone targets are 44px, like every other control.
  */
 
-/* Home: links to money out, limits, wallet, settings and the stop. Five equal tiles, icon over label, so all of
-   them fit a 360px phone without scrolling and the stop is never off screen. */
+/* Home: links to money out, limits, wallet, settings and the stop. Five equal cells, icon over label, so all of
+   them fit a 360px phone without scrolling and the stop is never off screen. One strip, ruled above and below,
+   with a hairline between cells (Ledger: hairlines, not boxes). */
 .terminal-host .home-quick {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
   margin: 12px 0 10px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
 .terminal-host .home-quick-link {
   display: flex;
@@ -19,18 +21,17 @@
   gap: 6px;
   min-height: 62px;
   padding: 8px 2px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: rgb(255 255 255 / 0.04);
-  color: var(--tx);
+  color: var(--tx-2);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 1.1;
   text-align: center;
   text-decoration: none;
-  transition: background 140ms;
+  transition: background 140ms, color 140ms;
 }
-.terminal-host .home-quick-link:hover { background: rgb(255 255 255 / 0.08); }
+.terminal-host .home-quick-link + .home-quick-link { border-left: 1px solid var(--line); }
+.terminal-host .home-quick-link:hover { background: rgb(236 234 217 / 0.05); color: var(--tx); }
+.terminal-host .home-quick-link.stop:hover { color: var(--down); }
 .terminal-host .home-quick-link:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
 .terminal-host .home-quick-link.stop { color: var(--down); }
 

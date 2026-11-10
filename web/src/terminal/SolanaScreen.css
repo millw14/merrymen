@@ -1,32 +1,193 @@
+/*
+ * THE SOLANA SCREEN, IN THE TERMINAL'S OWN LOOK (Ledger, see ledger.css).
+ *
+ * It used to carry a palette of its own (Solana's green, cool greys, boxed
+ * cards), which made it read as another product. It now takes the terminal's
+ * tokens. The `--s-*` names below only add a fallback for each, so the screen
+ * still renders where no terminal host surrounds it (a test, a capture).
+ *
+ * Sections are ruled, not boxed. A cream pill is the next thing to do; lime is
+ * kept for the trade itself (the side being bought, Preview, Place).
+ */
+.solana-screen {
+  --s-bg: var(--bg, #0a0a09);
+  --s-card: var(--card, #0f0f0d);
+  --s-raised: var(--raised, #171714);
+  --s-tx: var(--tx, #ecead9);
+  --s-tx2: var(--tx-2, #a5a396);
+  --s-faint: var(--faint, #8a887b);
+  --s-line: var(--line, #25251f);
+  --s-lime: var(--lime, #d4f55e);
+  --s-down: var(--down, #ff5c71);
+  --s-ink: var(--ink, #0a0a09);
+  --s-mono: var(--font-geist-mono, ui-monospace), ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
 /* The screen is a flex item of the app's column body, centred with auto margins, so it is sized to fit its content: without a
    stated width its narrowest is the widest thing inside it that cannot wrap (the dock's row of buttons), and on a phone that made
    the whole page wider than the screen. A full width with no minimum keeps it inside the body; the dock scrolls within it. */
-.solana-screen{box-sizing:border-box;width:100%;min-width:0;max-width:860px;margin:0 auto;padding:28px 20px 100px;color:var(--text,#f4f4f4)}
-.solana-screen h1{font-size:30px;margin:8px 0 12px}.solana-screen h2{font-size:19px;margin:0 0 16px}.solana-screen p{line-height:1.6;overflow-wrap:anywhere}
-.solana-eyebrow{color:#14f195;font-size:12px;letter-spacing:.12em;text-transform:uppercase}.solana-card{border:1px solid #30353b;border-radius:16px;padding:24px;margin:20px 0;background:rgba(255,255,255,.025)}
-.solana-screen fieldset{border:0;padding:0;margin:12px 0}.solana-screen legend{margin-bottom:10px}.solana-screen label{display:block;line-height:1.5;margin:12px 0}.solana-screen input:not([type=radio]):not([type=checkbox]),.solana-screen select{display:block;width:100%;padding:10px 12px;margin-top:6px;border:1px solid #454b51;border-radius:8px;background:#14181c;color:inherit;font:inherit;box-sizing:border-box}
-.solana-screen button{border:0;border-radius:8px;padding:11px 16px;margin:8px 8px 0 0;background:#14f195;color:#071c11;font:inherit;font-weight:600;cursor:pointer}.solana-screen button:disabled{opacity:.45;cursor:not-allowed}.solana-screen .solana-secondary{background:#30383d;color:#fff}.solana-screen :focus-visible{outline:2px solid #14f195;outline-offset:3px}
-.solana-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0 20px}.solana-address{font-family:monospace;overflow-wrap:anywhere}.solana-value{font-size:26px;font-weight:600}.solana-error{border:1px solid #b45e5e;background:#351c1c;padding:14px;border-radius:8px}.solana-screen a{color:#14f195}.solana-screen li{margin:8px 0;line-height:1.5}
-.solana-terms{border-left:3px solid #14f195;padding:4px 0 4px 16px;margin:16px 0}.solana-terms h3{font-size:16px;margin:0 0 8px}.solana-terms ul{margin:0;padding-left:20px}
-.solana-warning{border:1px solid #b8913a;background:#2d2410;padding:14px;border-radius:8px}.solana-screen code{font-family:monospace;background:#14181c;padding:2px 6px;border-radius:4px}
-.solana-review{border:1px solid #2f5d4a;border-radius:12px;padding:4px 16px 12px;margin:16px 0}.solana-screen ul.solana-warning{padding-left:32px}
-.solana-notice{border:1px solid #2f5d4a;background:#13261d;padding:14px;border-radius:8px}
-.solana-chip{display:inline-block;margin-left:10px;padding:2px 9px;border:1px solid #30353b;border-radius:999px;color:#9aa3ab;font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;vertical-align:middle}
-.solana-fine{color:#9aa3ab;font-size:13px}
-.solana-dock{position:sticky;top:8px;z-index:6;display:flex;align-items:center;gap:4px;overflow-x:auto;margin:18px 0 0;padding:6px;border:1px solid #30353b;border-radius:999px;background:rgba(14,16,19,.9);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);scrollbar-width:none}.solana-dock::-webkit-scrollbar{display:none}
-.solana-screen .solana-dock button{flex:none;margin:0;padding:8px 14px;border-radius:999px;background:transparent;color:#d9dde1;font-size:14px;font-weight:500;white-space:nowrap}.solana-screen .solana-dock button:hover:not(:disabled){background:#262b31;color:#fff}
-.solana-dock-end{display:flex;flex:none;gap:4px;margin-left:auto;padding-left:8px}.solana-screen .solana-dock-end button{background:#1d2227;font-family:monospace}.solana-screen .solana-dock-end button:last-child{font-family:inherit}
-.solana-card{scroll-margin-top:76px}
-.solana-top{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:0 20px;align-items:start}
-.solana-screen h2 .solana-fine{margin-left:8px;font-weight:400}
-.solana-segment{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;border:1px solid #30353b;border-radius:12px;background:#14181c}
-.solana-screen .solana-segment button{margin:0;padding:10px 12px;border-radius:9px;background:transparent;color:#d9dde1;font-weight:600}.solana-screen .solana-segment button[aria-pressed=true]{background:#14f195;color:#071c11}.solana-screen .solana-segment button[aria-pressed=true]:last-child{background:#ff7a70;color:#2b0906}
-.solana-presets{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:-2px 0 10px;color:#9aa3ab;font-size:13px}.solana-presets span{margin-right:auto}
-.solana-screen button.solana-small{margin:0;padding:6px 13px;border-radius:999px;font-size:13px}
-.solana-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-top:8px}.solana-row a{font-size:14px}
-.solana-stats{display:flex;flex-wrap:wrap;gap:4px 18px;margin:12px 0 0;color:#c3c9ce;font-size:14px}
-.solana-meter{display:block;width:100%;height:6px;margin:8px 0 14px;border:0;border-radius:999px;background:#262b31;overflow:hidden;-webkit-appearance:none;appearance:none}.solana-meter::-webkit-progress-bar{background:#262b31}.solana-meter::-webkit-progress-value{background:#14f195;border-radius:999px}.solana-meter::-moz-progress-bar{background:#14f195;border-radius:999px}
-@media (max-width:1099px){.solana-screen .solana-dock button,.solana-screen button.solana-small{min-height:44px}.solana-screen button.solana-small{padding:6px 16px}}
-.solana-top>.solana-card{margin-bottom:0}
-#solana-trade>button:not(.solana-secondary){display:block;width:100%;margin-right:0;padding:13px 16px}
-@media (max-width:560px){.solana-presets span{flex:1 0 100%}.solana-screen .solana-presets button{flex:1}}
+.solana-screen {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 28px 20px 100px;
+  color: var(--s-tx);
+}
+
+/* ── type ── */
+.solana-screen h1 { margin: 8px 0 12px; font-size: 40px; font-weight: 400; letter-spacing: -0.045em; line-height: 1.02; }
+.solana-screen h2,
+.solana-screen h3,
+.solana-eyebrow,
+.solana-screen legend {
+  margin: 0 0 16px;
+  font-family: var(--s-mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--s-faint);
+}
+.solana-screen h3 { margin: 18px 0 8px; }
+.solana-eyebrow { margin: 0; }
+.solana-screen p { line-height: 1.6; overflow-wrap: anywhere; }
+.solana-screen header > p:last-child { color: var(--s-tx2); }
+.solana-screen li { margin: 8px 0; line-height: 1.5; }
+.solana-screen a { color: var(--s-tx); text-underline-offset: 3px; }
+.solana-screen code { padding: 2px 6px; border-radius: 4px; background: var(--s-raised); font-family: var(--s-mono); }
+.solana-screen h2 .solana-fine { margin-left: 10px; color: var(--s-faint); }
+.solana-fine { color: var(--s-faint); font-size: 13px; }
+.solana-value { margin: 4px 0 10px; font-size: 44px; font-weight: 400; letter-spacing: -0.05em; line-height: 1; }
+.solana-address { font-family: var(--s-mono); font-size: 13px; color: var(--s-tx2); overflow-wrap: anywhere; }
+.solana-stats { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 12px 0 0; color: var(--s-tx2); font-size: 14px; }
+
+/* ── sections: ruled, not boxed ── */
+.solana-card {
+  margin: 0;
+  padding: 26px 0;
+  border-top: 1px solid var(--s-line);
+  scroll-margin-top: 76px;
+}
+.solana-top { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 0 36px; align-items: start; }
+.solana-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: 8px; }
+.solana-row a { font-size: 14px; }
+
+/* What holds something apart keeps a box. */
+.solana-error { padding: 14px; border: 1px solid #7a3b43; border-radius: 12px; background: #24090d; }
+.solana-notice { padding: 14px; border: 1px solid var(--s-line); border-radius: 12px; background: var(--s-card); }
+.solana-warning { padding: 14px; border: 1px solid #7d6a2f; border-radius: 12px; background: #1d1808; }
+.solana-screen ul.solana-warning { padding-left: 32px; }
+.solana-review { margin: 16px 0; padding: 4px 16px 12px; border: 1px solid var(--s-line); border-radius: 12px; }
+.solana-terms { margin: 16px 0; padding: 4px 0 4px 16px; border-left: 1px solid var(--s-tx2); }
+.solana-terms h3 { margin: 0 0 8px; }
+.solana-terms ul { margin: 0; padding-left: 20px; }
+
+/* ── fields ── */
+.solana-screen fieldset { margin: 12px 0; padding: 0; border: 0; }
+.solana-screen label { display: block; margin: 14px 0; color: var(--s-tx2); font-size: 14px; line-height: 1.5; }
+.solana-screen input:not([type=radio]):not([type=checkbox]),
+.solana-screen select {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 0;
+  border: 0;
+  border-bottom: 1px solid #3a3a31;
+  border-radius: 0;
+  background: transparent;
+  color: var(--s-tx);
+  font: inherit;
+  font-size: 18px;
+}
+.solana-screen input:not([type=radio]):not([type=checkbox]):focus-visible,
+.solana-screen select:focus-visible { outline: 0; border-bottom-color: var(--s-tx); }
+.solana-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 24px; }
+#solana-trade input { font-size: 34px; letter-spacing: -0.04em; padding: 4px 0 8px; }
+
+/* ── buttons: a cream pill is the next thing to do ── */
+.solana-screen button {
+  margin: 8px 8px 0 0;
+  padding: 11px 18px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--s-tx);
+  color: var(--s-ink);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.solana-screen button:disabled { opacity: 0.45; cursor: not-allowed; }
+.solana-screen .solana-secondary { border-color: #34342c; background: transparent; color: var(--s-tx); font-weight: 500; }
+.solana-screen button.solana-small { margin: 0; padding: 6px 13px; font-size: 13px; }
+.solana-screen :focus-visible { outline: 2px solid var(--s-lime); outline-offset: 3px; }
+
+/* The trade itself is where money moves: lime. */
+#solana-trade > button:not(.solana-secondary) {
+  display: block;
+  width: 100%;
+  margin-right: 0;
+  padding: 13px 16px;
+  background: var(--s-lime);
+  color: var(--s-ink);
+}
+.solana-segment { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid var(--s-line); border-radius: 999px; }
+.solana-screen .solana-segment button { margin: 0; padding: 10px 12px; border: 0; background: transparent; color: var(--s-tx2); font-weight: 500; }
+.solana-screen .solana-segment button[aria-pressed=true] { background: var(--s-lime); color: var(--s-ink); font-weight: 600; }
+.solana-screen .solana-segment button[aria-pressed=true]:last-child { background: var(--s-down); color: #22050a; }
+.solana-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -2px 0 10px; color: var(--s-faint); font-size: 13px; }
+.solana-presets span { margin-right: auto; }
+
+/* ── the dock ── */
+.solana-dock {
+  position: sticky;
+  top: 8px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  overflow-x: auto;
+  margin: 18px 0 20px;
+  padding: 5px;
+  border: 1px solid var(--s-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--s-bg) 92%, transparent);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  scrollbar-width: none;
+}
+.solana-dock::-webkit-scrollbar { display: none; }
+.solana-screen .solana-dock button { flex: none; margin: 0; padding: 8px 14px; border: 0; background: transparent; color: var(--s-tx2); font-size: 14px; font-weight: 500; white-space: nowrap; }
+.solana-screen .solana-dock button:hover:not(:disabled) { background: var(--s-raised); color: var(--s-tx); }
+.solana-dock-end { display: flex; flex: none; gap: 2px; margin-left: auto; padding-left: 8px; }
+.solana-screen .solana-dock-end button { background: var(--s-raised); color: var(--s-tx); font-family: var(--s-mono); font-size: 12px; }
+.solana-screen .solana-dock-end button:last-child { font-family: inherit; font-size: 14px; }
+
+/* ── small parts ── */
+.solana-chip {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 2px 9px;
+  border: 1px solid var(--s-line);
+  border-radius: 999px;
+  color: var(--s-tx2);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  vertical-align: middle;
+}
+.solana-meter { display: block; width: 100%; height: 2px; margin: 10px 0 16px; border: 0; background: var(--s-raised); overflow: hidden; -webkit-appearance: none; appearance: none; }
+.solana-meter::-webkit-progress-bar { background: var(--s-raised); }
+.solana-meter::-webkit-progress-value { background: var(--s-lime); }
+.solana-meter::-moz-progress-bar { background: var(--s-lime); }
+
+@media (max-width: 1099px) {
+  .solana-screen .solana-dock button,
+  .solana-screen button.solana-small { min-height: 44px; }
+  .solana-screen button.solana-small { padding: 6px 16px; }
+}
+@media (max-width: 560px) {
+  .solana-presets span { flex: 1 0 100%; }
+  .solana-screen .solana-presets button { flex: 1; }
+}

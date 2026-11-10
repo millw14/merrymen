@@ -2888,8 +2888,9 @@ test("the Solana screen cannot be pushed wider than the app's body by its own do
   // The dock is a row of buttons that does not wrap: without a stated width and a zero minimum, a phone's page became as wide
   // as that row and scrolled sideways. jsdom lays nothing out, so this pins the rule itself.
   const css = readFileSync(new URL("./SolanaScreen.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-  const screenRule = /(^|\})\s*\.solana-screen\{([^}]*)\}/.exec(css)?.[2] ?? "";
+  // Every declaration made on the screen itself, whichever block states it.
+  const screenRule = [...css.matchAll(/(?:^|\})\s*\.solana-screen\s*\{([^}]*)(?=\})/g)].map((match) => match[1]).join(";").replace(/\s+/g, "");
   assert.match(screenRule, /(^|;)width:100%/); assert.match(screenRule, /(^|;)min-width:0/); assert.match(screenRule, /(^|;)box-sizing:border-box/);
-  const dockRule = /\.solana-dock\{([^}]*)\}/.exec(css)?.[1] ?? "";
+  const dockRule = (/\.solana-dock\s*\{([^}]*)\}/.exec(css)?.[1] ?? "").replace(/\s+/g, "");
   assert.match(dockRule, /overflow-x:auto/, "the dock scrolls inside the screen rather than widening it");
 });
