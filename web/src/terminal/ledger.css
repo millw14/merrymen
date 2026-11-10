@@ -219,11 +219,16 @@
 
 /* What is chosen is cream, like a chosen tab: the feed's view, a risk level,
    an outfit. Lime and mint each said "selected" somewhere. */
-.terminal-host .feed-views button[aria-pressed="true"] {
-  color: var(--tx);
-  border-bottom-color: var(--tx);
-}
 .terminal-host .risk-option.on { border-color: var(--tx); }
+/* The feed's chosen view is an underlined label on a phone only. On a desktop
+   it is already a cream pill with ink on it (polish.css), and cream text there
+   would be cream on cream: this stays inside the phone's query. */
+@media (max-width: 1099px) {
+  .terminal-host .feed-views button[aria-pressed="true"] {
+    color: var(--tx);
+    border-bottom-color: var(--tx);
+  }
+}
 .terminal-host .mm-wardrobe { --wd-accent: var(--tx); }
 .terminal-host .mm-chips button.on { color: var(--tx); }
 

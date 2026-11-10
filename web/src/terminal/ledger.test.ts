@@ -93,6 +93,11 @@ describe("Ledger, the terminal's look", () => {
     for (const [local, token] of [["bg", "bg"], ["panel", "card"], ["raised", "raised"], ["line", "line"], ["text", "tx"], ["muted", "tx-2"], ["accent", "lime"]])
       assert.match(desk, new RegExp(`--perps-${local}:\\s*var\\(--${token}\\)`), `--perps-${local}`);
     assert.doesNotMatch(desk, /--perps-(up|down)/, "the desk's own up and down stay");
+    // The feed's chosen view is cream text only where it is an underlined label (a phone). On a desktop it is a cream
+    // pill with ink on it, so the same colour outside the phone's query would be cream on cream.
+    const outside = css.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, "");
+    assert.doesNotMatch(outside, /\.feed-views/, "no feed-view rule outside a media query");
+    assert.match(css, /@media \(max-width: 1099px\) \{\s*\.terminal-host \.feed-views button\[aria-pressed="true"\]\s*\{[^}]*color:\s*var\(--tx\)/);
     // The chain that is not open is quieter than the one that is, and outweighs the rule for unstyled links.
     assert.match(bare(read("SolanaNavigation.css")), /a:not\(\[aria-current\]\)\s*\{\s*color:\s*var\(--tx-2,/);
   });
