@@ -79,6 +79,24 @@ describe("Ledger, the terminal's look", () => {
     assert.doesNotMatch(css, /\.desk-confirm-row button\s*\{/);
   });
 
+  it("what is chosen is cream, and the Perps desk sits on the terminal's neutrals", () => {
+    const css = bare(read("ledger.css"));
+    // Each of these said "selected" in lime or mint before.
+    for (const rule of [
+      /\.feed-views button\[aria-pressed="true"\]\s*\{[^}]*border-bottom-color:\s*var\(--tx\)/,
+      /\.risk-option\.on\s*\{\s*border-color:\s*var\(--tx\)/,
+      /\.mm-wardrobe\s*\{\s*--wd-accent:\s*var\(--tx\)/,
+      /\.alpha-gate \.flow-primary\s*\{[^}]*background:\s*var\(--tx\)/,
+    ]) assert.match(css, rule);
+    // The desk keeps its accent and its softer up and down; its page, panels, rules and text are the terminal's.
+    const desk = /\.terminal-host \.perps-desk\s*\{([^}]*)\}/.exec(css)?.[1] ?? "";
+    for (const [local, token] of [["bg", "bg"], ["panel", "card"], ["raised", "raised"], ["line", "line"], ["text", "tx"], ["muted", "tx-2"], ["accent", "lime"]])
+      assert.match(desk, new RegExp(`--perps-${local}:\\s*var\\(--${token}\\)`), `--perps-${local}`);
+    assert.doesNotMatch(desk, /--perps-(up|down)/, "the desk's own up and down stay");
+    // The chain that is not open is quieter than the one that is, and outweighs the rule for unstyled links.
+    assert.match(bare(read("SolanaNavigation.css")), /a:not\(\[aria-current\]\)\s*\{\s*color:\s*var\(--tx-2,/);
+  });
+
   it("the Solana screen has no palette of its own: its colours are the terminal's, with matching fallbacks", () => {
     const css = bare(read("SolanaScreen.css")), t = tokens();
     // Solana's green is gone from the screen and from the switch between the two chains.
