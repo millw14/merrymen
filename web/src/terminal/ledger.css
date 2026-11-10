@@ -146,7 +146,9 @@
 
 /* The hero keeps its frame: it holds the merryman's world apart from the page. */
 .terminal-host .mm-hero { border-radius: 20px; }
-.terminal-host .mm-chip {
+/* Its status chip, scoped as merryman-shell.css scopes it: .mm-chip alone is
+   also the class of the example buttons in Settings. */
+.terminal-host :where(.mm-hero-stage) .mm-chip {
   font-family: var(--font-geist-mono), var(--mono);
   font-size: 10px;
   font-weight: 400;
