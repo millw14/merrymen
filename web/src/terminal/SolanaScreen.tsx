@@ -309,14 +309,19 @@ export async function solanaRequestJson<T>(url: string, init: RequestInit = {}):
   }
 }
 
-export function SolanaScreen() {
+/**
+ * `onSignedIn`: a sign-in finished on this screen, so this browser's session may now be another account's. The shell
+ * passes its invalidateOwnerView, as every other sign-in does: the old owner's account, book and chat go at once, and
+ * this screen, keyed to the shell's session epoch, mounts again and reads the new account itself.
+ */
+export function SolanaScreen({ onSignedIn }: { onSignedIn?: () => void }) {
   return <section className="solana-screen" aria-labelledby="solana-title">
     <header><p className="solana-eyebrow">Solana · mainnet</p><h1 id="solana-title">Your Solana account</h1><p>Trade SOL against USDG at live prices, within limits you set.</p></header>
-    {privyEnabled() ? <ConnectedSolana /> : <p role="status">Protected wallet sign-in must be configured before using Solana.</p>}
+    {privyEnabled() ? <ConnectedSolana onSignedIn={onSignedIn} /> : <p role="status">Protected wallet sign-in must be configured before using Solana.</p>}
   </section>;
 }
 
-function ConnectedSolana() {
+function ConnectedSolana({ onSignedIn }: { onSignedIn?: () => void }) {
   const signer = useSolanaOwner();
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false), [error, setError] = useState("");
@@ -951,9 +956,16 @@ function ConnectedSolana() {
   // connected wallet is not the verified one, which needs attention. Otherwise it sits below the trading cards, and the
   // dock keeps its address and the refresh one press away.
   const walletFirst = !binding || !sameWallet;
+  // A sign-in on this screen finished, and the session is now its login's account. With the shell's own reset
+  // (SolanaScreen's onSignedIn) this screen mounts again and reads it; on its own, it reads the account afresh here.
+  // Never both: the status route paces reads, and a second read straight after would be refused as too soon.
+  const signedIn = () => {
+    setSwitching(false); setSignInRefusal(null);
+    if (onSignedIn) onSignedIn(); else void act(() => refresh());
+  };
   if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p>
     {accountLogin && <p>Your Merrymen account signs in with {solanaAccountLoginText(accountLogin)}.</p>}
-    <SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
+    <SignIn onDone={signedIn} /></div>;
   if (signInRefusal) return <SignInRepair refusal={signInRefusal} account={signInRefusal.account ?? accountLogin} login={signer.login}
     switching={switching} signingOut={signingOut} error={error}
     onSignOut={() => {
@@ -962,8 +974,8 @@ function ConnectedSolana() {
       void signer.signOutWallet().catch(() => setError("The wallet sign-in did not sign out. Try again.")).finally(() => setSigningOut(false));
     }}
     onSwitch={() => { setError(""); setSwitching(true); }}
-    // The session is now this browser's wallet sign-in's account (or, signed out before, the first one): read it afresh.
-    onDone={() => { setSwitching(false); setSignInRefusal(null); void act(() => refresh()); }} />;
+    // The session is now this browser's wallet sign-in's account (or, signed out before, the first one).
+    onDone={signedIn} />;
   const walletCard = <div id="solana-wallet" className="solana-card"><h2>{binding || otherLogin ? "Wallet ownership" : "Get started"}</h2>
       {otherLogin && <p role="alert" className="solana-error">{SOLANA_OTHER_SIGN_IN}</p>}
       {binding ? <><p className="solana-address">{binding.owner}</p><p>{sameWallet ? "Verified wallet connected." : "Connect the exact embedded wallet shown above before signing a permission."}</p>

@@ -372,6 +372,25 @@ test("keeping the wallet sign-in's login finishes its sign-in, then reads that a
   assert.ok(!/Two different sign-ins/.test(ui.container.textContent!));
   assert.ok(ui.container.textContent!.includes(OWNER));
 });
+test("a sign-in that finishes on the screen resets the whole shell, which mounts the screen again; the screen does not read twice", async () => {
+  let resets = 0;
+  respond = async (path) => { if (path === "status") return mismatchAnswer(true); throw new Error("Unexpected fixture route"); };
+  await ui.render(React.createElement(SolanaScreen, { onSignedIn: () => { resets++; } })); await settle();
+  await press("Use this wallet sign-in instead");
+  const reads = calls.filter((call) => call.path === "status").length;
+  await press("Sign in");
+  assert.equal(resets, 1, "the shell's invalidateOwnerView ran");
+  assert.equal(calls.filter((call) => call.path === "status").length, reads, "the remounted screen reads; this one does not, so the paced status route is not asked twice");
+  // The same for a session that was missing: the shell learns of the new owner at once.
+  await ui.close(); ui = testDom(); resets = 0;
+  respond = async (path) => { if (path === "status") return json({ error: "Sign in before opening your Solana account.", ownerFacing: true, signIn: { problem: "signed-out" } }, 401); throw new Error("Unexpected fixture route"); };
+  await ui.render(React.createElement(SolanaScreen, { onSignedIn: () => { resets++; } })); await settle();
+  await press("Sign in");
+  assert.equal(resets, 1);
+  // And the shell passes exactly that reset, keying the screen to its session epoch so it mounts again.
+  const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+  assert.match(app, /<SolanaScreen key=\{epoch\} onSignedIn=\{invalidateOwnerView\}\/>/);
+});
 test("an action refused for a different login shows the same choice, not a bare error", async () => {
   respond = async (path) => {
     if (path === "status") return json({ binding: null, runtime: null });
