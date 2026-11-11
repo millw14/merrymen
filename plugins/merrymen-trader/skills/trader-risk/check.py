@@ -79,8 +79,10 @@ ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
                  "order_class", "take_profit_limit_price", "stop_loss_stop_price",
                  "stop_loss_limit_price", "advanced_instructions")
-# A Merrymen order also names the token address and the agent: a yes binds to both.
-FP_FIELDS = ALPACA_FIELDS + ("venue", "agent", "token")
+# A Merrymen order also names the token address and the agent: a yes binds to both. holding: the
+# token amount a flatten ticket was made from (each part of a multi-part exit is its own order).
+FP_FIELDS = ALPACA_FIELDS + ("venue", "agent", "token", "holding")
+PLAN_FP_FIELDS = ("entry", "stop", "target")
 PRICE_FIELDS = ("qty", "notional", "limit_price", "stop_price", "take_profit_limit_price",
                 "stop_loss_stop_price", "stop_loss_limit_price")
 TYPES = {"market", "limit", "stop", "stop_limit", "trailing_stop"}
@@ -295,8 +297,16 @@ def read_json(path, what, required=True):
 
 
 def fingerprint(order):
-    """Same function in trader-broker/ticket.py: the exact order that was checked."""
+    """Same function in trader-broker/ticket.py: the exact order that was checked.
+
+    A Merrymen order keeps its stop and target in the plan, so the plan's entry, stop and target
+    are part of it: a stop edited after a PASS is a different order and needs a new check."""
     core = {k: order[k] for k in FP_FIELDS if k in order and order[k] is not None}
+    plan = order.get("plan") if isinstance(order.get("plan"), dict) else {}
+    if str(order.get("venue", "")).lower() == "merrymen":
+        bound = {k: plan[k] for k in PLAN_FP_FIELDS if plan.get(k) is not None}
+        if bound:
+            core["plan"] = bound
     blob = json.dumps(core, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -366,7 +376,8 @@ def rec_is_entry(rec):
 
 # Merrymen: a proposal waiting for the owner may still fill, so it counts like a placed order
 # until it ends; one that ended without a trade (expired, refused, ...) stops counting.
-PLACED = {"placed", "proposed", "confirmed", "paper_filled"}
+# call_failed: the propose_trade call errored, so a proposal may exist until it is settled.
+PLACED = {"placed", "proposed", "call_failed", "confirmed", "paper_filled"}
 
 
 def placed_today(state, today):
@@ -572,6 +583,11 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         elif side == "buy" and held < -1e-9 and q is not None:
             exiting = q <= -held + 1e-9
         kind = "exit" if exiting else "entry"
+        if to_merrymen and o.get("holding") is not None:
+            h = _f(o.get("holding"))
+            if h is None or abs(h - held) > 1e-6:
+                reasons.append("holding: this ticket was made for %s %s and trader/portfolio.json now holds %s; "
+                               "run ticket.py flatten again" % (o.get("holding"), sym, _num(held)))
         if kind == "entry" and value is None and q:
             later.append("price: no price for %s to size a %s-share order; add it to "
                          "trader/prices.json (trader-alerts: alerts.py quote %s --write)" % (sym, qty, sym))

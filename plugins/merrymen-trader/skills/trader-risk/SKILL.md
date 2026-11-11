@@ -99,6 +99,7 @@ Merrymen's checks (`"broker": "merrymen"`). Some block any order, even a sell:
 | permission | no signed permission, or it has expired; (entries) it expires before today's flat-by time, so the agent could not sell |
 | signed limits | over the signed per-trade limit or the owner-order cap; (entries) within `exit_headroom_pct` (5%) of either, so the closing sell might not fit under it; the 24-hour budget left cannot cover the buy AND the sell (`reserve_exit_budget`), or fewer than 2 operations are left |
 | paused | (entries) the token is paused in the registry |
+| holding | a flatten ticket made for a holding that `trader/portfolio.json` no longer shows (one part filled since): run flatten again |
 | quote | (entries) no `quote_trade` for this exact side, token and amount, one older than 120 seconds, one Merrymen could not route, or one whose price impact the agent would refuse |
 | gap | (entries) the token's quoted price is more than `max_quote_gap_pct` (1%) from the stock price the plan uses: the token is not tracking the chart, or it is not one share |
 
@@ -115,7 +116,8 @@ How the numbers work:
 - **Daily loss** counts the full max loss of every entry proposed or filled
   today, win or lose, as trader-broker logged it. A proposal still waiting for
   the owner counts; one that expired, was refused or was cancelled does not.
-  A proposal that failed counts, because Merrymen may have traded it anyway.
+  A proposal that failed counts, because Merrymen may have traded it anyway,
+  and so does a `propose_trade` call that errored, until it is settled.
 - **The window** is New York time, worked out in the tool (daylight saving
   included), never from the computer's clock zone. Weekends and NYSE holidays
   are closed. On a 1:00 p.m. early close the window ends 3 hours earlier too.

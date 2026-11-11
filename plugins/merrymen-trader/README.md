@@ -82,8 +82,11 @@ Merrymen returns an approval link, you approve, and `get_proposal` reports
   instead of Alpaca's `place_stock_order`, with one idempotency key per yes, and
   records `proposed`, then `confirmed`, `paper_filled`, `refused`, `failed`,
   `expired`, `cancelled` or `rejected`. A proposal waiting for you counts
-  against today's limits. One that failed after it was proposed may still have
-  traded, so it keeps counting and is never proposed again blind.
+  against today's limits. A `propose_trade` call that timed out may have made
+  a proposal, so it counts too and is retried only with the same idempotency
+  key. A proposal that failed may still have traded: it keeps counting and is
+  never proposed again blind. A fill is applied to the portfolio once per
+  proposal id, and recording it can be resumed after a crash.
 - **Dollar amounts, not shares.** `trader-budget` sizes a USDG amount to the
   cent. Its limits include the agent's signed per-trade limit and the
   owner-order cap, each less 5% (Merrymen applies them to the closing sell

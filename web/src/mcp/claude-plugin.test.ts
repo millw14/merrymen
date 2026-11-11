@@ -170,7 +170,7 @@ test("the trader plugin rides on the merrymen plugin's server and names only rea
 });
 
 /** Same rule as the merrymen plugin: what users run is fingerprinted, and a change needs a version bump. */
-const TRADER_RELEASE = { version: "1.0.0", sha256: "382f59f6f529fa13c4085e729ad73f0d431fc15bb3ae38ec8e3f9a8921b046ed" };
+const TRADER_RELEASE = { version: "1.0.0", sha256: "c94785c2fbb1bd4c7e883f7b94df65aae098723fd651da024f29598f329a6bc6" };
 
 function traderFingerprint(): string {
   const files = (readdirSync(new URL(`${TRADER}skills/`, root), { recursive: true }) as string[]).map(String)

@@ -319,7 +319,36 @@ class Fingerprint(unittest.TestCase):
         self.assertNotEqual(risk.fingerprint(o), risk.fingerprint(dict(o, token=IMPOSTOR)))
         self.assertNotEqual(risk.fingerprint(o), risk.fingerprint(dict(o, agent="shogun")))
         self.assertEqual(risk.fingerprint(o), ticket.fingerprint(o))
-        self.assertEqual(risk.fingerprint(o), risk.fingerprint(dict(o, why="changed", plan={})))
+        self.assertEqual(risk.fingerprint(o), risk.fingerprint(dict(o, why="changed")))
+
+    def test_the_plans_stop_and_target_are_bound(self):
+        # Merrymen holds no stop order, so the stop lives in the plan: a wider stop after a PASS is a new order
+        _, o = sized()
+        for k, v in (("stop", 340.0), ("target", 400.0), ("entry", 360.0)):
+            moved = dict(o, plan=dict(o["plan"], **{k: v}))
+            self.assertNotEqual(risk.fingerprint(o), risk.fingerprint(moved), k)
+            self.assertEqual(risk.fingerprint(moved), ticket.fingerprint(moved), k)
+        self.assertNotEqual(risk.fingerprint(o), risk.fingerprint(dict(o, plan={})))
+        self.assertEqual(risk.fingerprint(o), risk.fingerprint(dict(o, plan=dict(o["plan"], setup="flag"))))
+
+    def test_alpaca_fingerprints_do_not_move(self):
+        alpaca = {"symbol": "TSLA", "side": "buy", "qty": "8", "type": "market", "time_in_force": "day",
+                  "plan": {"stop": 358.32}}
+        self.assertEqual(risk.fingerprint(alpaca), risk.fingerprint(dict(alpaca, plan={"stop": 1.0})))
+
+
+class Yes(unittest.TestCase):
+    def setUp(self):
+        _, self.o = sized()
+
+    def test_every_number_in_a_yes_must_be_on_the_ticket(self):
+        ok, why = ticket.parse_yes("yes buy 30 USDG of TSLA, target 370.04", self.o)
+        self.assertFalse(ok)
+        self.assertIn("30", why)
+        self.assertFalse(ticket.parse_yes("yes 23.75 and 50", self.o)[0])
+        for reply in ("yes", "yes, 23.75 USDG of TSLA", "yes TSLA 23.75, 358.32 and 370.04", "yes 23.75 TSLA, max loss 0.48"):
+            self.assertTrue(ticket.parse_yes(reply, self.o, extra=[0.48, 1])[0], reply)
+        self.assertTrue(ticket.parse_yes("yes, order 1", self.o, extra=[0.48, 1])[0])
 
 
 class Broker(unittest.TestCase):
@@ -444,13 +473,63 @@ class Broker(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("never propose it again blind", label)
 
-    def test_a_failed_call_can_be_tried_again(self):
+    def test_a_failed_call_is_settled_with_the_same_key(self):
+        # a timeout may have made a proposal: no new key, no second proposal, and it counts meanwhile
         self.run_cli("approve", "--index", "1", "--reply", "yes", "--now", NOW)
-        self.run_cli("result", "--index", "1", "--status", "failed", "--note", "timeout", "--now", NOW)
+        key = self.state()[-1]["idempotency_key"]
+        code, out = self.run_cli("result", "--index", "1", "--status", "failed", "--note", "timeout", "--now", NOW)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.state()[-1]["status"], "call_failed")
+        self.assertIn('"idempotency_key": "%s"' % key, out)
+        self.assertEqual(len(risk.placed_today({"orders": self.state()}, "2026-10-19")), 1)
+        res = self.risk_at("2026-10-19 10:17")
+        self.assertIn("duplicate", " ".join(res["results"][0]["reasons"]))
+        res["results"][0].update(verdict="PASS", reasons=[])           # even if the rules let it through
+        ok, label, _ = ticket.status_of(self.order, res, {"orders": self.state()}, "2026-10-19")
+        self.assertFalse(ok)
+        self.assertIn("same idempotency_key %s" % key, label)
+        code, out = self.run_cli("result", "--index", "1", "--status", "denied", "--now", "2026-10-19 10:17")
+        self.assertIn("a proposal may exist", out)
+        code, out = self.run_cli("result", "--index", "1", "--status", "failed", "--now", "2026-10-19 10:18")
+        self.assertEqual(self.state()[-1]["idempotency_key"], key)        # still the same key
+        pid = "prp_" + "12" * 16
+        code, out = self.run_cli("result", "--index", "1", "--status", "proposed", "--proposal-id", pid,
+                                 "--now", "2026-10-19 10:18")
+        self.assertEqual(code, 0, out)
+        self.assertEqual((self.state()[-1]["proposal_id"], self.state()[-1]["idempotency_key"]), (pid, key))
+
+    def test_a_denied_card_can_be_tried_again(self):
+        self.run_cli("approve", "--index", "1", "--reply", "yes", "--now", NOW)
+        self.run_cli("result", "--index", "1", "--status", "denied", "--now", NOW)
         self.assertEqual(risk.placed_today({"orders": self.state()}, "2026-10-19"), [])
         self.risk_at("2026-10-19 10:17")
         code, out = self.run_cli("show", "--now", "2026-10-19 10:17")
         self.assertIn("READY again", out)
+
+    def test_recording_a_fill_can_be_resumed_and_never_doubles(self):
+        self.run_cli("approve", "--index", "1", "--reply", "yes", "--now", NOW)
+        pid = "prp_" + "34" * 16
+        self.run_cli("result", "--index", "1", "--status", "proposed", "--proposal-id", pid, "--now", NOW)
+        broken = os.path.join(self.p["orders"], "portfolio.json")      # a file's child: the write fails
+        fill = ["--filled-qty", "0.0651", "--filled-price", "364.95"]
+        with self.assertRaises(OSError):
+            self.run_cli("result", "--index", "1", "--status", "paper_filled", *fill, "--portfolio", broken,
+                         "--now", "2026-10-19 10:18")
+        self.assertEqual(self.state()[-1]["status"], "paper_filled")    # the outcome is on disk
+        self.assertFalse(os.path.exists(self.p["portfolio"]))
+        for _ in range(2):                                               # resumed, then a harmless repeat
+            code, out = self.run_cli("result", "--index", "1", "--status", "paper_filled", *fill,
+                                     "--portfolio", self.p["portfolio"], "--now", "2026-10-19 10:19")
+            self.assertEqual(code, 0, out)
+            self.assertIn("Resumed", out)
+        with open(self.p["portfolio"]) as fh:
+            pf = json.load(fh)
+        self.assertEqual(pf["positions"][0]["shares"], 0.0651)
+        self.assertEqual(pf["applied_fills"], [pid])
+        self.assertEqual(sum(1 for r in self.state() if r.get("fill_ref") == pid), 1)
+        code, out = self.run_cli("result", "--index", "1", "--status", "paper_filled", "--filled-qty", "0.07",
+                                 "--filled-price", "364.95", "--portfolio", self.p["portfolio"], "--now", "2026-10-19 10:20")
+        self.assertIn("differs from the fill already recorded", out)
 
     def test_a_refused_proposal_stays_done(self):
         self.run_cli("approve", "--index", "1", "--reply", "yes", "--now", NOW)
@@ -461,14 +540,21 @@ class Broker(unittest.TestCase):
         code, out = self.run_cli("show", "--now", "2026-10-19 10:21")
         self.assertIn("DONE: refused", out)
 
+    def hold(self, shares):
+        with open(self.p["portfolio"], "w") as fh:
+            json.dump({"cash": 100, "positions": [{"ticker": "TSLA", "shares": shares,
+                                                   "lots": [{"date": "2026-10-19", "shares": shares, "cost": 70}]}]}, fh)
+
     def test_flatten_sells_the_holding_and_respects_the_per_trade_limit(self):
+        self.hold(0.0651)
+
         def flat(value):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = ticket.main(["flatten", "--symbol", "TSLA", "--value-usdg", value, "--orders", self.p["orders"],
                                     "--config", self.p["config"], "--plan", self.p["plan"],
                                     "--mm-tokens", self.p["tokens"], "--mm-agent", self.p["agent"],
-                                    "--now", "2026-10-19 15:55"])
+                                    "--portfolio", self.p["portfolio"], "--now", "2026-10-19 15:55"])
             with open(self.p["orders"]) as fh:
                 return code, out.getvalue(), json.load(fh)["orders"][0]
         code, out, o = flat("20.10")
@@ -477,6 +563,34 @@ class Broker(unittest.TestCase):
         code, out, o = flat("26.40")                         # worth more than the $25 per-trade limit
         self.assertEqual(o["notional"], "25.00")
         self.assertIn("PART ONLY", out)
+        self.flat = flat
+
+    def test_each_part_of_a_multi_part_exit_is_its_own_order(self):
+        self.test_flatten_sells_the_holding_and_respects_the_per_trade_limit()
+        os.remove(self.p["portfolio"])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(ticket.main(["flatten", "--symbol", "TSLA", "--value-usdg", "75", "--orders",
+                                          self.p["orders"], "--config", self.p["config"], "--mm-tokens",
+                                          self.p["tokens"], "--mm-agent", self.p["agent"], "--portfolio",
+                                          self.p["portfolio"]]), 1)             # nothing recorded: no ticket
+        self.hold(0.2)                                       # $75 under a $25 cap: three parts
+        _, _, first = self.flat("75.00")
+        _, _, again = self.flat("74.90")                     # the same part, a moment later: the same order
+        self.assertEqual((first["notional"], first["holding"]), ("25.00", "0.2"))
+        self.assertEqual(ticket.fingerprint(first), ticket.fingerprint(again))
+        self.hold(0.1315)                                    # the first part filled and was recorded
+        _, _, second = self.flat("50.00")
+        self.assertEqual(second["notional"], "25.00")
+        self.assertNotEqual(ticket.fingerprint(first), ticket.fingerprint(second))
+        # a ticket made before the fill was recorded no longer matches what is held
+        with open(self.p["portfolio"]) as fh:
+            pf = json.load(fh)
+        r = checked(first, now="2026-10-19 15:56", portfolio=pf, quotes=[],
+                    ag=agent(status__observed_at="2026-10-19T19:55:00Z", controls__observed_at="2026-10-19T19:55:00Z"))
+        self.assertIn("run ticket.py flatten again", " ".join(r["reasons"]))
+        r = checked(second, now="2026-10-19 15:56", portfolio=pf, quotes=[],
+                    ag=agent(status__observed_at="2026-10-19T19:55:00Z", controls__observed_at="2026-10-19T19:55:00Z"))
+        self.assertEqual(r["verdict"], "PASS", r["reasons"])
 
 
 class Docs(unittest.TestCase):

@@ -119,14 +119,20 @@ needs Claude Code (the scripts run locally).
    One order per question. Never offer "yes to all".
 4. Run `ticket.py approve --index N --reply "<the user's reply, word for word>"`.
    If it prints "Not recorded", the reply was not an explicit yes for this
-   order (for example "sure", "yes to all", or a yes that names a different
-   stock or amount). Ask again. Never turn a reply into a yes yourself.
+   order (for example "sure", "yes to all", or a yes with any number or stock
+   that is not on this ticket). Ask again. Never turn a reply into a yes yourself.
 5. Only after "Recorded your yes", call `propose_trade` with exactly the JSON
    it printed, idempotency key included (a retried call then never makes a
    second proposal). Claude's permission card appears: allow it once, or deny.
 6. Record it: `ticket.py result --index N --status proposed --proposal-id <id>
    --approval-url <approval_url>`, or `--status denied` if the card was
-   denied, or `--status failed --note "..."` if the call itself failed.
+   denied (the call never ran). If the call errored or timed out, record
+   `--status failed --note "..."`: it may have made a proposal anyway, so it
+   counts against today's limits and the ticket is not offered again. Call
+   `propose_trade` again with exactly the same arguments and the SAME
+   idempotency key (it prints them): Merrymen returns the proposal the failed
+   call made, or makes it now. Record that as `--status proposed`. Never ask
+   for a new yes to get a new key; that could leave two proposals to approve.
 7. Give the user the `approval_url`. They sign in to Merrymen and approve or
    decline it there; it expires 15 minutes after it was made. Approval
    re-quotes a buy and refuses it if the price moved past the quoted minimum
@@ -137,14 +143,18 @@ needs Claude Code (the scripts run locally).
    - `confirmed` (on chain) or `paper_filled` (practice): `ticket.py result
      --index N --status confirmed|paper_filled --filled-qty Q --filled-price P`,
      the token amount and the USD price per token from `get_proposal`'s result
-     or the matching `get_trades` row. That records it in `trader/portfolio.json`.
+     or the matching `get_trades` row. The outcome and the fill are saved first,
+     then applied to `trader/portfolio.json` once per proposal id. If anything
+     stops in between, run the same command again: it finishes the accounting
+     and never applies a fill twice.
    - `refused`, `expired`, `cancelled` or `rejected`: `--status` that. Nothing traded.
    - `failed`: `--status failed`. Merrymen also calls an outcome it could not
      confirm failed, so it may have traded: check `get_trades` and
      `get_portfolio` before anything else. It keeps counting against today's
      limits and is never proposed again blind.
-   A proposal that ended without a trade (expired, cancelled, a failed call)
-   can be tried again only with a fresh quote, a new trader-risk PASS and a new yes.
+   A proposal known to have traded nothing (expired, cancelled, or a card
+   denied before the call ran) can be tried again only with a fresh quote, a
+   new trader-risk PASS and a new yes.
 9. To withdraw a proposal the owner has not approved, or an approved trade the
    agent has not picked up: `cancel_proposal` (Claude's card asks), then
    `get_proposal` and record the outcome.
@@ -163,7 +173,11 @@ owner approves in Merrymen, so it can fill well past the stop. Say so plainly.
      for that value plus 1% (Merrymen sells at most what the agent holds, so
      this sells all of it), never over the signed per-trade limit. trader-budget
      kept entries 5% under that limit so this fits; after a bigger rise it says
-     PART ONLY: sell the rest the same way after the first part fills.
+     PART ONLY: record that part's fill, then flatten again for the rest. The
+     ticket carries the holding it was made from (from `trader/portfolio.json`,
+     so the buy's fill must be recorded first): each part is its own order, a
+     retry of the same part is the same order, and trader-risk blocks a ticket
+     whose holding no longer matches.
   3. Refresh `trader/merrymen/agent.json`, `quote_trade` the sell, save it, `/trader-risk`.
      A sell of a token the agent holds is never blocked by the daily limits or
      the entry window.

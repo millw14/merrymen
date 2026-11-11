@@ -45,7 +45,10 @@ ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
                  "order_class", "take_profit_limit_price", "stop_loss_stop_price",
                  "stop_loss_limit_price", "advanced_instructions")
-FP_FIELDS = ALPACA_FIELDS + ("venue", "agent", "token")   # same as trader-risk/check.py
+# Same as trader-risk/check.py. holding: the token amount a flatten ticket was made from, so each
+# part of a multi-part exit is its own order once the previous part's fill is recorded.
+FP_FIELDS = ALPACA_FIELDS + ("venue", "agent", "token", "holding")
+PLAN_FP_FIELDS = ("entry", "stop", "target")
 STRING_FIELDS = ("qty", "notional", "limit_price", "stop_price", "trail_price", "trail_percent",
                  "take_profit_limit_price", "stop_loss_stop_price", "stop_loss_limit_price")
 TIF_WORDS = {"day": "good for today", "gtc": "good until canceled", "opg": "at the open",
@@ -144,21 +147,30 @@ def rec_day(rec):
 # ---------------------------------------------------------------- the order
 
 def fingerprint(order):
-    """Same function as trader-risk/check.py: identifies the exact order."""
+    """Same function as trader-risk/check.py: identifies the exact order.
+
+    A Merrymen order keeps its stop and target in the plan (Merrymen holds no stop order), so the
+    plan's entry, stop and target are part of it: editing them after a PASS needs a new check."""
     core = {k: order[k] for k in FP_FIELDS if k in order and order[k] is not None}
+    plan = order.get("plan") if isinstance(order.get("plan"), dict) else {}
+    if str(order.get("venue", "")).lower() == "merrymen":
+        bound = {k: plan[k] for k in PLAN_FP_FIELDS if plan.get(k) is not None}
+        if bound:
+            core["plan"] = bound
     blob = json.dumps(core, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 # Merrymen: what can follow a yes. proposed = propose_trade returned a proposal for the owner to
-# approve in Merrymen; the rest are get_proposal's outcomes (denied = Claude's own card was denied).
+# approve in Merrymen; the rest are get_proposal's outcomes (denied = Claude's own card was denied,
+# so the call never ran). call_failed = the propose_trade call errored or timed out: a proposal may
+# exist anyway, so it is settled only by calling again with the SAME idempotency key, which returns it.
 MM_PENDING = ("proposed",)
 MM_FILLED = ("confirmed", "paper_filled")
 MM_ENDED = ("refused", "failed", "expired", "cancelled", "rejected", "denied")
-# A new check and a new yes may try again after these. "failed" only when the propose_trade call
-# itself failed: a proposal that failed may have traded (Merrymen: result.outcome_unknown).
-MM_RETRY = ("expired", "cancelled", "failed", "denied")
-PLACED = ("placed",) + MM_PENDING + MM_FILLED
+# Only these are known to have traded nothing, so only these may be tried again with a new key.
+MM_RETRY = ("expired", "cancelled", "denied")
+PLACED = ("placed", "call_failed") + MM_PENDING + MM_FILLED
 PROPOSAL_ID = re.compile(r"^prp_[0-9a-f]{32}$")
 
 
@@ -298,6 +310,11 @@ def plain(order, loss=None):
 
 def amount_numbers(order):
     nums = []
+    if is_merrymen(order):
+        plan = order.get("plan") or {}
+        for k in ("entry", "stop", "target", "qty", "max_loss"):
+            if _f(plan.get(k)) is not None:
+                nums.append(_f(plan[k]))
     for k in ("notional", "qty", "limit_price", "stop_loss_stop_price", "take_profit_limit_price",
               "stop_loss_limit_price"):
         if order.get(k) is not None:
@@ -334,9 +351,11 @@ def parse_yes(reply, order, batch_symbols=(), extra=()):
     nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", raw)]
     if nums:
         want = amount_numbers(order) + [float(x) for x in extra if x is not None]
-        if not any(abs(n - w) < 0.005 for n in nums for w in want):
+        odd = [n for n in nums if not any(abs(n - w) < 0.005 for w in want)]
+        if odd:
+            # every number must be one the ticket shows: "yes buy 30, target 370.04" is not a yes to 23.75
             return False, "the reply says %s, but this order is %s" % (
-                ", ".join(_str_num(n) for n in nums), plain(order))
+                ", ".join(_str_num(n) for n in odd), plain(order))
     return True, "explicit yes for %s" % plain(order)
 
 
@@ -384,6 +403,10 @@ def status_of(order, risk, state, today):
             return False, ("PROPOSED at %s: waiting for the owner to approve it in Merrymen (%s); "
                            "get_proposal %s for the status" % (rec.get("at"), rec.get("approval_url") or "approval_url",
                                                                rec.get("proposal_id"))), rv
+        if is_merrymen(order) and st == "call_failed":
+            return False, ("CALL FAILED at %s: propose_trade may have made a proposal anyway. Call it again with "
+                           "exactly the same idempotency_key %s (Merrymen returns that proposal if it exists), then "
+                           "record --status proposed" % (rec.get("at"), rec.get("idempotency_key"))), rv
         if is_merrymen(order) and st == "failed" and rec.get("after") == "proposed":
             return False, ("FAILED after it was proposed: it may have traded. Check get_proposal's result, "
                            "get_trades and get_portfolio before anything else; never propose it again blind"), rv
@@ -482,10 +505,15 @@ def ticket_json(order, idx, cfg, risk, state, today):
 
 # ---------------------------------------------------------------- fills -> portfolio
 
-def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
+def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date, ref=None):
     """Record a filled order in trader/portfolio.json: cash and shares, with a
-    cost-basis lot per buy (oldest lots are relieved first on a sell)."""
+    cost-basis lot per buy (oldest lots are relieved first on a sell).
+
+    ref (a Merrymen proposal id) makes it idempotent: a fill already applied under that ref is
+    not applied twice, so recording an outcome can be resumed after a crash."""
     pf = read_json(portfolio_path, "portfolio", required=False)
+    if ref and pf is not None and ref in (pf.get("applied_fills") or []):
+        return pf
     if pf is None:
         budget = cfg.get("budget")
         if not budget:
@@ -526,17 +554,24 @@ def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
         if pos["shares"] <= 1e-9:
             pf["positions"].remove(pos)
         pf["cash"] = round(float(pf.get("cash", 0)) + cost, 2)
+    if ref:
+        pf.setdefault("applied_fills", []).append(ref)
     write_json(portfolio_path, pf)
     return pf
 
 
-def log_fill(state_path, now, today, symbol, side, qty, price):
-    """A fill in the log, so trader-risk can count day trades (a buy and a sell the same day)."""
+def log_fill(state_path, now, today, symbol, side, qty, price, ref=None):
+    """A fill in the log, so trader-risk can count day trades (a buy and a sell the same day).
+    With a ref, logged once however often it is called."""
     state = load_state(state_path)
-    state.setdefault("orders", []).append({
-        "at": ny_iso(now), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
-        "qty": _str_num(float(qty)), "price": float(price),
-        "plain": "%s %s %s at %s" % (side.upper(), _str_num(float(qty)), symbol.upper(), _p(price))})
+    if ref and any(r.get("fill_ref") == ref for r in state.get("orders", [])):
+        return
+    rec = {"at": ny_iso(now), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
+           "qty": _str_num(float(qty)), "price": float(price),
+           "plain": "%s %s %s at %s" % (side.upper(), _str_num(float(qty)), symbol.upper(), _p(price))}
+    if ref:
+        rec["fill_ref"] = ref
+    state.setdefault("orders", []).append(rec)
     write_json(state_path, state)
 
 
@@ -595,7 +630,7 @@ def cmd_approve(a):
     if not ready:
         raise TicketError("order %d is not ready: %s" % (a.index, label))
     shown = (rv or {}).get("max_loss") if is_merrymen(order) else None
-    ok, why = parse_yes(a.reply, order, [o.get("symbol", "") for o in orders], [shown])
+    ok, why = parse_yes(a.reply, order, [o.get("symbol", "") for o in orders], [shown, a.index])
     if not ok:
         print("Not recorded: %s. Ask the user again with the ticket for order %d." % (why, a.index))
         return 1
@@ -625,7 +660,8 @@ def cmd_approve(a):
         print(json.dumps(call, indent=2))
         print("Then: ticket.py result --index %d --status proposed --proposal-id prp_... --approval-url URL"
               % a.index)
-        print("(or --status denied if Claude's card was denied, --status failed --note ... if the call failed).")
+        print("(or --status denied if Claude's card was denied before the call ran; --status failed --note ... if")
+        print("the call errored or timed out: it may still have made a proposal, so it is retried with this same key).")
         return 0
     if str(cfg.get("broker", "alpaca")).lower() == "ibkr":
         print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
@@ -688,26 +724,36 @@ def cmd_result(a):
 def _result_merrymen(a, order, fp, rec, cfg, state, today, now):
     st = a.status
     prev = rec.get("status") if rec else None
+    mm = merrymen_module()
     if st == "placed":
         raise TicketError("a Merrymen order is never \"placed\" by Claude: record --status proposed with the "
                           "proposal id, then the outcome get_proposal reports")
+    if st in MM_FILLED and prev == st:
+        return _resume_fill(a, order, rec, cfg, today, now)
     if st == "proposed":
-        if prev != "approved":
+        if prev not in ("approved", "call_failed"):
             raise TicketError("order %d has no yes recorded (latest: %s); propose_trade follows a yes" % (a.index, prev))
         if not a.proposal_id or not PROPOSAL_ID.match(a.proposal_id):
             raise TicketError("--proposal-id wants the id propose_trade returned (prp_ and 32 hex digits)")
-    elif st in ("denied",) or (st == "failed" and prev == "approved"):
+    elif st == "denied":
         if prev != "approved":
-            raise TicketError("order %d: %s follows a yes, the latest record is %s" % (a.index, st, prev))
+            raise TicketError("order %d: denied follows a yes whose call never ran (latest: %s). After a failed "
+                              "call, a proposal may exist: call propose_trade again with the same key to find out, "
+                              "then cancel_proposal if it is not wanted" % (a.index, prev))
+    elif st == "failed" and prev in ("approved", "call_failed"):
+        st = "call_failed"            # the call itself failed: a proposal may still exist
     else:
         if prev not in MM_PENDING:
             raise TicketError("order %d has no proposal waiting (latest: %s); an outcome follows --status proposed"
                               % (a.index, prev))
         if a.proposal_id and a.proposal_id != rec.get("proposal_id"):
             raise TicketError("that is proposal %s; order %d is %s" % (a.proposal_id, a.index, rec.get("proposal_id")))
-    if st in MM_FILLED and not (a.filled_qty and a.filled_price):
-        raise TicketError("a fill needs --filled-qty (tokens) and --filled-price (USD per token) from "
-                          "get_proposal's result or get_trade")
+    if st in MM_FILLED:
+        if not (a.filled_qty and a.filled_price):
+            raise TicketError("a fill needs --filled-qty (tokens) and --filled-price (USD per token) from "
+                              "get_proposal's result or get_trade")
+        if (_f(a.filled_qty) or 0) <= 0 or (_f(a.filled_price) or 0) <= 0:
+            raise TicketError("a fill needs a positive qty and price")
     new = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
            "side": rec["side"], "plain": rec["plain"], "status": st, "broker": "merrymen", "after": prev}
     for k in ("kind", "max_loss", "stop", "notional", "idempotency_key", "proposal_id", "approval_url"):
@@ -719,6 +765,10 @@ def _result_merrymen(a, order, fp, rec, cfg, state, today, now):
         new["approval_url"] = a.approval_url
     if a.note:
         new["note"] = a.note
+    if st in MM_FILLED:
+        new["filled_qty"], new["filled_price"] = _str_num(float(a.filled_qty)), float(a.filled_price)
+    # The outcome, with the fill, is on disk before the portfolio changes: if anything stops in
+    # between, the same command again finishes the accounting (_resume_fill) and never does it twice.
     state["orders"].append(new)
     write_json(a.state, state)
     print("Recorded order %d as %s." % (a.index, st))
@@ -728,12 +778,13 @@ def _result_merrymen(a, order, fp, rec, cfg, state, today, now):
         print("record the outcome: --status confirmed|paper_filled (with --filled-qty and --filled-price),")
         print("or refused, failed, expired, cancelled or rejected. Until then it counts against today's limits.")
     elif st in MM_FILLED:
-        apply_fill(a.portfolio, cfg, rec["symbol"], rec["side"], a.filled_qty, a.filled_price, today)
-        log_fill(a.state, now, today, rec["symbol"], rec["side"], a.filled_qty, a.filled_price)
-        print("Added the fill to %s%s." % (a.portfolio, " (paper: no real money moved)" if st == "paper_filled" else ""))
-        if rec.get("kind") == "entry":
-            print("The stop and the target are not orders at Merrymen: trader-alerts watches them "
-                  "(alerts.py add --from-plan).")
+        return _resume_fill(a, order, new, cfg, today, now, fresh=True)
+    elif st == "call_failed":
+        print("The call may have made a proposal anyway, so this counts against today's limits until it is")
+        print("settled. Call propose_trade again with exactly the same arguments and key:")
+        print(json.dumps(mm.propose_input(order, rec.get("idempotency_key")), indent=2))
+        print("Merrymen returns the proposal the failed call made, or makes it now. Then --status proposed. If it")
+        print("is not wanted any more, cancel_proposal it and record --status cancelled.")
     elif st == "failed" and prev == "proposed":
         print("It may have traded anyway (Merrymen marks an outcome it could not confirm as failed). Check")
         print("get_proposal's result, get_trades and get_portfolio. It keeps counting against today's limits.")
@@ -741,6 +792,29 @@ def _result_merrymen(a, order, fp, rec, cfg, state, today, now):
         print("Nothing traded. To try again: a fresh quote_trade, trader-risk, and a new yes.")
     else:
         print("Nothing traded.")
+    return 0
+
+
+def _resume_fill(a, order, rec, cfg, today, now, fresh=False):
+    """Apply a recorded fill to trader/portfolio.json and the log, once, keyed by the proposal id."""
+    ref = rec.get("proposal_id")
+    qty, price = rec.get("filled_qty"), rec.get("filled_price")
+    if qty is None or price is None or not ref:
+        raise TicketError("order %d is recorded as %s without its fill or proposal id; nothing to resume"
+                          % (a.index, rec.get("status")))
+    for given, kept, what in ((a.filled_qty, qty, "--filled-qty"), (a.filled_price, price, "--filled-price")):
+        if given is not None and abs(float(given) - float(kept)) > 1e-9:
+            raise TicketError("%s %s differs from the fill already recorded for %s (%s)" % (what, given, ref, kept))
+    if a.proposal_id and a.proposal_id != ref:
+        raise TicketError("that is proposal %s; order %d is %s" % (a.proposal_id, a.index, ref))
+    apply_fill(a.portfolio, cfg, rec["symbol"], rec["side"], qty, price, today, ref=ref)
+    log_fill(a.state, now, today, rec["symbol"], rec["side"], qty, price, ref=ref)
+    paper = " (paper: no real money moved)" if rec.get("status") == "paper_filled" else ""
+    print(("Added the fill to %s%s." if fresh else "Resumed: the fill for %s is in %s%s, once.")
+          % ((a.portfolio, paper) if fresh else (ref, a.portfolio, paper)))
+    if fresh and rec.get("kind") == "entry":
+        print("The stop and the target are not orders at Merrymen: trader-alerts watches them "
+              "(alerts.py add --from-plan).")
     return 0
 
 
@@ -773,6 +847,12 @@ def flatten_merrymen(a, cfg, sym, now, today):
     item, why = mm.resolve_token(tmap, sym)
     if item is None:
         raise TicketError(why)
+    pf = read_json(a.portfolio, "portfolio", required=False) or {}
+    held = sum(_f(p.get("shares", p.get("qty"))) or 0 for p in pf.get("positions", [])
+               if str(p.get("ticker") or p.get("symbol") or "").upper() == sym)
+    if held <= 1e-9:
+        raise TicketError("no %s in %s: record the buy's fill first (ticket.py result ... --filled-qty, or "
+                          "ticket.py fill), so the sell is checked against what the agent holds" % (sym, a.portfolio))
     plan = read_json(a.plan, "plan", required=False) or {}
     flat_by = (plan.get("flat_by") if str(plan.get("symbol", "")).upper() == sym else None) \
         or cfg.get("flat_by") or "15:55"
@@ -785,9 +865,11 @@ def flatten_merrymen(a, cfg, sym, now, today):
     for name, cap in caps:
         if amount > cap + 0.005:
             amount, part = mm.floor_cent(cap), name
+    # "holding" ties the ticket to the recorded holding: after one part of a multi-part exit fills and is
+    # recorded, the next flatten is a new order; a retry of the same part is the same order.
     order = {"symbol": sym, "side": "sell", "notional": "%.2f" % amount,
              "type": "market", "time_in_force": "day", "venue": "merrymen", "agent": agent["agent"],
-             "token": item["address"],
+             "token": item["address"], "holding": _str_num(round(held, 6)),
              "why": "flat by %s New York: sells the %s day trade before the close (value from get_portfolio)"
              % (flat_by, sym)}
     old = read_json(a.orders, "orders", required=False)
