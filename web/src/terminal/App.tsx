@@ -685,7 +685,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
         {selectedWallet === "invalid" && <section className="perps-desk"><h1>Unknown wallet selection</h1><p>No wallet controls were opened.</p><a href="/home">Return to Spot</a></section>}
         {selectedWallet === "perps" && <PerpsWorkspace key={`${epoch}:${screen.kind}`} screen={screen.kind} offered={perps}/>}
         {!isolatedWallet && screen.kind === "grant" && <p><a href="/withdraw?wallet=perps">Perps withdrawal &amp; recovery</a></p>}
-        {screen.kind === "solana" && <SolanaScreen key={epoch}/>}
+        {screen.kind === "solana" && <SolanaScreen key={epoch} onSignedIn={invalidateOwnerView}/>}
         {!isolatedWallet && screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {!isolatedWallet && screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings} agentDown={agentDown}/>}
         {!isolatedWallet && screen.kind === "grant" && <Wallet key={epoch}/>}

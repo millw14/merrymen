@@ -4,33 +4,46 @@ import { solanaPaperAgentId } from "../../../packages/core/src/solana";
 import { getIdentityStore } from "../../../worker/src/identity-store";
 import { tenantOf, requestOrigin, issueChallengeNonce, consumeChallengeNonce } from "./auth";
 import { verifyPrivyToken, privyTokenOf } from "./privy";
+import { SOLANA_SIGN_IN_MISMATCH, solanaAccountLogin, type SolanaAccountLogin, type SolanaSignInRefusal } from "./solana-sign-in";
 
 export class SolanaWebError extends Error {
-  constructor(readonly status: number, message: string) { super(message); this.name = "SolanaWebError"; }
+  /** `signIn`: why the sign-in itself was refused, by code (solana-sign-in.ts), so the page can offer the way out. */
+  constructor(readonly status: number, message: string, readonly signIn: SolanaSignInRefusal | null = null) { super(message); this.name = "SolanaWebError"; }
 }
 export interface SolanaPrincipal { tenant: `0x${string}`; did: string }
 export interface SolanaAuthDependencies {
   tenant(req: Request): `0x${string}` | null;
   verifyToken(token: string | null): Promise<{ ok: true; identity: { did: string } } | { ok: false }>;
   tenantForDid(did: string): Promise<`0x${string}` | null>;
+  /** How the session's tenant signs in, to word a mismatch. Never consulted to decide one; absent, the answer names no login. */
+  accountLogin?(tenant: `0x${string}`): Promise<SolanaAccountLogin | null>;
 }
 const defaults: SolanaAuthDependencies = {
   tenant: tenantOf,
   verifyToken: verifyPrivyToken,
   tenantForDid: async (did) => (await getIdentityStore().byDid(did))?.tenant ?? null,
+  accountLogin: async (tenant) => solanaAccountLogin(await getIdentityStore().get(tenant)),
 };
 /** Both the existing cookie and a current Privy identity must name this tenant. */
 export async function authenticateSolana(req: Request, dependencies = defaults): Promise<SolanaPrincipal> {
   const tenant = dependencies.tenant(req);
-  if (!tenant) throw new SolanaWebError(401, "Sign in before opening your Solana account.");
+  if (!tenant) throw new SolanaWebError(401, "Sign in before opening your Solana account.", { problem: "signed-out", account: null, loginHasAccount: false });
   const result = await dependencies.verifyToken(privyTokenOf(req));
-  if (!result.ok) throw new SolanaWebError(401, "Your sign-in expired. Sign in again.");
+  if (!result.ok) throw new SolanaWebError(401, "Your sign-in expired. Sign in again.", { problem: "expired", account: null, loginHasAccount: false });
   // This client expectation only narrows a verified identity. It can never
   // substitute for the token or select another tenant during account changes.
   const expectedDid = req.headers.get("x-merrymen-privy-did");
   if (expectedDid && expectedDid !== result.identity.did) throw new SolanaWebError(403, "Your signing account changed. Refresh before continuing.");
   const mapped = await dependencies.tenantForDid(result.identity.did);
-  if (mapped !== tenant) throw new SolanaWebError(403, "Your sign-in does not match this account.");
+  if (mapped !== tenant) {
+    // REFUSED, WHATEVER FOLLOWS. The two lookups below only word the way out:
+    // which login the session's account uses, and whether this wallet
+    // sign-in's login has an account of its own. The requester holds the
+    // session for that account and the token for this login, so neither tells
+    // them about anyone else. A lookup that fails names no login.
+    const account = dependencies.accountLogin ? await dependencies.accountLogin(tenant).catch(() => null) : null;
+    throw new SolanaWebError(403, SOLANA_SIGN_IN_MISMATCH, { problem: "mismatch", account, loginHasAccount: mapped !== null });
+  }
   const origin = req.headers.get("origin");
   if (origin && origin !== requestOrigin(req) && !sameLoopbackOrigin(req, origin)) throw new SolanaWebError(403, "Cross-origin Solana requests are not allowed.");
   return { tenant, did: result.identity.did };

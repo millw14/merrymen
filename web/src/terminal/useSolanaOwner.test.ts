@@ -13,6 +13,8 @@ let did: string, authenticated: boolean, ready: boolean;
 let wallets: Array<{ address: string }>, accounts: Array<Record<string, unknown>>;
 let signed: string[], creates: number, exported: Array<{ address: string } | undefined>;
 let signing: (input: { wallet: { address: string } }) => Promise<{ signature: Uint8Array }>;
+/** The Privy user's login fields, and how often the hook signed Privy out. */
+let profile: Record<string, unknown> = {}, logouts = 0;
 const OWNER = "So11111111111111111111111111111111111111112";
 before(() => {
   const path = fileURLToPath(new URL("./useSolanaOwner.ts", import.meta.url));
@@ -20,7 +22,8 @@ before(() => {
   const original = loader._load;
   const interception = mock.method(loader, "_load", function (this: typeof loader, id: string, parent: { filename?: string }, isMain: boolean) {
     if (parent?.filename === path) {
-      if (id === "@privy-io/react-auth") return { usePrivy: () => ({ authenticated, ready: true, user: { id: did, linkedAccounts: accounts }, getAccessToken: async () => "token" }) };
+      if (id === "@privy-io/react-auth") return { usePrivy: () => ({ authenticated, ready: true, user: { id: did, linkedAccounts: accounts, ...profile }, getAccessToken: async () => "token",
+        logout: async () => { logouts++; } }) };
       if (id === "@privy-io/react-auth/solana") return {
         useWallets: () => ({ wallets, ready }), useCreateWallet: () => ({ createWallet: async () => { creates++; return {}; } }),
         useExportWallet: () => ({ exportWallet: async (options?: { address: string }) => { exported.push(options); } }),
@@ -37,7 +40,7 @@ before(() => {
 function Probe() { hook = useSolanaOwner(); return React.createElement("span", null, hook.address ?? "none"); }
 const render = () => ui.render(React.createElement(Probe));
 beforeEach(() => {
-  ui = testDom(); did = "did:privy:alice"; authenticated = true; ready = true; creates = 0; signed = []; exported = [];
+  ui = testDom(); did = "did:privy:alice"; authenticated = true; ready = true; creates = 0; signed = []; exported = []; profile = {}; logouts = 0;
   wallets = [{ address: "external" }, { address: OWNER }];
   accounts = [{ type: "wallet", chainType: "solana", walletClientType: "privy", address: OWNER }];
   signing = async (input) => { signed.push(input.wallet.address); return { signature: new Uint8Array(64).fill(4) }; };
@@ -82,4 +85,16 @@ test("key export opens Privy's window for the exact embedded owner only", async 
   accounts = [{ type: "wallet", chainType: "solana", walletClientType: "privy", address: OWNER }]; wallets = [{ address: OWNER }];
   authenticated = false; await render(); await assert.rejects(hook.exportKey());
   assert.deepEqual(exported, [{ address: OWNER }]);
+});
+test("the wallet sign-in names its own login, and signing it out ends only the wallet sign-in", async () => {
+  profile = { twitter: { username: "jamesc" }, email: { address: "james@example.com" } };
+  await render(); assert.equal(hook.login, "X (@jamesc)", "X first, as the sign-in records it");
+  profile = { email: { address: "james@example.com" } };
+  await render(); assert.equal(hook.login, "email (james@example.com)");
+  profile = {};
+  await render(); assert.equal(hook.login, null, "a login it cannot name is not guessed");
+  authenticated = false; profile = { email: { address: "james@example.com" } };
+  await render(); assert.equal(hook.login, null, "signed out, there is no login to name");
+  await hook.signOutWallet();
+  assert.equal(logouts, 1);
 });
