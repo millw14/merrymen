@@ -39,6 +39,8 @@ import { agoText, durationText } from "./dossier";
 import { chainFromUserText, isRobinhoodToken, shortAddress } from "./identity";
 import type { FomoQuestionPlan } from "./intent";
 import type {
+  GhostConfigData,
+  GhostPnlData,
   OpportunitiesData,
   RankingTokenRow,
   RankingsData,
@@ -468,7 +470,8 @@ function isTraderTool(tool: FomoToolName): boolean {
  */
 export function needsDirectMessage(env: FomoEnvelope): boolean {
   if (env.tool === "fomo_get_research_status" || env.tool === "fomo_watch_coin" || env.tool === "fomo_unwatch_coin") return true;
-  if (env.tool === "fomo_tail_trader" || env.tool === "fomo_untail_trader" || env.tool === "fomo_extend_tail") return true;
+  if (env.tool === "fomo_tail_trader" || env.tool === "fomo_untail_trader" || env.tool === "fomo_extend_tail" || env.tool === "fomo_record_tail_mark") return true;
+  if (env.tool === "fomo_ghost_config" || env.tool === "fomo_ghost_enter" || env.tool === "fomo_ghost_pnl") return true;
   if (isTraderTool(env.tool)) return false;
   if (env.subject?.kind === "trader") return true;
   // A leaderboard cut to Merrymen's watched traders names the watch list itself (chat.ts deflects it first).
@@ -1206,6 +1209,20 @@ function body(env: FomoEnvelope, audience: Audience, now: number, view: View = N
     case "fomo_untail_trader":
     case "fomo_extend_tail":
       return bodyTail(env as FomoEnvelope<TailData | UntailData | ExtendTailData>, audience, now);
+    case "fomo_record_tail_mark":
+      // Child-driven bookkeeping for the tail leaderboard: the child reads
+      // the envelope, never the owner, so there is no body to render.
+      return [];
+    case "fomo_ghost_enter":
+      // Child-driven bookkeeping like the mark: the child reads the
+      // envelope, never the owner.
+      return [];
+    case "fomo_ghost_config":
+    case "fomo_ghost_pnl": {
+      const d = env.data as GhostConfigData | GhostPnlData | null;
+      if (!d) return [];
+      return "words" in d ? [d.words] : d.lines;
+    }
   }
 }
 

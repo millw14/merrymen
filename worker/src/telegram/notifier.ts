@@ -129,7 +129,18 @@ export interface NotifierDeps {
    * records it durably and is awaited BEFORE the send, which happens only on
    * true (at most once). Absent: no tails here.
    */
-  tailNotices?: () => Promise<Array<{ html: string; keyboard?: InlineKeyboard; claim(): Promise<boolean> }>>;
+  tailNotices?: () => Promise<
+    Array<{
+      html: string;
+      keyboard?: InlineKeyboard;
+      claim(): Promise<boolean>;
+      /** A told buy's entry mark: recorded after the send below lands, never before. */
+      mark?: { eventId: string; traderUserId: string; handle: string | null; tokenId: string; entryPrice8: string; entryAtMs: number; entryPool: string };
+      recordMark?(): Promise<boolean>;
+      ghost?: { eventId: string; traderUserId: string; handle: string | null; tokenId: string; entryPrice8: string; scoutBudgetMicro: number | null };
+      recordGhost?(): Promise<boolean>;
+    }>
+  >;
 }
 
 const LOOP_GAP_MS = 15_000;
@@ -1182,6 +1193,18 @@ export function startNotifier(deps: NotifierDeps): NotifierHandle {
           if (!(await n.claim())) break;
           const sent = await sendMessage({ token }, chatId, n.html, { disablePreview: true, ...(n.keyboard && n.keyboard.length > 0 ? { keyboard: n.keyboard } : {}) });
           if (sent.ok) console.log("[notify] fomo tail notice sent");
+          // The mark shares the notice's at-most-once semantics: recorded
+          // only for a landed send, retried tells record nothing twice.
+          if (sent.ok && n.mark && n.recordMark) {
+            const recorded = await n.recordMark();
+            if (recorded) console.log("[notify] fomo tail call mark recorded");
+          }
+          // The ghost shares the mark's at-most-once semantics: opened only
+          // for a landed send, and the tool opens nothing twice.
+          if (sent.ok && n.ghost && n.recordGhost) {
+            const entered = await n.recordGhost();
+            if (entered) console.log("[notify] fomo ghost position opened");
+          }
         }
       } catch (e) {
         console.log(`[notify] fomo tail notices skipped (${e instanceof Error ? e.name : "error"})`);
