@@ -457,7 +457,7 @@ def evaluate(rules, quotes, status, state, now_utc):
                 sym = str(r.get("symbol") or "").upper()
                 if sym:
                     msg += (" If %s is still open, close it: trader-broker flatten --symbol %s builds the sell "
-                            "ticket, then trader-risk and your yes." % (sym, sym))
+                            "ticket, then trader-risk, your yes and your approval in Merrymen." % (sym, sym))
                 rings.append({"id": rid, "symbol": sym, "message": msg})
                 rung[rid] = stamp
             continue
@@ -616,9 +616,9 @@ def cmd_check(a):
         for e in errors:
             print("error: " + e)
         if rings:
-            print("An alert is information, not an order. A bracket's stop-loss and take-profit already sit at "
-                  "the broker: check get_open_position and record any fill (ticket.py fill). To close a "
-                  "position yourself: ticket.py flatten, then trader-risk and your yes.")
+            print("An alert is information, not an order. Merrymen holds no resting stop or target: to sell, "
+                  "get_portfolio for the value, ticket.py flatten, then trader-risk, your yes and your approval "
+                  "in Merrymen. Until then nothing is sold.")
     return 0 if rings else 1
 
 
@@ -642,7 +642,7 @@ def cmd_add(a):
         for r in new:
             print("Added %s: %s" % (r["id"], json.dumps(r)))
         print("Run alerts.py check every few minutes while the trade is open (a scheduled task or /loop). "
-              "Free quotes are delayed; the broker's bracket orders are what actually stop you out.")
+              "Free quotes are delayed, and Merrymen holds no stop order: a ringing stop is your cue to sell.")
         return 0
     if a.opening_bell:
         rule = {"id": a.id or "opening-bell", "type": "opening_bell"}

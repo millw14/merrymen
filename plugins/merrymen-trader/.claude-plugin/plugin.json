@@ -1,0 +1,14 @@
+{
+  "name": "merrymen-trader",
+  "displayName": "Merrymen Day Trader",
+  "version": "1.0.0",
+  "description": "The day-trader skill pack, trading through your own Merrymen agent instead of Alpaca: scan charts, track news, time the entry and exit, replay the odds, size to your max loss and the agent's signed limits, then propose the trade for you to approve in Merrymen. Paper by default; Claude never moves funds on its own.",
+  "author": {
+    "name": "Merrymen",
+    "url": "https://merrymen.dev"
+  },
+  "homepage": "https://github.com/millw14/merrymen/tree/main/plugins/merrymen-trader",
+  "repository": "https://github.com/millw14/merrymen",
+  "license": "MIT",
+  "keywords": ["merrymen", "day-trading", "stock-tokens", "robinhood-chain", "paper-trading", "claude-skills"]
+}

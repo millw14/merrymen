@@ -155,7 +155,9 @@ def fingerprint(order):
 MM_PENDING = ("proposed",)
 MM_FILLED = ("confirmed", "paper_filled")
 MM_ENDED = ("refused", "failed", "expired", "cancelled", "rejected", "denied")
-MM_RETRY = ("expired", "cancelled", "failed", "denied")   # a new check and a new yes may try again
+# A new check and a new yes may try again after these. "failed" only when the propose_trade call
+# itself failed: a proposal that failed may have traded (Merrymen: result.outcome_unknown).
+MM_RETRY = ("expired", "cancelled", "failed", "denied")
 PLACED = ("placed",) + MM_PENDING + MM_FILLED
 PROPOSAL_ID = re.compile(r"^prp_[0-9a-f]{32}$")
 
@@ -380,6 +382,9 @@ def status_of(order, risk, state, today):
             return False, ("PROPOSED at %s: waiting for the owner to approve it in Merrymen (%s); "
                            "get_proposal %s for the status" % (rec.get("at"), rec.get("approval_url") or "approval_url",
                                                                rec.get("proposal_id"))), rv
+        if is_merrymen(order) and st == "failed" and rec.get("after") == "proposed":
+            return False, ("FAILED after it was proposed: it may have traded. Check get_proposal's result, "
+                           "get_trades and get_portfolio before anything else; never propose it again blind"), rv
         if is_merrymen(order) and st in MM_RETRY and _risk_after(risk, rec):
             return True, "READY again: the last proposal %s, and trader-risk passed it again since" % st, rv
         return False, "DONE: %s at %s" % (st, rec.get("at")), rv
@@ -704,7 +709,7 @@ def _result_merrymen(a, order, fp, rec, cfg, state, today, now):
         raise TicketError("a fill needs --filled-qty (tokens) and --filled-price (USD per token) from "
                           "get_proposal's result or get_trade")
     new = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
-           "side": rec["side"], "plain": rec["plain"], "status": st, "broker": "merrymen"}
+           "side": rec["side"], "plain": rec["plain"], "status": st, "broker": "merrymen", "after": prev}
     for k in ("kind", "max_loss", "stop", "notional", "idempotency_key", "proposal_id", "approval_url"):
         if rec.get(k) is not None:
             new[k] = rec[k]
@@ -729,6 +734,9 @@ def _result_merrymen(a, order, fp, rec, cfg, state, today, now):
         if rec.get("kind") == "entry":
             print("The stop and the target are not orders at Merrymen: trader-alerts watches them "
                   "(alerts.py add --from-plan).")
+    elif st == "failed" and prev == "proposed":
+        print("It may have traded anyway (Merrymen marks an outcome it could not confirm as failed). Check")
+        print("get_proposal's result, get_trades and get_portfolio. It keeps counting against today's limits.")
     elif st in MM_RETRY:
         print("Nothing traded. To try again: a fresh quote_trade, trader-risk, and a new yes.")
     else:

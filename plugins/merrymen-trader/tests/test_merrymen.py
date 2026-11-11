@@ -32,7 +32,7 @@ PLAN = {"symbol": "TSLA", "side": "buy", "date": "2026-10-19", "setup": "orb", "
         "entry": 364.18, "stop": 358.32, "target": 370.04, "flat_by": "15:55",
         "stop_label": "the opening range's midpoint", "target_label": "1R"}
 
-CFG = {"broker": "merrymen", "merrymen_agent": "alan", "paper": True, "budget": 200, "cash_buffer_pct": 10,
+CFG = {"broker": "merrymen", "merrymen_agent": "robin", "paper": True, "budget": 200, "cash_buffer_pct": 10,
        "max_position_pct": 50, "max_order_usd": 50, "min_order_usd": 1, "max_loss_per_trade_usd": 2,
        "max_daily_loss_usd": 6, "max_trades_per_day": 3, "max_orders_per_day": 10, "min_reward_risk": 1.0,
        "require_stop": True, "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55",
@@ -50,13 +50,13 @@ TOKENS = {"list": "established", "ranking": "registry", "total": 3, "next_cursor
     {"origin": "index_pool", "rank": 3, "address": IMPOSTOR, "symbol": "TSLA", "name": "Tesla (pool)"},
 ]}
 
-STATUS = {"agent": "alan", "name": "Alan", "account": "0xab7bde", "chain_id": 4663, "status": "active",
+STATUS = {"agent": "robin", "name": "Robin", "account": "0x0000000000000000000000000000000000000001", "chain_id": 4663, "status": "active",
           "mode": "paper", "mode_explained": "Practising with simulated money.", "live_blocker": None,
           "strategy": "steady-basket", "permission": {"granted_at": "2026-10-15T09:00:00Z",
                                                        "expires_at": "2026-10-22T09:00:00Z", "expired": False,
                                                        "days_left": 2},
           "observed_at": "2026-10-19T14:13:00Z"}
-CONTROLS = {"agent": "alan",
+CONTROLS = {"agent": "robin",
             "signed_limits": {"per_trade_usdg": 25, "per_day_usdg": 100, "max_drawdown_pct": 5,
                               "max_ops_per_day": 20, "granted_at": "2026-10-15T09:00:00Z",
                               "expires_at": "2026-10-22T09:00:00Z", "enforced_where": "..."},
@@ -66,7 +66,7 @@ CONTROLS = {"agent": "alan",
                               "take_profit_bps": None, "chat_action_ceiling_usdg": 25, "tick_seconds": 60,
                               "launch_buying": {"enabled": False, "per_entry_usdg": None, "max_positions": None}},
             "controls": [], "observed_at": "2026-10-19T14:13:00Z"}
-AGENT = {"agent": "alan", "status": STATUS, "controls": CONTROLS}
+AGENT = {"agent": "robin", "status": STATUS, "controls": CONTROLS}
 
 
 def quote(amount=25.0, price=364.9, side="buy", token=TSLA, at="2026-10-19T14:14:30Z", ok=True, quoted=True):
@@ -129,10 +129,17 @@ class Tokens(unittest.TestCase):
         self.assertIn("TSLA", mm.token_map(pages))
 
 
+class Universe(unittest.TestCase):
+    def test_only_tradable_tokens_reach_the_scanner(self):
+        lines, left = mm.universe_lines(tmap())
+        self.assertEqual(lines, ["TSLA|Tesla"])
+        self.assertEqual(left, ["NVDA (paused)"])
+
+
 class Agent(unittest.TestCase):
     def test_snapshot(self):
         a = agent()
-        self.assertEqual((a["agent"], a["mode"], a["status"]), ("alan", "paper", "active"))
+        self.assertEqual((a["agent"], a["mode"], a["status"]), ("robin", "paper", "active"))
         self.assertEqual((a["per_trade_usdg"], a["remaining_usdg"], a["ceiling_usdg"]), (25, 100, 25))
         self.assertEqual(a["expires_at"].isoformat(), "2026-10-22T09:00:00")
         self.assertTrue(a["ids_agree"])
@@ -150,7 +157,7 @@ class Budget(unittest.TestCase):
         self.assertEqual(s["qty"], 0.068647)
         self.assertEqual(s["max_loss"], 0.41)            # 25 x 5.86 / 364.18 = 0.402, up to the cent
         self.assertEqual(o["notional"], "25.00")
-        self.assertEqual((o["venue"], o["agent"], o["token"]), ("merrymen", "alan", TSLA.lower()))
+        self.assertEqual((o["venue"], o["agent"], o["token"]), ("merrymen", "robin", TSLA.lower()))
         for alpaca in ("qty", "order_class", "stop_loss_stop_price", "take_profit_limit_price", "limit_price"):
             self.assertNotIn(alpaca, o)
         self.assertEqual(o["plan"]["stop"], 358.32)
@@ -281,7 +288,7 @@ class Risk(unittest.TestCase):
         pf = {"cash": 175, "positions": [{"ticker": "TSLA", "shares": 0.068647,
                                           "lots": [{"date": "2026-10-19", "shares": 0.068647, "cost": 25}]}]}
         sell = {"symbol": "TSLA", "side": "sell", "notional": "20.00", "type": "market", "time_in_force": "day",
-                "venue": "merrymen", "agent": "alan", "token": TSLA.lower()}
+                "venue": "merrymen", "agent": "robin", "token": TSLA.lower()}
         r = checked(sell, now="2026-10-19 15:56", portfolio=pf, quotes=[],
                     ag=agent(status__observed_at="2026-10-19T19:55:00Z", controls__observed_at="2026-10-19T19:55:00Z"))
         self.assertEqual((r["verdict"], r["kind"]), ("PASS", "exit"), r["reasons"])
@@ -365,7 +372,7 @@ class Broker(unittest.TestCase):
         self.assertEqual(code, 0, out)
         call = json.loads(out[out.index("{"):out.index("}") + 1])
         fp = risk.fingerprint(self.order)
-        self.assertEqual(call, {"agent": "alan", "side": "buy", "token": TSLA.lower(), "amount_usdg": 25.0,
+        self.assertEqual(call, {"agent": "robin", "side": "buy", "token": TSLA.lower(), "amount_usdg": 25.0,
                                 "idempotency_key": "trader-20261019-%s-1" % fp, "note": self.order["why"]})
         code, out = self.run_cli("result", "--index", "1", "--status", "placed", "--now", NOW)
         self.assertIn("never \"placed\" by Claude", out)
@@ -407,6 +414,29 @@ class Broker(unittest.TestCase):
         self.assertIn("READY again", out)
         code, out = self.run_cli("approve", "--index", "1", "--reply", "yes", "--now", "2026-10-19 10:32")
         self.assertIn("-2\"", out)                           # a new yes, a new idempotency key
+
+    def test_a_proposal_that_failed_may_have_traded(self):
+        self.run_cli("approve", "--index", "1", "--reply", "yes", "--now", NOW)
+        self.run_cli("result", "--index", "1", "--status", "proposed", "--proposal-id", "prp_" + "aa" * 16,
+                     "--now", NOW)
+        code, out = self.run_cli("result", "--index", "1", "--status", "failed", "--now", "2026-10-19 10:20")
+        self.assertIn("may have traded", out)
+        self.assertEqual(len(risk.placed_today({"orders": self.state()}, "2026-10-19")), 1)
+        res = self.risk_at("2026-10-19 10:21")
+        self.assertIn("duplicate: a buy TSLA was already placed today", " ".join(res["results"][0]["reasons"]))
+        # and if the rules were loosened, the ticket still refuses to offer it again
+        res["results"][0].update(verdict="PASS", reasons=[])
+        ok, label, _ = ticket.status_of(self.order, res, {"orders": self.state()}, "2026-10-19")
+        self.assertFalse(ok)
+        self.assertIn("never propose it again blind", label)
+
+    def test_a_failed_call_can_be_tried_again(self):
+        self.run_cli("approve", "--index", "1", "--reply", "yes", "--now", NOW)
+        self.run_cli("result", "--index", "1", "--status", "failed", "--note", "timeout", "--now", NOW)
+        self.assertEqual(risk.placed_today({"orders": self.state()}, "2026-10-19"), [])
+        self.risk_at("2026-10-19 10:17")
+        code, out = self.run_cli("show", "--now", "2026-10-19 10:17")
+        self.assertIn("READY again", out)
 
     def test_a_refused_proposal_stays_done(self):
         self.run_cli("approve", "--index", "1", "--reply", "yes", "--now", NOW)

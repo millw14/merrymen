@@ -20,6 +20,7 @@ agent executes it. A pre-flight that passes is not permission to trade.
 
     python3 merrymen.py summary             # what the three files say, in plain words
     python3 merrymen.py summary --json
+    python3 merrymen.py universe            # trader/merrymen/universe.txt for trader-scanner
 """
 
 import argparse
@@ -467,6 +468,23 @@ def propose_input(order, key):
     return out
 
 
+def universe_lines(tmap):
+    """SYMBOL|Name lines for trader-scanner: the stock tokens this pack can trade.
+    Left out: a symbol with two registry addresses, and a paused token."""
+    out, left = [], []
+    for sym in sorted(tmap):
+        items = tmap[sym]
+        if len({t["address"] for t in items}) > 1:
+            left.append("%s (two registry addresses)" % sym)
+        elif items[0].get("paused") is True:
+            left.append("%s (paused)" % sym)
+        elif not TICKER.match(sym):
+            left.append("%s (not a stock ticker)" % sym)
+        else:
+            out.append("%s|%s" % (sym, str(items[0].get("name") or sym).replace("|", " ").replace("\n", " ")))
+    return out, left
+
+
 # ---------------------------------------------------------------- summary
 
 def summary(tokens_path=TOKENS_PATH, agent_path=AGENT_PATH, now_utc=None):
@@ -486,7 +504,29 @@ def main(argv=None):
     p.add_argument("--tokens", default=TOKENS_PATH)
     p.add_argument("--agent", default=AGENT_PATH)
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("universe", help="write the stock tokens as a trader-scanner universe")
+    p.add_argument("--tokens", default=TOKENS_PATH)
+    p.add_argument("--out", default=os.path.join("trader", "merrymen", "universe.txt"))
     a = ap.parse_args(argv)
+    if a.cmd == "universe":
+        try:
+            lines, left = universe_lines(token_map(read_doc(a.tokens, "token list")))
+        except MerrymenError as e:
+            print("merrymen.py: %s" % e, file=sys.stderr)
+            return 1
+        if not lines:
+            print("merrymen.py: no tradable stock tokens in %s" % a.tokens, file=sys.stderr)
+            return 1
+        d = os.path.dirname(a.out)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        print("Wrote %d Merrymen stock tokens to %s: %s" % (len(lines), a.out, ", ".join(l.split("|")[0] for l in lines)))
+        if left:
+            print("Left out: %s" % ", ".join(left))
+        print("Scan them with: scan.py orb --universe %s" % a.out)
+        return 0
     if a.cmd != "summary":
         ap.print_help()
         return 1

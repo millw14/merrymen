@@ -3,14 +3,13 @@ import os
 import re
 import unittest
 
-from _load import ROOT
+from _load import ROOT, PLUGIN, FIX
 
-# v2, the day-trading pack: the eleven folders the reel's repo card shows
+# the eleven skills of upstream's v2 pack, under skills/
 SKILLS = ["trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
           "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
           "trader-pelosi"]
-ABOUT = ("11 Claude skills for day trading: scan thousands of charts, track breaking news, time every "
-         "entry and exit, and replay every outcome before you risk a dollar.")
+UPSTREAM = "3d0f4ef6986f4984b7c6bd46f7ff4f87744c3abd"
 # skills on the way to an order carry the safety block
 ORDER_PATH = ["trader-scanner", "trader-entry", "trader-exit", "trader-timemachine", "trader-budget",
               "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts"]
@@ -25,7 +24,7 @@ def frontmatter(path):
 
 
 def every_text_file():
-    for base, dirs, files in os.walk(ROOT):
+    for base, dirs, files in os.walk(PLUGIN):
         dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
         for f in files:
             if f.endswith((".md", ".py", ".json", ".csv", ".txt", ".xml")) or f == "LICENSE":
@@ -33,14 +32,17 @@ def every_text_file():
 
 
 class Repo(unittest.TestCase):
-    def test_eleven_skill_folders_at_the_root(self):
+    def test_eleven_skill_folders(self):
         found = sorted(d for d in os.listdir(ROOT)
                        if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
         self.assertEqual(found, sorted(SKILLS))
+        self.assertEqual(sorted(os.listdir(ROOT)), sorted(SKILLS))
 
-    def test_root_matches_the_reel(self):
-        root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+    def test_plugin_layout(self):
+        root = sorted(d for d in os.listdir(PLUGIN) if d not in ("__pycache__",))
+        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "skills", "tests"]))
+        # no MCP server of its own: the merrymen plugin carries the one connection
+        self.assertFalse(os.path.exists(os.path.join(PLUGIN, ".mcp.json")))
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:
@@ -51,50 +53,60 @@ class Repo(unittest.TestCase):
             self.assertGreater(len(text.splitlines()), 60, s)
 
     def test_order_path_skills_carry_the_safety_rule(self):
+        with open(os.path.join(ROOT, "trader-broker", "SKILL.md"), encoding="utf-8") as fh:
+            broker = fh.read()
+        block = broker[broker.index("## Safety"):]
+        self.assertIn("approved the proposal in Merrymen", " ".join(block.split()))
         for s in ORDER_PATH:
             _, text = frontmatter(os.path.join(ROOT, s, "SKILL.md"))
             low = " ".join(text.lower().split())
             self.assertIn("not financial advice", low, s)
             self.assertIn("yes", low, s)
+            self.assertIn("merrymen", low, s)
+            if s != "trader-pelosi":
+                self.assertEqual(text[text.index("## Safety"):], block, s)
 
-    def test_plugin_manifest_points_at_the_root_skills(self):
-        with open(os.path.join(ROOT, ".claude-plugin", "plugin.json")) as fh:
+    def test_plugin_manifest(self):
+        with open(os.path.join(PLUGIN, ".claude-plugin", "plugin.json")) as fh:
             plugin = json.load(fh)
-        self.assertEqual(plugin["name"], "day-trader-skill")
-        self.assertEqual(plugin["skills"], "./")
-        self.assertEqual(plugin["description"], ABOUT)
-        with open(os.path.join(ROOT, ".claude-plugin", "marketplace.json")) as fh:
-            market = json.load(fh)
-        self.assertEqual(market["name"], "day-trader-skill")
-        self.assertEqual(market["plugins"][0]["name"], "day-trader-skill")
+        self.assertEqual(plugin["name"], "merrymen-trader")
+        self.assertRegex(plugin["version"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual(plugin["license"], "MIT")
+        self.assertNotIn("skills", plugin)              # skills/ is where Claude Code looks by default
+        self.assertNotIn("mcpServers", plugin)
 
-    def test_readme_carries_the_reel_copy(self):
-        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
+    def test_readme_installs_and_credits(self):
+        with open(os.path.join(PLUGIN, "README.md"), encoding="utf-8") as fh:
             readme = " ".join(fh.read().split())
-        self.assertTrue(readme.startswith("# The Day Trader skill"))
-        for line in (ABOUT,
-                     "https://github.com/Jakeschincariol/day-trader-skill install skill",
-                     "/plugin marketplace add Jakeschincariol/day-trader-skill",
-                     "/plugin install day-trader-skill@day-trader-skill",
-                     "## Fine print"):
+        self.assertTrue(readme.startswith("# Merrymen Day Trader"))
+        for line in ("/plugin marketplace add https://github.com/millw14/merrymen.git",
+                     "/plugin install merrymen@merrymen", "/plugin install merrymen-trader@merrymen",
+                     "https://github.com/Jakeschincariol/day-trader-skill", UPSTREAM,
+                     "Suggest trades for you to approve", "## Fine print", "Not financial advice"):
             self.assertIn(line, readme)
         for s in SKILLS:
-            self.assertIn("/" + s, readme, s)
+            self.assertIn("/merrymen-trader:" + s, readme, s)
+
+    def test_license_is_upstreams(self):
+        with open(os.path.join(PLUGIN, "LICENSE"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertTrue(text.startswith("MIT License"))
+        self.assertIn("Copyright (c) 2026 Jake Schincariol", text)
 
     def test_no_em_dashes_and_no_personal_email(self):
         for path in every_text_file():
             with open(path, encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
-            rel = os.path.relpath(path, ROOT)
+            rel = os.path.relpath(path, PLUGIN)
             if not rel.startswith(os.path.join("tests", "fixtures")):  # fixtures are real data, kept as published
                 self.assertNotIn("\u2014", text, rel)
             self.assertNotIn("jakeschincariol" + "@" + "gmail.com", text, rel)  # built, so this file passes too
 
     def test_no_v1_only_skill_is_left_behind(self):
         for path in every_text_file():
-            rel = os.path.relpath(path, ROOT)
+            rel = os.path.relpath(path, PLUGIN)
             if rel.startswith("tests" + os.sep) or rel == "README.md":
-                continue  # the README points v1 users to the v1 commit
+                continue
             with open(path, encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
             for old in V1_ONLY:
@@ -119,20 +131,26 @@ class Repo(unittest.TestCase):
                         self.assertNotIn(bad, src, "%s/%s" % (s, f))
 
     def test_day_trading_limits_ship_in_the_example_config(self):
-        with open(os.path.join(FIX, "trader-budget", "config.alpaca.json")) as fh:
+        with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:
             cfg = json.load(fh)
         for k in ("max_loss_per_trade_usd", "max_daily_loss_usd", "max_trades_per_day",
-                  "min_reward_risk", "require_stop", "no_entries_after", "flat_by"):
+                  "min_reward_risk", "require_stop", "no_entries_after", "flat_by", "merrymen_agent",
+                  "reserve_exit_budget", "max_quote_gap_pct"):
             self.assertIn(k, cfg, k)
         self.assertIs(cfg["require_stop"], True)
         self.assertIs(cfg.get("allow_short", False), False)
         self.assertIs(cfg.get("allow_margin", False), False)
 
     def test_paper_trading_is_the_default(self):
-        with open(os.path.join(FIX, "trader-budget", "config.alpaca.json")) as fh:
+        with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:
             cfg = json.load(fh)
         self.assertIs(cfg["paper"], True)
+        self.assertEqual(cfg["broker"], "merrymen")
         self.assertIs(cfg.get("allow_options", False), False)
+
+    def test_upstream_alpaca_config_is_a_test_fixture_only(self):
+        self.assertTrue(os.path.exists(os.path.join(FIX, "trader-budget", "config.alpaca.json")))
+        self.assertFalse(os.path.exists(os.path.join(ROOT, "trader-broker", "claude_desktop_config.example.json")))
 
 
 if __name__ == "__main__":

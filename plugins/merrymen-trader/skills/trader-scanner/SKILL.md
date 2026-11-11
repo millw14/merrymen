@@ -50,6 +50,25 @@ reason is one plain line).
 | `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `hits[]`. trader-news and trader-entry read `hits[].symbol` |
 | `trader/config.json` | read by `orb`: `no_entries_after` (default 15:30) |
 
+## The Merrymen universe (scan what you can trade)
+
+This pack trades only Merrymen's stock tokens: a few dozen US stocks and ETFs
+on Robinhood Chain (TSLA, NVDA, AAPL, SPY, QQQ and others). A setup on any
+other chart cannot be traded here. So scan those first: after trader-broker's
+step 1 saved `discover_tokens` to `trader/merrymen/tokens.json`,
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/../trader-broker/merrymen.py" universe   # -> trader/merrymen/universe.txt
+python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --universe trader/merrymen/universe.txt
+python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --universe trader/merrymen/universe.txt --at 10:15
+```
+
+It leaves out a paused token and a symbol with two registry addresses. ETFs
+are in it (the Nasdaq universe below leaves them out); the scans read them
+the same way. The charts are the stocks' own Yahoo bars, not the tokens': the
+tokens follow the stocks through Chainlink, and trader-risk checks the
+token's quoted price against the chart before any order.
+
 ## The universe
 
 `universe` downloads `nasdaqlisted.txt` and `otherlisted.txt` from
@@ -194,10 +213,13 @@ never calls data real time, and never promises that a setup works.
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Paper by default (`"paper": true`): trader-risk blocks every order unless the Merrymen agent is in
+  practice (paper) mode. Going live is the owner's own decision, made in Merrymen and in their own config.
+- Nothing in this pack trades except trader-broker, and only through four gates: trader-risk passed that
+  exact order today, the user typed an explicit yes for that one order in the chat, Claude's own
+  permission card for propose_trade was allowed once, and the owner approved the proposal in Merrymen.
+  The agent's signed limits still apply after that. Never set the Merrymen trade tools to "Always allow".
+- Merrymen holds no resting stop or target order: getting out is a sell the owner approves, so it can
+  fill well past the stop. No options, margin, short selling or leverage.
+- Claude never sees wallet keys, never signs, never turns on live trading and never changes a signed
+  limit. Sign-in happens on Merrymen's own page, never in the chat.

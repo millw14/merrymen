@@ -20,9 +20,11 @@ argument-hint: "[ticker] [price]"
 
 Price Alerts watches the numbers so the user does not have to stare at a
 chart. An alert is information, never an order: when a stop alert rings,
-nothing is sold by this skill. With a bracket order the stop-loss and the
-take-profit already sit at the broker and do the work; the alerts tell the
-user what happened and when it is time to be flat.
+nothing is sold by this skill. Merrymen holds no resting stop or target
+order, so these alerts are what watches the plan: when the stop, the target
+or the flat-by time rings, getting out is a sell the user says yes to and the
+owner approves in Merrymen (trader-broker flatten). Between a check and that
+approval the price keeps moving, so a sale can fill well past the stop.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
@@ -81,9 +83,9 @@ close, so "flat by close" at 15:55 rings at 12:55 on those days.
   and for checking a size, not for timing an order. The broker's price is the
   one that fills. Each price in `trader/prices.json` keeps its quote time, and
   trader-risk only uses one under 15 minutes old.
-- If both are down, read the price from the broker connector (Alpaca
-  `get_stock_snapshot`, IBKR `get_price_snapshot`) and write it into
-  `trader/prices.json` as `{"as_of": "...Z", "prices": {"TSLA": 366.48}}`.
+- If both are down, read the stock token's Chainlink price from Merrymen
+  (`get_token` for its address) and write it into `trader/prices.json` as
+  `{"as_of": "...Z", "prices": {"TSLA": 366.48}}`, with the price's own time.
 
 ## The NYSE clock
 
@@ -109,11 +111,16 @@ holiday list is unknown.
    scheduled task or `/loop`. Each run fetches only the tickers in today's
    rules and rings each alert once. A check reads the latest delayed quote;
    it is not a live feed, and a price can pass a level between two checks.
-3. Tell the user what rang in one line each. A stop or target alert means the
-   bracket order has probably filled: check `get_open_position` and record the
-   fill with trader-broker. "Flat by close" means close anything still open:
-   trader-broker `flatten`, then trader-risk, then the user's yes. Never act
-   for them.
+3. Tell the user what rang in one line each. A stop or target alert means it
+   is time to sell, now: `get_portfolio` for the holding's value, trader-broker
+   `flatten`, a fresh quote, trader-risk, the user's yes, then the owner's
+   approval in Merrymen. "Flat by close" means the same for anything still
+   open. Never act for them, and never propose from the scheduled check.
+4. Optional, for the phone: Merrymen's own `subscribe` with kind
+   `watchlist_price` (the token's address and an `below` level at the stop)
+   sends the owner a Telegram message even when Claude is not running. It
+   needs a linked Telegram and the "Manage your alerts" permission at sign-in.
+   It is a message only; it sells nothing.
 
 ## Example: the reel
 
@@ -131,7 +138,8 @@ At 3:55 PM:
 
 ```
 ALERT Flat by close: it is 15:55 New York (set for 15:55), the market closes at 16:00. If TSLA is still
-open, close it: trader-broker flatten --symbol TSLA builds the sell ticket, then trader-risk and your yes.
+open, close it: trader-broker flatten --symbol TSLA builds the sell ticket, then trader-risk, your yes
+and your approval in Merrymen.
 ```
 
 It rings once. The next morning the plan's three alerts are no longer
@@ -151,10 +159,13 @@ live, and never predicts where a price is going.
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Paper by default (`"paper": true`): trader-risk blocks every order unless the Merrymen agent is in
+  practice (paper) mode. Going live is the owner's own decision, made in Merrymen and in their own config.
+- Nothing in this pack trades except trader-broker, and only through four gates: trader-risk passed that
+  exact order today, the user typed an explicit yes for that one order in the chat, Claude's own
+  permission card for propose_trade was allowed once, and the owner approved the proposal in Merrymen.
+  The agent's signed limits still apply after that. Never set the Merrymen trade tools to "Always allow".
+- Merrymen holds no resting stop or target order: getting out is a sell the owner approves, so it can
+  fill well past the stop. No options, margin, short selling or leverage.
+- Claude never sees wallet keys, never signs, never turns on live trading and never changes a signed
+  limit. Sign-in happens on Merrymen's own page, never in the chat.

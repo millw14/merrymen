@@ -377,7 +377,8 @@ def placed_today(state, today):
     for n, rec in enumerate(recs):
         last[rec.get("fingerprint") or ("#", n)] = rec
     for n, rec in enumerate(recs):
-        if last.get(rec.get("fingerprint") or ("#", n)) is rec and rec.get("status") in PLACED:
+        maybe = rec.get("status") == "failed" and rec.get("after") == "proposed"   # it may have traded
+        if last.get(rec.get("fingerprint") or ("#", n)) is rec and (rec.get("status") in PLACED or maybe):
             out.append(rec)
     return out
 
