@@ -543,7 +543,7 @@ def size_merrymen(plan, cfg, tmap, agent, budget=None, price=None, cash=None, to
     if max_order:
         limits.append({"name": "max order", "usd": max_order, "how": money(max_order)})
     limits.append({"name": "cash", "usd": b["available"], "how": b["cash_note"]})
-    for name, usd, how in mm.sizing_caps(agent, c.get("reserve_exit_budget", True)):
+    for name, usd, how in mm.sizing_caps(agent, c.get("reserve_exit_budget", True), mm.exit_room(c)):
         limits.append({"name": name, "usd": usd, "how": how})
 
     amount = max(0.0, mm.floor_cent(min(l["usd"] for l in limits)))
@@ -615,7 +615,7 @@ def merrymen_report(s, order, notes=()):
     lines.append("")
     lines.append("Limits in USDG (Merrymen buys a dollar amount; the smallest one wins):")
     for l in s["limits"]:
-        lines.append("  %-17s %-58s %10s%s" % (l["name"], l["how"], "%.2f" % max(l["usd"], 0),
+        lines.append("  %-17s %-62s %8s%s" % (l["name"], l["how"], "%.2f" % max(l["usd"], 0),
                                                 "  <- binds" if l["binds"] else ""))
     lines.append("")
     if order is None:

@@ -97,7 +97,7 @@ Merrymen's checks (`"broker": "merrymen"`). Some block any order, even a sell:
 | running | the agent is killed, expired or in error; (entries) not armed or active |
 | book | `"paper": true` and the agent is not in paper mode; the agent is idle or its mode is unknown |
 | permission | no signed permission, or it has expired; (entries) it expires before today's flat-by time, so the agent could not sell |
-| signed limits | over the signed per-trade limit or the owner-order cap; (entries) the 24-hour budget left cannot cover the buy AND the sell (`reserve_exit_budget`), or fewer than 2 operations are left |
+| signed limits | over the signed per-trade limit or the owner-order cap; (entries) within `exit_headroom_pct` (5%) of either, so the closing sell might not fit under it; the 24-hour budget left cannot cover the buy AND the sell (`reserve_exit_budget`), or fewer than 2 operations are left |
 | paused | (entries) the token is paused in the registry |
 | quote | (entries) no `quote_trade` for this exact side, token and amount, one older than 120 seconds, one Merrymen could not route, or one whose price impact the agent would refuse |
 | gap | (entries) the token's quoted price is more than `max_quote_gap_pct` (1%) from the stock price the plan uses: the token is not tracking the chart, or it is not one share |
@@ -151,25 +151,25 @@ price too old to use, an early close today.
 
 ## Example: the reel, on Merrymen
 
-The TSLA order from trader-budget (25.00 USDG) at 10:15 AM on Monday
+The TSLA order from trader-budget (23.75 USDG) at 10:15 AM on Monday
 2026-10-19, paper agent, with the token quoted at 364.90:
 
 ```
-PASS  #1 buy TSLA $25, entry
+PASS  #1 buy TSLA $23.75, entry
           token price 364.9000 vs the stock's 364.18: +0.20%; impact 12 bps; fee $0.01
-          max loss with the token's price and costs: $0.50 ($0.45 at the stop + $0.04 fees and gas, both ways)
+          max loss with the token's price and costs: $0.48 ($0.43 at the stop + $0.04 fees and gas, both ways)
           entry 364.18 (the plan's entry), stop 358.32, target 370.04: risk 5.86 a share
-          max loss $0.50 (limit $2), reward:risk 1.00 (min 1)
+          max loss $0.48 (limit $2), reward:risk 1.00 (min 1)
           today before this: 0 of 3 trades, $0 of $6 daily loss
         ~ the stop 358.32 is in the plan only, not at the broker: set a stop alert (trader-alerts: alerts.py add --from-plan)
 
-1 passed, 0 blocked at 2026-10-19 10:15 New York. Cash after the passed orders: $175 (paper account).
+1 passed, 0 blocked at 2026-10-19 10:15 New York. Cash after the passed orders: $176.25 (paper account).
 ```
 
 The same order against a live agent, with the token quoted at 370.00:
 
 ```
-BLOCK #1 buy TSLA $25, entry
+BLOCK #1 buy TSLA $23.75, entry
         - merrymen: your config says paper ("paper": true) but the agent trades REAL funds (mode live). Switch the agent to practice in Merrymen, or decide to go live yourself
         - merrymen: the token trades +1.60% from the stock price 364.18 the plan uses (limit 1%): the token is not tracking the chart, or is not one share
 ```

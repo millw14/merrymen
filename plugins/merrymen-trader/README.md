@@ -68,10 +68,11 @@ alerts: stop, target, flat by the close -> broker flatten -> the same gates     
 
 The reel's trade, TSLA on Monday 2026-10-19, on a paper agent with a 25 USDG
 per-trade limit: entry 364.18 at 10:15, stop 358.32, target 370.04. The
-budget sizes 25.00 USDG (the agent's per-trade limit binds; your $2 max loss
-would allow $124.29). The quote puts the token at 364.90, 0.20% over the
-stock. trader-risk measures the loss from that price with fees and gas both
-ways ($0.50, under your $2) and passes it. You say yes, allow the card,
+budget sizes 23.75 USDG: the agent's per-trade limit binds, less 5% so the
+sell that closes it still fits under that limit (your $2 max loss would allow
+$124.29). The quote puts the token at 364.90, 0.20% over the stock.
+trader-risk measures the loss from that price with fees and gas both ways
+($0.48, under your $2) and passes it. You say yes, allow the card,
 Merrymen returns an approval link, you approve, and `get_proposal` reports
 `paper_filled`.
 
@@ -84,9 +85,11 @@ Merrymen returns an approval link, you approve, and `get_proposal` reports
   against today's limits. One that failed after it was proposed may still have
   traded, so it keeps counting and is never proposed again blind.
 - **Dollar amounts, not shares.** `trader-budget` sizes a USDG amount to the
-  cent. Its limits include the agent's signed per-trade limit, the owner-order
-  cap, and half of what is left of its 24-hour budget; Merrymen counts sells
-  in that figure, so the other half is kept for the sell that closes the trade.
+  cent. Its limits include the agent's signed per-trade limit and the
+  owner-order cap, each less 5% (Merrymen applies them to the closing sell
+  too, which is worth more if the price rose), and half of what is left of
+  the 24-hour budget; Merrymen counts sells in that figure, so the other half
+  is kept for the sell.
 - **Merrymen's checks in trader-risk.** These block an order: the wrong agent,
   a limits snapshot over 10 minutes old, a paper config meeting a live agent,
   a stopped agent, a permission that expires before the flat-by time, the

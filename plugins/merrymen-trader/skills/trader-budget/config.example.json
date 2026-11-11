@@ -17,6 +17,7 @@
   "no_entries_after": "15:30",
   "flat_by": "15:55",
   "reserve_exit_budget": true,
+  "exit_headroom_pct": 5,
   "max_quote_gap_pct": 1.0,
   "merrymen_agent_max_age_minutes": 10,
   "merrymen_quote_max_age_seconds": 120,

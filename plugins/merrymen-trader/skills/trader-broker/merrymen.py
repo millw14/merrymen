@@ -40,6 +40,8 @@ QUOTES_PATH = os.path.join("trader", "merrymen", "quotes.json")
 AGENT_MAX_AGE_MINUTES = 10      # an older limits snapshot is refreshed before an order
 QUOTE_MAX_AGE_SECONDS = 120     # proposals re-quote, but the pre-flight wants today's price
 MAX_QUOTE_GAP_PCT = 1.0         # the token's price vs the stock price the plan was made on
+EXIT_HEADROOM_PCT = 5.0         # an entry stays this far under the per-trade caps, so the sell that
+                                # closes it (worth more if the price rose) still fits under them
 RUNNING = {"armed", "active"}
 STOPPED = {"killed", "expired", "error"}
 TRADING_MODES = {"paper", "live"}
@@ -196,15 +198,25 @@ def agent_snapshot(doc):
     }
 
 
-def sizing_caps(agent, reserve_exit=True):
-    """The agent's own limits as dollar caps on one entry: [(name, usd, how)]."""
+def exit_room(cfg):
+    v = _f((cfg or {}).get("exit_headroom_pct"))
+    return EXIT_HEADROOM_PCT if v is None else min(max(v, 0.0), 50.0)
+
+
+def sizing_caps(agent, reserve_exit=True, headroom_pct=EXIT_HEADROOM_PCT):
+    """The agent's own limits as dollar caps on one entry: [(name, usd, how)].
+
+    Merrymen applies the per-trade limit and the owner-order cap to a sell too, so an entry
+    sized right up to them could not be sold in one go after any rise: it stays headroom_pct under."""
     caps = []
+    keep = 1.0 - headroom_pct / 100.0
+    room = (" less %s%% so the sell fits" % _num(headroom_pct)) if headroom_pct else ""
     if agent.get("per_trade_usdg") is not None:
-        caps.append(("agent per trade", agent["per_trade_usdg"],
-                     "signed per-trade limit %s USDG" % _num(agent["per_trade_usdg"])))
+        caps.append(("agent per trade", agent["per_trade_usdg"] * keep,
+                     "signed per-trade limit %s USDG%s" % (_num(agent["per_trade_usdg"]), room)))
     if agent.get("ceiling_usdg") is not None and agent["ceiling_usdg"] > 0:
-        caps.append(("owner-order cap", agent["ceiling_usdg"],
-                     "Settings, max per chat trade %s USDG" % _num(agent["ceiling_usdg"])))
+        caps.append(("owner-order cap", agent["ceiling_usdg"] * keep,
+                     "Settings, max per chat trade %s USDG%s" % (_num(agent["ceiling_usdg"]), room)))
     left = agent.get("remaining_usdg")
     if left is not None:
         if reserve_exit:
@@ -380,6 +392,13 @@ def order_checks(order, kind, ref, stop, cfg, tmap, agent, quotes_doc, now_utc, 
         if agent["ceiling_usdg"] and amount > agent["ceiling_usdg"] + CENT:
             block.append("merrymen: %s is over the owner-order cap of %s USDG (Settings, max per chat trade)"
                          % (money(amount), _num(agent["ceiling_usdg"])))
+        if kind == "entry" and side == "buy":
+            keep = 1.0 - exit_room(cfg) / 100.0
+            caps = [c for c in (agent["per_trade_usdg"], agent["ceiling_usdg"]) if c]
+            if caps and amount > min(caps) * keep + CENT:
+                entry.append("merrymen: %s leaves the sell that closes it no room under the %s USDG per-trade cap "
+                             "if the price rises (exit_headroom_pct %s): Merrymen applies that cap to sells too"
+                             % (money(amount), _num(min(caps)), _num(exit_room(cfg))))
         left = agent["remaining_usdg"]
         if left is not None:
             need = amount * 2 if (kind == "entry" and cfg.get("reserve_exit_budget", True)) else amount
@@ -504,6 +523,7 @@ def main(argv=None):
     p.add_argument("--tokens", default=TOKENS_PATH)
     p.add_argument("--agent", default=AGENT_PATH)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--now", help="pretend it is this UTC time, e.g. 2026-10-19T14:15:00Z")
     p = sub.add_parser("universe", help="write the stock tokens as a trader-scanner universe")
     p.add_argument("--tokens", default=TOKENS_PATH)
     p.add_argument("--out", default=os.path.join("trader", "merrymen", "universe.txt"))
@@ -531,7 +551,10 @@ def main(argv=None):
         ap.print_help()
         return 1
     try:
-        s = summary(a.tokens, a.agent)
+        now = parse_utc(a.now) if a.now else None
+        if a.now and now is None:
+            raise MerrymenError("--now wants an ISO time like 2026-10-19T14:15:00Z")
+        s = summary(a.tokens, a.agent, now)
     except MerrymenError as e:
         print("merrymen.py: %s" % e, file=sys.stderr)
         return 1

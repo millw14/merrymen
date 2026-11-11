@@ -87,7 +87,7 @@ needs Claude Code (the scripts run locally).
    In `.claude/settings.json`, never put them under `allow`; to make the rule
    explicit, add them under `"permissions": {"ask": [...]}` with the full names
    `/mcp` shows for the plugin's tools.
-4. The agent: `list_agents`. If there is more than one, ask which. Put its id
+4. The agent: `list_agents`. If there is more than one, ask which. Put its `agent` id
    in `trader/config.json` as `"merrymen_agent"`. With it empty, trader-risk
    blocks every order.
 5. Check it, read only: `get_agent_status` for that agent. `mode` must be
@@ -161,8 +161,9 @@ owner approves in Merrymen, so it can fill well past the stop. Say so plainly.
   1. `get_portfolio` for the agent (its current book): the token's value in USDG.
   2. `ticket.py flatten --symbol TSLA --value-usdg <value>` writes a market sell
      for that value plus 1% (Merrymen sells at most what the agent holds, so
-     this sells all of it), never over the signed per-trade limit. If it says
-     PART ONLY, sell the rest the same way after the first part fills.
+     this sells all of it), never over the signed per-trade limit. trader-budget
+     kept entries 5% under that limit so this fits; after a bigger rise it says
+     PART ONLY: sell the rest the same way after the first part fills.
   3. Refresh `trader/merrymen/agent.json`, `quote_trade` the sell, save it, `/trader-risk`.
      A sell of a token the agent holds is never blocked by the daily limits or
      the entry window.
@@ -174,20 +175,20 @@ owner approves in Merrymen, so it can fill well past the stop. Say so plainly.
 ## Example: the reel, on Merrymen
 
 TSLA on Monday 2026-10-19 at 10:15 AM, paper agent `robin` with a signed
-per-trade limit of 25 USDG. trader-budget sized 25.00 USDG (the per-trade
-limit binds), the quote put the token at 364.90 against the stock's 364.18,
-and trader-risk passed it:
+per-trade limit of 25 USDG. trader-budget sized 23.75 USDG (the per-trade
+limit binds, less 5% so the closing sell fits under it), the quote put the
+token at 364.90 against the stock's 364.18, and trader-risk passed it:
 
 ```
 ORDER 1 of 1, PAPER (the agent's practice book), Merrymen
-  BUY 25.00 USDG of TSLA on Merrymen, market
+  BUY 23.75 USDG of TSLA on Merrymen, market
   token 0x1a1a...1a1a, agent robin
   plan: stop 358.32, target 370.04 (watched by trader-alerts; Merrymen holds no stop order)
-  max loss about $0.50 if it is sold at the stop, with the token's price and costs
-  why: opening-range breakout on TSLA: 25.00 USDG, about 0.068647 shares, bound by agent per trade
+  max loss about $0.48 if it is sold at the stop, with the token's price and costs
+  why: opening-range breakout on TSLA: 23.75 USDG, about 0.065215 shares, bound by agent per trade
   READY: trader-risk PASS, waiting for your yes
   Claude will call propose_trade with exactly (the key is set when you say yes):
-    {"agent": "robin", "side": "buy", "token": "0x1a1a...1a1a", "amount_usdg": 25.0,
+    {"agent": "robin", "side": "buy", "token": "0x1a1a...1a1a", "amount_usdg": 23.75,
      "idempotency_key": "<set at your yes>", "note": "opening-range breakout on TSLA: ..."}
   Nothing trades on that call. Merrymen returns an approval link; the owner signs in there and
   approves within 15 minutes, and the agent's signed limits still apply after that.

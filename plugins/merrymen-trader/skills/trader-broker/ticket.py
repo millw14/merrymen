@@ -240,8 +240,8 @@ def max_loss(order):
     return round(q * int(round(risk * 100)) / 100.0, 2), stop
 
 
-def plain_parts(order):
-    """The ticket in plain words, one part per line."""
+def plain_parts(order, loss=None):
+    """The ticket in plain words, one part per line. loss: trader-risk's max loss, if it has one."""
     side = str(order.get("side", "")).upper()
     sym = order.get("symbol", "?")
     if is_merrymen(order):
@@ -251,10 +251,11 @@ def plain_parts(order):
         if side == "BUY" and _f(plan.get("stop")):
             parts.append("plan: stop %s, target %s (watched by trader-alerts; Merrymen holds no stop order)"
                          % (_p(plan["stop"]), _p(plan["target"]) if _f(plan.get("target")) else "none"))
-            loss, stop = max_loss(order)
+            if loss is None:
+                loss, _ = max_loss(order)
             if loss is not None:
-                parts.append("max loss about %s if it is sold at the stop (a sale needs your approval in "
-                             "Merrymen and can fill worse)" % _money(loss))
+                parts.append("max loss about %s if it is sold at the stop, with the token's price and costs "
+                             "(a sale needs your approval in Merrymen and can fill worse)" % _money(loss))
         return parts
     typ = str(order.get("type", "market"))
     tif = TIF_WORDS.get(str(order.get("time_in_force", "day")), order.get("time_in_force"))
@@ -289,10 +290,10 @@ def plain_parts(order):
     return ["%s %s, %s, %s" % (side, what, how, tif)]
 
 
-def plain(order):
+def plain(order, loss=None):
     """BUY $1,250 of AAPL, market order, good for today
     BUY 8 TSLA, market, good for today / stop-loss 358.32 / take-profit 370.04 / max loss about $46.88 ..."""
-    return " / ".join(plain_parts(order))
+    return " / ".join(plain_parts(order, loss))
 
 
 def amount_numbers(order):
@@ -309,8 +310,9 @@ def amount_numbers(order):
     return nums
 
 
-def parse_yes(reply, order, batch_symbols=()):
-    """Is this reply an explicit yes for THIS one order? Returns (ok, why)."""
+def parse_yes(reply, order, batch_symbols=(), extra=()):
+    """Is this reply an explicit yes for THIS one order? Returns (ok, why).
+    extra: more numbers the ticket showed (trader-risk's max loss), which a yes may repeat."""
     raw = (reply or "").strip()
     if not raw:
         return False, "the reply is empty"
@@ -331,7 +333,7 @@ def parse_yes(reply, order, batch_symbols=()):
         return False, "the reply names %s, but this order is for %s" % (", ".join(sorted(named)), sym)
     nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", raw)]
     if nums:
-        want = amount_numbers(order)
+        want = amount_numbers(order) + [float(x) for x in extra if x is not None]
         if not any(abs(n - w) < 0.005 for n in nums for w in want):
             return False, "the reply says %s, but this order is %s" % (
                 ", ".join(_str_num(n) for n in nums), plain(order))
@@ -411,11 +413,7 @@ def render_merrymen(order, idx, total, cfg, risk, state, today):
     ready, label, rv = status_of(order, risk, state, today)
     book = "PAPER (the agent's practice book)" if cfg.get("paper", True) else "LIVE, REAL FUNDS"
     lines = ["ORDER %d of %d, %s, Merrymen" % (idx, total, book)]
-    loss = (rv or {}).get("max_loss")
-    for part in plain_parts(order):
-        if loss is not None and part.startswith("max loss about"):
-            part = ("max loss about %s if it is sold at the stop, with the token's price and costs (a sale "
-                    "needs your approval in Merrymen and can fill worse)" % _money(loss))
+    for part in plain_parts(order, (rv or {}).get("max_loss")):
         lines.append("  " + part)
     if order.get("why"):
         lines.append("  why: " + order["why"])
@@ -470,7 +468,7 @@ def ticket_json(order, idx, cfg, risk, state, today):
     if is_merrymen(order):
         if rv and rv.get("max_loss") is not None:
             loss = rv["max_loss"]
-        return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
+        return {"index": idx, "ready": ready, "status": label, "plain": plain(order, loss),
                 "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
                 "broker": "merrymen", "tool": "propose_trade",
                 "tool_input": merrymen_module().propose_input(order, "<set at your yes>"),
@@ -596,17 +594,19 @@ def cmd_approve(a):
     ready, label, rv = status_of(order, risk, state, today)
     if not ready:
         raise TicketError("order %d is not ready: %s" % (a.index, label))
-    ok, why = parse_yes(a.reply, order, [o.get("symbol", "") for o in orders])
+    shown = (rv or {}).get("max_loss") if is_merrymen(order) else None
+    ok, why = parse_yes(a.reply, order, [o.get("symbol", "") for o in orders], [shown])
     if not ok:
         print("Not recorded: %s. Ask the user again with the ticket for order %d." % (why, a.index))
         return 1
     loss, stop = max_loss(order)
     if is_merrymen(order) and rv and rv.get("max_loss") is not None:
         loss = rv["max_loss"]     # trader-risk's figure, with the token's price and costs
+    shown_plain = plain(order, loss if is_merrymen(order) else None)
     rec = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
            "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
            "qty": order.get("qty"), "kind": kind_of(order, rv), "max_loss": loss, "stop": stop,
-           "plain": plain(order), "status": "approved", "reply": a.reply,
+           "plain": shown_plain, "status": "approved", "reply": a.reply,
            "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "alpaca")}
     if is_merrymen(order):
         fp = fingerprint(order)
@@ -619,7 +619,7 @@ def cmd_approve(a):
         call = mm.propose_input(order, rec["idempotency_key"])
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
-    print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
+    print("Recorded your yes for order %d: %s." % (a.index, shown_plain))
     if is_merrymen(order):
         print("Now call propose_trade with exactly:")
         print(json.dumps(call, indent=2))

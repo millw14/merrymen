@@ -19,7 +19,7 @@ argument-hint: "[budget in USDG]"
 # trader-budget
 
 The Budget Manager turns a plan ("buy TSLA at 364.18, stop 358.32") into an
-exact order ("buy 25.00 USDG of the TSLA stock token"), inside rules the user
+exact order ("buy 23.75 USDG of the TSLA stock token"), inside rules the user
 sets once. The stop decides the size: the further away the stop, the smaller
 the amount. Merrymen buys a dollar amount, so the size is in cents, not whole
 shares, and the agent's own signed limits are limits here too. It writes a
@@ -68,6 +68,9 @@ If `trader/config.json` does not exist, copy `config.example.json` into
   ("09:45" / "15:30") and **flat_by** ("15:55"), all New York time.
 - **reserve_exit_budget** (true): Merrymen's 24-hour budget figure counts sells as well as buys, so
   an entry uses at most half of what is left, keeping the other half for the sell that closes it.
+- **exit_headroom_pct** (5): Merrymen applies the signed per-trade limit and the owner-order cap to
+  the sell too, and the sell is worth more if the price rose. So an entry stays this far under them,
+  and the sell that closes it fits in one proposal.
 - **max_quote_gap_pct** (1.0): how far the token's quoted price may be from the stock price the plan
   was made on.
 - **blocked**: tickers they never want to trade.
@@ -87,8 +90,8 @@ The amount is the smallest of these, down to the cent:
 | position cap | budget x `max_position_pct` |
 | max order | `max_order_usd` |
 | cash | budget minus the cash buffer, never more than the cash in `trader/portfolio.json` |
-| agent per trade | the per-trade limit signed into the agent's permission |
-| owner-order cap | the owner's Settings, max per chat trade |
+| agent per trade | the per-trade limit signed into the agent's permission, less `exit_headroom_pct` |
+| owner-order cap | the owner's Settings, max per chat trade, less `exit_headroom_pct` |
 | agent 24h budget | what is left of the agent's 24-hour budget, halved with `reserve_exit_budget` |
 
 The entry it sizes at: the plan's entry, or the price in `trader/prices.json`
@@ -120,30 +123,30 @@ whose permission allows 25 USDG a trade, 100 left today:
 
 ```
 Limits in USDG (Merrymen buys a dollar amount; the smallest one wins):
-  max loss          $2 max loss / 5.86 risk a share x 364.18                       124.29
-  position cap      50% of $200                                                    100.00
-  max order         $50                                                             50.00
-  cash              budget $200 minus the $20 cash buffer                          180.00
-  agent per trade   signed per-trade limit 25 USDG                                  25.00  <- binds
-  owner-order cap   Settings, max per chat trade 25 USDG                            25.00
-  agent 24h budget  100 USDG left in 24h, half kept for the sell                    50.00
+  max loss          $2 max loss / 5.86 risk a share x 364.18                         124.29
+  position cap      50% of $200                                                      100.00
+  max order         $50                                                               50.00
+  cash              budget $200 minus the $20 cash buffer                            180.00
+  agent per trade   signed per-trade limit 25 USDG less 5% so the sell fits           23.75  <- binds
+  owner-order cap   Settings, max per chat trade 25 USDG less 5% so the sell fits     23.75
+  agent 24h budget  100 USDG left in 24h, half kept for the sell                      50.00
 
-Size: 25.00 USDG of TSLA (token 0x1a1a...1a1a), about 0.068647 shares. Max loss if it is sold at the stop: $0.41.
+Size: 23.75 USDG of TSLA (token 0x1a1a...1a1a), about 0.065215 shares. Max loss if it is sold at the stop: $0.39.
 ```
 
 It writes:
 
 ```json
-{"symbol": "TSLA", "side": "buy", "notional": "25.00", "type": "market", "time_in_force": "day",
+{"symbol": "TSLA", "side": "buy", "notional": "23.75", "type": "market", "time_in_force": "day",
  "venue": "merrymen", "agent": "robin", "token": "0x1a1a...1a1a",
- "why": "opening-range breakout on TSLA: 25.00 USDG, about 0.068647 shares, bound by agent per trade ($0.41 at the stop 358.32)",
- "plan": {"entry": 364.18, "stop": 358.32, "target": 370.04, "risk_per_share": 5.86, "qty": 0.068647,
-          "max_loss": 0.41, "setup": "orb", "entry_time": "10:15 AM", "flat_by": "15:55"}}
+ "why": "opening-range breakout on TSLA: 23.75 USDG, about 0.065215 shares, bound by agent per trade ($0.39 at the stop 358.32)",
+ "plan": {"entry": 364.18, "stop": 358.32, "target": 370.04, "risk_per_share": 5.86, "qty": 0.065215,
+          "max_loss": 0.39, "setup": "orb", "entry_time": "10:15 AM", "flat_by": "15:55"}}
 ```
 
 `plan` is a note for trader-risk and trader-broker and is never sent; `why`
 goes to the owner as Claude's note on the proposal. trader-risk measures the
-loss again from the token's quoted price with fees and gas both ways ($0.50
+loss again from the token's quoted price with fees and gas both ways ($0.48
 in the reel), and that is the figure the ticket shows.
 
 ## Weights mode

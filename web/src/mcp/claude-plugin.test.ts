@@ -18,14 +18,17 @@ const root = new URL("../../../", import.meta.url);
 const read = (rel: string) => readFileSync(new URL(rel, root), "utf8");
 const json = (rel: string) => JSON.parse(read(rel)) as Record<string, unknown>;
 const PLUGIN = "plugins/merrymen/";
+const TRADER = "plugins/merrymen-trader/";
 const skills = readdirSync(new URL(`${PLUGIN}skills/`, root), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
 
 test("the marketplace lists the plugin from its own directory, under the id the connect page tells people to install", () => {
   const market = json(".claude-plugin/marketplace.json");
   const entries = market.plugins as Array<{ name: string; source: string }>;
-  assert.equal(entries.length, 1);
+  // merrymen first: it is the one the connect page installs. merrymen-trader rides on its server.
+  assert.deepEqual(entries.map((e) => e.name), ["merrymen", "merrymen-trader"]);
   assert.equal(`${entries[0].name}@${market.name}`, PLUGIN_ID);
   assert.equal(entries[0].source, "./plugins/merrymen");
+  assert.equal(entries[1].source, `./${TRADER.replace(/\/$/, "")}`);
   assert.ok(existsSync(new URL(`${PLUGIN}.claude-plugin/plugin.json`, root)));
   assert.equal(PLUGIN_MARKETPLACE_URL, "https://github.com/millw14/merrymen.git");
   assert.deepEqual(claudeCodePluginCommands(PLUGIN_SERVER_URL), ["/plugin marketplace add https://github.com/millw14/merrymen.git", "/plugin install merrymen@merrymen"]);
@@ -114,4 +117,71 @@ test("the plugin's README lists every command", () => {
   const readme = read(`${PLUGIN}README.md`);
   for (const skill of skills) assert.ok(readme.includes(`/merrymen:${skill}`), skill);
   assert.ok(readme.includes("/plugin marketplace add https://github.com/millw14/merrymen.git") && readme.includes("/plugin install merrymen@merrymen"));
+});
+
+/**
+ * plugins/merrymen-trader: the day-trader skill pack (vendored from
+ * github.com/Jakeschincariol/day-trader-skill) with Merrymen as its broker.
+ * Its Python reads the JSON that Claude saves from these tools, field by
+ * field, so a renamed tool or field would silently turn a limit check into
+ * "unknown". The Python's own suite runs in CI's brain job.
+ */
+const TRADER_READS: Record<string, { input?: string[]; output: string[] }> = {
+  list_agents: { output: ["agents", "agent"] },
+  discover_tokens: { input: ["list"], output: ["items", "origin", "address", "symbol", "name", "stock_kind", "paused", "price_usd", "price_updated_at"] },
+  get_agent_status: { input: ["agent"], output: ["agent", "name", "mode", "status", "live_blocker", "permission", "expires_at", "observed_at"] },
+  get_agent_controls: { input: ["agent"], output: ["agent", "signed_limits", "per_trade_usdg", "per_day_usdg", "expires_at", "budget_24h", "spent_usdg", "remaining_usdg", "ops_remaining", "book", "risk_settings", "chat_action_ceiling_usdg", "max_impact_bps", "slippage_bps", "observed_at"] },
+  quote_trade: { input: ["agent", "side", "token", "amount_usdg"], output: ["quoted", "why_not", "side", "token", "amount_in", "human", "implied_price_usd", "price_impact_bps", "impact_verdict", "ok", "detail", "rule", "merrymen_trade_fee", "usdg", "gas", "expected_usdg", "min_out", "quoted_at"] },
+  propose_trade: { input: ["agent", "side", "token", "amount_usdg", "idempotency_key", "note"], output: ["proposal_id", "approval_url", "expires_at", "quote"] },
+  get_proposal: { input: ["proposal_id"], output: ["status", "status_explained", "terminal", "result", "approval_url"] },
+  cancel_proposal: { input: ["proposal_id"], output: [] },
+  get_portfolio: { output: [] },
+  get_trades: { output: [] },
+  get_token: { input: ["address"], output: ["price", "stock", "paused"] },
+  subscribe: { output: [] },
+};
+
+test("the trader plugin rides on the merrymen plugin's server and names only real tools and fields", () => {
+  const manifest = json(`${TRADER}.claude-plugin/plugin.json`);
+  assert.equal(manifest.name, "merrymen-trader");
+  assert.ok(typeof manifest.version === "string" && typeof manifest.description === "string");
+  assert.equal(manifest.mcpServers, undefined);
+  assert.ok(!existsSync(new URL(`${TRADER}.mcp.json`, root)), "one connection: the merrymen plugin's");
+  const tools = new Map(ALL_TOOLS.map((t) => [t.name, t]));
+  for (const [name, want] of Object.entries(TRADER_READS)) {
+    const t = tools.get(name);
+    assert.ok(t, `merrymen-trader uses \`${name}\`, which is not a Merrymen tool`);
+    const inKeys = schemaKeys(t.input);
+    const outKeys = schemaKeys(t.output);
+    for (const k of want.input ?? []) assert.ok(inKeys.has(k), `${name} has no input \`${k}\``);
+    for (const k of want.output) assert.ok(outKeys.has(k), `${name} has no output field \`${k}\``);
+  }
+  // Every tool a trader skill tells Claude to call is one of the above, so the list stays the truth.
+  const traderSkills = readdirSync(new URL(`${TRADER}skills/`, root), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  for (const skill of traderSkills) {
+    const text = read(`${TRADER}skills/${skill}/SKILL.md`);
+    for (const [, name] of text.matchAll(/`((?:get|list|quote|propose|cancel|discover|search|check|subscribe)(?:_[a-z]+)*)`/g)) {
+      if (tools.has(name)) assert.ok(name in TRADER_READS, `${skill} names \`${name}\`: add it to TRADER_READS with the fields it reads`);
+    }
+    for (const [, other] of text.matchAll(/\/merrymen:([a-z-]+)/g)) assert.ok(skills.includes(other), `${skill} points at /merrymen:${other}`);
+  }
+  // propose_trade never runs from the directory endpoint, so the README must send people to the plugin's server.
+  assert.match(read(`${TRADER}README.md`), /\/plugin install merrymen-trader@merrymen/);
+});
+
+/** Same rule as the merrymen plugin: what users run is fingerprinted, and a change needs a version bump. */
+const TRADER_RELEASE = { version: "1.0.0", sha256: "382f59f6f529fa13c4085e729ad73f0d431fc15bb3ae38ec8e3f9a8921b046ed" };
+
+function traderFingerprint(): string {
+  const files = (readdirSync(new URL(`${TRADER}skills/`, root), { recursive: true }) as string[]).map(String)
+    .filter((f) => /\.(md|py|json)$/.test(f)).map((f) => `skills/${f.split("\\").join("/")}`);
+  const hash = createHash("sha256");
+  for (const file of files.sort()) hash.update(`${file}\0${read(`${TRADER}${file}`).replace(/\r\n/g, "\n")}\0`);
+  return hash.digest("hex");
+}
+
+test("changing what the trader plugin runs needs a version bump, or installed copies never update", () => {
+  const manifest = json(`${TRADER}.claude-plugin/plugin.json`);
+  assert.deepEqual({ version: manifest.version, sha256: traderFingerprint() }, TRADER_RELEASE,
+    "plugins/merrymen-trader changed: bump `version` in plugins/merrymen-trader/.claude-plugin/plugin.json and set TRADER_RELEASE here to the new version and this sha256");
 });

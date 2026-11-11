@@ -69,7 +69,7 @@ CONTROLS = {"agent": "robin",
 AGENT = {"agent": "robin", "status": STATUS, "controls": CONTROLS}
 
 
-def quote(amount=25.0, price=364.9, side="buy", token=TSLA, at="2026-10-19T14:14:30Z", ok=True, quoted=True):
+def quote(amount=23.75, price=364.9, side="buy", token=TSLA, at="2026-10-19T14:14:30Z", ok=True, quoted=True):
     return {"quoted": quoted, "why_not": None if quoted else "no pool", "side": side, "token": token,
             "token_decimals": 18,
             "amount_in": {"token": "0xusdg", "raw": "0", "human": amount},
@@ -151,12 +151,13 @@ class Agent(unittest.TestCase):
 class Budget(unittest.TestCase):
     def test_the_reel_on_merrymen(self):
         s, o = sized()
-        # max loss allows 2 x 364.18 / 5.86 = $124.29; the signed per-trade limit, $25, binds
+        # max loss allows 2 x 364.18 / 5.86 = $124.29; the signed per-trade limit binds: $25 less 5%, so
+        # the sell that closes it still fits under $25 after a rise (Merrymen applies the limit to sells)
         self.assertEqual(s["bound_by"], "agent per trade")
-        self.assertEqual(s["amount_usdg"], 25.0)
-        self.assertEqual(s["qty"], 0.068647)
-        self.assertEqual(s["max_loss"], 0.41)            # 25 x 5.86 / 364.18 = 0.402, up to the cent
-        self.assertEqual(o["notional"], "25.00")
+        self.assertEqual(s["amount_usdg"], 23.75)
+        self.assertEqual(s["qty"], 0.065215)
+        self.assertEqual(s["max_loss"], 0.39)            # 23.75 x 5.86 / 364.18 = 0.382, up to the cent
+        self.assertEqual(o["notional"], "23.75")
         self.assertEqual((o["venue"], o["agent"], o["token"]), ("merrymen", "robin", TSLA.lower()))
         for alpaca in ("qty", "order_class", "stop_loss_stop_price", "take_profit_limit_price", "limit_price"):
             self.assertNotIn(alpaca, o)
@@ -173,7 +174,13 @@ class Budget(unittest.TestCase):
         s, o = sized(ag=ag)
         self.assertEqual((s["bound_by"], o["notional"]), ("agent 24h budget", "15.00"))
         s, o = sized(dict(CFG, reserve_exit_budget=False), ag)
+        self.assertEqual(o["notional"], "23.75")
+
+    def test_room_for_the_sell_under_the_per_trade_limit(self):
+        s, o = sized(dict(CFG, exit_headroom_pct=0))
         self.assertEqual(o["notional"], "25.00")
+        s, o = sized(dict(CFG, exit_headroom_pct=10))
+        self.assertEqual(o["notional"], "22.50")
 
     def test_refusals(self):
         with self.assertRaisesRegex(size.SizeError, "paused"):
@@ -204,7 +211,7 @@ class Budget(unittest.TestCase):
                 self.assertEqual(size.main(base + ["--write", paths["orders"]]), 0)
             self.assertIn("Merrymen holds no resting stop", out.getvalue())
             with open(paths["orders"]) as fh:
-                self.assertEqual(json.load(fh)["orders"][0]["notional"], "25.00")
+                self.assertEqual(json.load(fh)["orders"][0]["notional"], "23.75")
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 self.assertEqual(size.main(base + ["--limit"]), 1)
@@ -222,9 +229,9 @@ class Risk(unittest.TestCase):
     def test_pass_with_the_token_price_and_costs_in_the_max_loss(self):
         r = checked(self.o)
         self.assertEqual(r["verdict"], "PASS", r["reasons"])
-        # sold when TSLA reaches 358.32, measured from the token's 364.90: 25 x (1 - 358.32/364.90) = 0.4508,
-        # plus 2 x 0.0125 fee and 2 x 0.01 gas = 0.4958, up to the cent
-        self.assertEqual(r["max_loss"], 0.5)
+        # sold when TSLA reaches 358.32, measured from the token's 364.90: 23.75 x (1 - 358.32/364.90) = 0.4283,
+        # plus 2 x 0.0125 fee and 2 x 0.01 gas = 0.4733, up to the cent
+        self.assertEqual(r["max_loss"], 0.48)
         self.assertTrue(any("token price 364.9000 vs the stock's 364.18: +0.20%" in x for x in r["info"]))
 
     def block(self, order=None, **kw):
@@ -251,6 +258,12 @@ class Risk(unittest.TestCase):
         self.assertIn("before your flat-by", self.block(ag=agent(controls__signed_limits=exp)))
         gone = dict(CONTROLS["signed_limits"], expires_at="2026-10-19T14:00:00Z")
         self.assertIn("expired", self.block(ag=agent(controls__signed_limits=gone)))
+
+    def test_an_entry_leaves_room_for_its_sell(self):
+        full = dict(self.o, notional="25.00")
+        self.assertIn("no room under the 25 USDG per-trade cap", self.block(full, quotes=[quote(25.0)]))
+        r = checked(full, cfg=dict(CFG, exit_headroom_pct=0), quotes=[quote(25.0)])
+        self.assertEqual(r["verdict"], "PASS", r["reasons"])
 
     def test_signed_limits(self):
         big = dict(self.o, notional="30.00")
@@ -332,7 +345,7 @@ class Broker(unittest.TestCase):
         ag = copy.deepcopy(AGENT)
         utc = risk.parse_now(now).strftime("%Y-%m-%dT%H:%M:%SZ")
         ag["status"]["observed_at"] = ag["controls"]["observed_at"] = utc
-        docs = {"tokens": tmap(), "agent": mm.agent_snapshot(ag), "quotes": [quote(25.0, at=utc)]}
+        docs = {"tokens": tmap(), "agent": mm.agent_snapshot(ag), "quotes": [quote(23.75, at=utc)]}
         res = risk.check([self.order], CFG, None, {}, state, None, risk.parse_now(now), None, docs)
         with open(self.p["risk"], "w") as fh:
             json.dump(res, fh)
@@ -357,10 +370,10 @@ class Broker(unittest.TestCase):
         code, out = self.run_cli("show", "--now", NOW)
         self.assertEqual(code, 0, out)
         self.assertIn("PAPER (the agent's practice book), Merrymen", out)
-        self.assertIn("BUY 25.00 USDG of TSLA on Merrymen", out)
+        self.assertIn("BUY 23.75 USDG of TSLA on Merrymen", out)
         self.assertIn("Claude will call propose_trade", out)
-        self.assertIn('"amount_usdg": 25.0', out)
-        self.assertIn("max loss about $0.50", out)        # trader-risk's figure, with the token's price and costs
+        self.assertIn('"amount_usdg": 23.75', out)
+        self.assertIn("max loss about $0.48", out)        # trader-risk's figure, with the token's price and costs
         self.assertIn("Merrymen holds no stop order", out)
 
     def test_yes_then_proposal_then_fill(self):
@@ -368,11 +381,12 @@ class Broker(unittest.TestCase):
         self.assertEqual(code, 1)
         code, out = self.run_cli("approve", "--index", "1", "--reply", "yes buy 30 of TSLA", "--now", NOW)
         self.assertIn("Not recorded", out)
-        code, out = self.run_cli("approve", "--index", "1", "--reply", "yes, 25 USDG of TSLA", "--now", NOW)
+        code, out = self.run_cli("approve", "--index", "1", "--reply", "yes, 23.75 USDG of TSLA", "--now", NOW)
         self.assertEqual(code, 0, out)
+        self.assertIn("max loss about $0.48", out)      # the figure the ticket showed, not the sizing's $0.39
         call = json.loads(out[out.index("{"):out.index("}") + 1])
         fp = risk.fingerprint(self.order)
-        self.assertEqual(call, {"agent": "robin", "side": "buy", "token": TSLA.lower(), "amount_usdg": 25.0,
+        self.assertEqual(call, {"agent": "robin", "side": "buy", "token": TSLA.lower(), "amount_usdg": 23.75,
                                 "idempotency_key": "trader-20261019-%s-1" % fp, "note": self.order["why"]})
         code, out = self.run_cli("result", "--index", "1", "--status", "placed", "--now", NOW)
         self.assertIn("never \"placed\" by Claude", out)
@@ -473,6 +487,7 @@ class Docs(unittest.TestCase):
         self.assertIs(cfg["paper"], True)
         self.assertEqual(cfg["merrymen_agent"], "")          # empty blocks every order until it is set
         self.assertIs(cfg["reserve_exit_budget"], True)
+        self.assertEqual(cfg["exit_headroom_pct"], 5)
         for k in ("allow_options", "allow_margin", "allow_short"):
             self.assertIs(cfg[k], False)
 
