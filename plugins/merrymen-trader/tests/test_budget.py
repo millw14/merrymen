@@ -9,7 +9,7 @@ from _load import load, ROOT, FIX
 
 size = load("trader-budget", "size")
 
-CFG = os.path.join(ROOT, "trader-budget", "config.example.json")
+CFG = os.path.join(FIX, "trader-budget", "config.alpaca.json")
 PLAN = os.path.join(FIX, "trader-budget", "plan-tsla.json")
 TARGETS = os.path.join(ROOT, "trader-budget", "targets.example.json")
 TOP5 = os.path.join(FIX, "trader-budget", "berkshire-q2-2026-top5.json")

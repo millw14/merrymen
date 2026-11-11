@@ -309,6 +309,66 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     price  a FRESH latest price; a market order is sized at the higher of it and the plan's entry
     cash   the cash in trader/portfolio.json, if there is one
     today  New York date (YYYY-MM-DD); a plan for another day is refused"""
+    b = _basics(plan, cfg, budget, limit, price, cash, today)
+    c, sym, entry_plan, ref, ref_from = b["c"], b["sym"], b["entry_plan"], b["ref"], b["ref_from"]
+    stop, target, risk_c, reward_c, risk = b["stop"], b["target"], b["risk_c"], b["reward_c"], b["risk"]
+    budget, buf_pct, cash_buffer = b["budget"], b["buf_pct"], b["cash_buffer"]
+    available, cash_note = b["available"], b["cash_note"]
+
+    limits = []
+    max_loss = _f(c.get("max_loss_per_trade_usd"))
+    if max_loss:
+        limits.append({"name": "max loss", "usd": max_loss, "per": risk, "shares": shares_for(max_loss, risk),
+                       "how": "%s max loss / %s risk a share" % (money(max_loss), _price(risk))})
+    cap_pct = _f(c.get("max_position_pct"))
+    if cap_pct:
+        cap = round(budget * cap_pct / 100.0, 2)
+        limits.append({"name": "position cap", "usd": cap, "per": ref, "shares": shares_for(cap, ref),
+                       "how": "%s%% of %s = %s / %s" % (_num(cap_pct), money(budget), money(cap), _price(ref))})
+    max_order = _f(c.get("max_order_usd"))
+    if max_order:
+        limits.append({"name": "max order", "usd": max_order, "per": ref, "shares": shares_for(max_order, ref),
+                       "how": "%s / %s" % (money(max_order), _price(ref))})
+    limits.append({"name": "cash", "usd": available, "per": ref, "shares": shares_for(available, ref),
+                   "how": "%s = %s / %s" % (cash_note, money(available), _price(ref))})
+
+    qty = max(0, min(l["shares"] for l in limits))
+    bound = [l["name"] for l in limits if l["shares"] == qty]
+    for l in limits:
+        l["binds"] = l["name"] == bound[0]
+    cost = round(qty * ref, 2)
+    loss = round(qty * risk_c / 100.0, 2)
+    refusal = None
+    if qty == 0:
+        if bound[0] == "max loss":
+            refusal = ("one share risks %s (entry %s minus stop %s), more than your %s max loss per trade. "
+                       "No order. Skip this trade, or plan a closer stop with trader-exit."
+                       % (money(risk), _price(ref), _price(stop), money(max_loss)))
+        else:
+            refusal = ("one share of %s costs %s, more than your %s limit (%s). No order."
+                       % (sym, money(ref), bound[0], limits[[l["name"] for l in limits].index(bound[0])]["how"]))
+    elif _f(c.get("min_reward_risk")) and reward_c < _f(c["min_reward_risk"]) * risk_c - EPS:
+        refusal = ("reward:risk %.2f (target %s, entry %s, stop %s) is under your minimum %s, so trader-risk "
+                   "would block it. No order. Skip it, or make a new plan with trader-exit."
+                   % (reward_c / float(risk_c), _price(target), _price(ref), _price(stop), _num(c["min_reward_risk"])))
+    elif cost < float(c.get("min_order_usd") or 0) - 0.005:
+        refusal = ("%d share%s of %s is %s, under your %s minimum order. No order."
+                   % (qty, "" if qty == 1 else "s", sym, money(cost), money(c["min_order_usd"])))
+    return {
+        "symbol": sym, "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
+        "entry_time": plan.get("entry_time", ""), "entry_plan": round_cent(entry_plan),
+        "entry": ref, "entry_from": ref_from, "stop": stop, "target": target,
+        "risk_per_share": risk, "reward_risk": round(reward_c / float(risk_c), 2),
+        "stop_label": plan.get("stop_label", ""), "target_label": plan.get("target_label", ""),
+        "budget": budget, "cash_buffer_pct": buf_pct, "cash_buffer": cash_buffer, "cash_available": available,
+        "max_loss_per_trade_usd": max_loss, "limits": limits, "qty": qty, "bound_by": bound[0],
+        "cost": cost, "max_loss": loss, "flat_by": plan.get("flat_by") or c.get("flat_by"),
+        "order_type": "limit" if limit is not None else "market", "refusal": refusal,
+    }
+
+
+def _basics(plan, cfg, budget=None, limit=None, price=None, cash=None, today=None):
+    """The checks and numbers every sizing starts from (Alpaca whole shares or Merrymen dollars)."""
     c = dict(DEFAULTS)
     c.update(cfg or {})
     if not isinstance(plan, dict):
@@ -362,57 +422,9 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         available = cash - cash_buffer
         cash_note = "cash %s in trader/portfolio.json minus the %s buffer" % (money(cash), money(cash_buffer))
     available = max(round(available, 2), 0.0)
-
-    limits = []
-    max_loss = _f(c.get("max_loss_per_trade_usd"))
-    if max_loss:
-        limits.append({"name": "max loss", "usd": max_loss, "per": risk, "shares": shares_for(max_loss, risk),
-                       "how": "%s max loss / %s risk a share" % (money(max_loss), _price(risk))})
-    cap_pct = _f(c.get("max_position_pct"))
-    if cap_pct:
-        cap = round(budget * cap_pct / 100.0, 2)
-        limits.append({"name": "position cap", "usd": cap, "per": ref, "shares": shares_for(cap, ref),
-                       "how": "%s%% of %s = %s / %s" % (_num(cap_pct), money(budget), money(cap), _price(ref))})
-    max_order = _f(c.get("max_order_usd"))
-    if max_order:
-        limits.append({"name": "max order", "usd": max_order, "per": ref, "shares": shares_for(max_order, ref),
-                       "how": "%s / %s" % (money(max_order), _price(ref))})
-    limits.append({"name": "cash", "usd": available, "per": ref, "shares": shares_for(available, ref),
-                   "how": "%s = %s / %s" % (cash_note, money(available), _price(ref))})
-
-    qty = max(0, min(l["shares"] for l in limits))
-    bound = [l["name"] for l in limits if l["shares"] == qty]
-    for l in limits:
-        l["binds"] = l["name"] == bound[0]
-    cost = round(qty * ref, 2)
-    loss = round(qty * risk_c / 100.0, 2)
-    refusal = None
-    if qty == 0:
-        if bound[0] == "max loss":
-            refusal = ("one share risks %s (entry %s minus stop %s), more than your %s max loss per trade. "
-                       "No order. Skip this trade, or plan a closer stop with trader-exit."
-                       % (money(risk), _price(ref), _price(stop), money(max_loss)))
-        else:
-            refusal = ("one share of %s costs %s, more than your %s limit (%s). No order."
-                       % (sym, money(ref), bound[0], limits[[l["name"] for l in limits].index(bound[0])]["how"]))
-    elif _f(c.get("min_reward_risk")) and reward_c < _f(c["min_reward_risk"]) * risk_c - EPS:
-        refusal = ("reward:risk %.2f (target %s, entry %s, stop %s) is under your minimum %s, so trader-risk "
-                   "would block it. No order. Skip it, or make a new plan with trader-exit."
-                   % (reward_c / float(risk_c), _price(target), _price(ref), _price(stop), _num(c["min_reward_risk"])))
-    elif cost < float(c.get("min_order_usd") or 0) - 0.005:
-        refusal = ("%d share%s of %s is %s, under your %s minimum order. No order."
-                   % (qty, "" if qty == 1 else "s", sym, money(cost), money(c["min_order_usd"])))
-    return {
-        "symbol": sym, "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
-        "entry_time": plan.get("entry_time", ""), "entry_plan": round_cent(entry_plan),
-        "entry": ref, "entry_from": ref_from, "stop": stop, "target": target,
-        "risk_per_share": risk, "reward_risk": round(reward_c / float(risk_c), 2),
-        "stop_label": plan.get("stop_label", ""), "target_label": plan.get("target_label", ""),
-        "budget": budget, "cash_buffer_pct": buf_pct, "cash_buffer": cash_buffer, "cash_available": available,
-        "max_loss_per_trade_usd": max_loss, "limits": limits, "qty": qty, "bound_by": bound[0],
-        "cost": cost, "max_loss": loss, "flat_by": plan.get("flat_by") or c.get("flat_by"),
-        "order_type": "limit" if limit is not None else "market", "refusal": refusal,
-    }
+    return {"c": c, "sym": sym, "entry_plan": entry_plan, "ref": ref, "ref_from": ref_from, "stop": stop,
+            "target": target, "risk_c": risk_c, "reward_c": reward_c, "risk": risk, "budget": budget,
+            "buf_pct": buf_pct, "cash_buffer": cash_buffer, "available": available, "cash_note": cash_note}
 
 
 def bracket_order(s):
@@ -481,6 +493,148 @@ def plan_report(s, order, notes=()):
                      "trader-broker flatten)." % s["flat_by"])
     lines.append("")
     lines.append("Next: trader-risk checks it, then trader-broker asks you yes or no.")
+    lines.append("Education and tooling, not financial advice.")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- Merrymen (this fork's broker)
+
+def merrymen_module():
+    """trader-broker/merrymen.py, the one place that reads the saved Merrymen results."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "trader-broker", "merrymen.py")
+    spec = importlib.util.spec_from_file_location("trader_merrymen", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def size_merrymen(plan, cfg, tmap, agent, budget=None, price=None, cash=None, today=None):
+    """Pure function: one plan + your rules + the Merrymen agent -> a USDG amount (a dict).
+
+    Merrymen buys a dollar amount of a stock token, so the size is in cents, not
+    whole shares, and the agent's own signed limits are limits here too. amount
+    may be 0. tmap and agent come from trader-broker/merrymen.py."""
+    mm = merrymen_module()
+    b = _basics(plan, cfg, budget, None, price, cash, today)
+    c, sym, ref, risk, risk_c, reward_c = b["c"], b["sym"], b["ref"], b["risk"], b["risk_c"], b["reward_c"]
+    item, why = mm.resolve_token(tmap, sym)
+    if item is None:
+        raise SizeError(why)
+    if item.get("paused") is True:
+        raise SizeError("%s is paused (halted) in Merrymen's registry: no order" % sym)
+    if agent is None:
+        raise SizeError("no Merrymen agent snapshot: save get_agent_status and get_agent_controls to "
+                        "trader/merrymen/agent.json (trader-broker, step 1)")
+    if not agent.get("agent"):
+        raise SizeError("the agent snapshot names no agent")
+
+    limits = []
+    max_loss = _f(c.get("max_loss_per_trade_usd"))
+    if max_loss:
+        limits.append({"name": "max loss", "usd": max_loss * ref / risk,
+                       "how": "%s max loss / %s risk a share x %s" % (money(max_loss), _price(risk), _price(ref))})
+    cap_pct = _f(c.get("max_position_pct"))
+    if cap_pct:
+        cap = round(b["budget"] * cap_pct / 100.0, 2)
+        limits.append({"name": "position cap", "usd": cap,
+                       "how": "%s%% of %s" % (_num(cap_pct), money(b["budget"]))})
+    max_order = _f(c.get("max_order_usd"))
+    if max_order:
+        limits.append({"name": "max order", "usd": max_order, "how": money(max_order)})
+    limits.append({"name": "cash", "usd": b["available"], "how": b["cash_note"]})
+    for name, usd, how in mm.sizing_caps(agent, c.get("reserve_exit_budget", True)):
+        limits.append({"name": name, "usd": usd, "how": how})
+
+    amount = max(0.0, mm.floor_cent(min(l["usd"] for l in limits)))
+    bound = [l["name"] for l in limits if mm.floor_cent(l["usd"]) <= amount + 1e-9]
+    for l in limits:
+        l["binds"] = l["name"] == bound[0]
+    qty = math.floor(amount / ref * 1e6) / 1e6
+    loss = mm.ceil_cent(amount * risk / ref)
+    refusal = None
+    if amount <= 0:
+        refusal = ("nothing fits: the %s limit is %s (%s). No order." % (bound[0], money(0), next(
+            l["how"] for l in limits if l["name"] == bound[0])))
+    elif _f(c.get("min_reward_risk")) and reward_c < _f(c["min_reward_risk"]) * risk_c - EPS:
+        refusal = ("reward:risk %.2f (target %s, entry %s, stop %s) is under your minimum %s, so trader-risk "
+                   "would block it. No order. Skip it, or make a new plan with trader-exit."
+                   % (reward_c / float(risk_c), _price(b["target"]), _price(ref), _price(b["stop"]),
+                      _num(c["min_reward_risk"])))
+    elif amount < float(c.get("min_order_usd") or 0) - 0.005:
+        refusal = ("%s of %s is under your %s minimum order (bound by %s). No order."
+                   % (money(amount), sym, money(c["min_order_usd"]), bound[0]))
+    return {
+        "symbol": sym, "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
+        "entry_time": plan.get("entry_time", ""), "entry_plan": round_cent(b["entry_plan"]),
+        "entry": ref, "entry_from": b["ref_from"], "stop": b["stop"], "target": b["target"],
+        "risk_per_share": risk, "reward_risk": round(reward_c / float(risk_c), 2),
+        "stop_label": plan.get("stop_label", ""), "target_label": plan.get("target_label", ""),
+        "budget": b["budget"], "cash_buffer_pct": b["buf_pct"], "cash_buffer": b["cash_buffer"],
+        "cash_available": b["available"], "max_loss_per_trade_usd": max_loss, "limits": limits,
+        "amount_usdg": amount, "qty": qty, "bound_by": bound[0], "cost": amount, "max_loss": loss,
+        "flat_by": plan.get("flat_by") or c.get("flat_by"), "order_type": "market", "refusal": refusal,
+        "token": item["address"], "agent": agent["agent"], "agent_mode": agent.get("mode"),
+    }
+
+
+def merrymen_order(s):
+    """The one proposed Merrymen order: a USDG amount of one stock token, plus why and plan.
+    trader-broker turns it into propose_trade arguments; why and plan are never sent."""
+    if s["refusal"] or s["amount_usdg"] <= 0:
+        return None
+    setup = SETUP_WORDS.get(s["setup"], s["setup"] or "day trade")
+    bound = {"max loss": "your %s max loss per trade" % money(s["max_loss_per_trade_usd"] or 0)}.get(
+        s["bound_by"], s["bound_by"])
+    why = ("%s on %s: %s USDG, about %s shares, bound by %s (%s at the stop %s)"
+           % (setup, s["symbol"], "%.2f" % s["amount_usdg"], ("%.6f" % s["qty"]).rstrip("0").rstrip("."),
+              bound, money(s["max_loss"]), _price(s["stop"])))
+    return {
+        "symbol": s["symbol"], "side": "buy", "notional": "%.2f" % s["amount_usdg"], "type": "market",
+        "time_in_force": "day", "venue": "merrymen", "agent": s["agent"], "token": s["token"],
+        "why": why,
+        "plan": {"entry": s["entry"], "stop": s["stop"], "target": s["target"],
+                 "risk_per_share": s["risk_per_share"], "qty": s["qty"], "max_loss": s["max_loss"],
+                 "setup": s["setup"], "entry_time": s["entry_time"], "flat_by": s["flat_by"]},
+    }
+
+
+def merrymen_report(s, order, notes=()):
+    lines = []
+    setup = SETUP_WORDS.get(s["setup"], s["setup"] or "setup")
+    lines.append("%s buy on Merrymen, %s, entry %s%s" % (s["symbol"], setup, _price(s["entry_plan"]),
+                                                        (" at " + s["entry_time"]) if s["entry_time"] else ""))
+    lines.append("Stop %s%s. Target %s%s." % (_price(s["stop"]), (": " + s["stop_label"]) if s["stop_label"] else "",
+                                             _price(s["target"]),
+                                             (": " + s["target_label"]) if s["target_label"] else ""))
+    for n in notes:
+        lines.append(n)
+    lines.append("Sized at %s. Risk %s a share (%.2f%% of the price). Reward:risk %.2f."
+                 % (_price(s["entry"]), _price(s["risk_per_share"]), 100.0 * s["risk_per_share"] / s["entry"],
+                    s["reward_risk"]))
+    lines.append("")
+    lines.append("Limits in USDG (Merrymen buys a dollar amount; the smallest one wins):")
+    for l in s["limits"]:
+        lines.append("  %-17s %-58s %10s%s" % (l["name"], l["how"], "%.2f" % max(l["usd"], 0),
+                                                "  <- binds" if l["binds"] else ""))
+    lines.append("")
+    if order is None:
+        lines.append("No order: " + s["refusal"])
+        lines.append("Education and tooling, not financial advice.")
+        return "\n".join(lines)
+    lines.append("Size: %s USDG of %s (token %s), about %s shares. Max loss if it is sold at the stop: %s."
+                 % ("%.2f" % s["amount_usdg"], s["symbol"], s["token"],
+                    ("%.6f" % s["qty"]).rstrip("0").rstrip("."), money(s["max_loss"])))
+    lines.append("The stop and the target are a plan, not orders: Merrymen holds no resting stop. trader-alerts")
+    lines.append("watches them, and getting out is a sell you approve in Merrymen, so it can fill well past the stop.")
+    lines.append("")
+    lines.append("Proposed order (nothing has been sent): buy %s USDG of %s for agent %s, %s book"
+                 % (order["notional"], s["symbol"], s["agent"], s.get("agent_mode") or "unknown"))
+    if s["flat_by"]:
+        lines.append("Flat by %s New York: anything still open then gets sold (trader-alerts rings, "
+                     "trader-broker flatten)." % s["flat_by"])
+    lines.append("")
+    lines.append("Next: quote_trade for this exact amount, trader-risk checks it, then trader-broker asks you yes or no.")
     lines.append("Education and tooling, not financial advice.")
     return "\n".join(lines)
 
@@ -804,6 +958,33 @@ def run_plan(a, cfg):
     if a.portfolio and os.path.exists(a.portfolio):
         pf = read_json(a.portfolio, "portfolio")
         cash = _f(pf.get("cash")) if isinstance(pf, dict) else None
+    if str(cfg.get("broker", "")).lower() == "merrymen":
+        if limit is not None:
+            raise SizeError("Merrymen takes market orders only: no --limit")
+        mm = merrymen_module()
+        try:
+            tdoc = mm.read_doc(a.mm_tokens, "Merrymen token list (discover_tokens \"established\", "
+                                            "trader-broker step 1)")
+            adoc = mm.read_doc(a.mm_agent, "Merrymen agent snapshot (trader-broker step 1)")
+            tmap, agent = mm.token_map(tdoc), mm.agent_snapshot(adoc)
+        except mm.MerrymenError as e:
+            raise SizeError(str(e))
+        want = str(cfg.get("merrymen_agent") or "").strip()
+        if want and agent.get("agent") != want:
+            raise SizeError("trader/merrymen/agent.json is for %r but your config says merrymen_agent %r"
+                            % (agent.get("agent"), want))
+        s = size_merrymen(plan, cfg, tmap, agent, a.budget, price, cash, today)
+        order = merrymen_order(s)
+        if order and a.write:
+            src = "trader/plan.json (%s %s %s)" % (s["symbol"], s["setup"] or "plan", s["date"] or today)
+            write_orders(a.write, [order], cfg, src, now)
+        if a.json:
+            print(json.dumps({"sizing": s, "orders": [order] if order else [], "notes": notes}, indent=2))
+        else:
+            print(merrymen_report(s, order, notes))
+            if order and a.write:
+                print("Wrote 1 proposed Merrymen order to %s" % a.write)
+        return 0 if order else 1
     s = size_trade(plan, cfg, a.budget, limit, price, cash, today)
     order = bracket_order(s)
     if order and a.write:
@@ -858,6 +1039,10 @@ def main(argv=None):
     ap.add_argument("--write", nargs="?", const="trader/orders.json", metavar="PATH",
                     help="write the proposed order (default trader/orders.json)")
     ap.add_argument("--json", action="store_true", help="print JSON instead of the report")
+    ap.add_argument("--mm-tokens", default=os.path.join("trader", "merrymen", "tokens.json"),
+                    help="Merrymen stock tokens (\"broker\": \"merrymen\")")
+    ap.add_argument("--mm-agent", default=os.path.join("trader", "merrymen", "agent.json"),
+                    help="Merrymen agent snapshot (\"broker\": \"merrymen\")")
     g = ap.add_argument_group("weights mode (split a budget across a list)")
     g.add_argument("--weights", help="inline weights: AAPL=22.04,AXP=17.14")
     g.add_argument("--targets", help="a weights file: {\"weights\": [{\"ticker\", \"weight\"}]}")
@@ -868,6 +1053,9 @@ def main(argv=None):
     try:
         cfg = load_config(a.config)
         if a.weights or a.targets:
+            if str(cfg.get("broker", "")).lower() == "merrymen":
+                raise SizeError("weights mode writes plain buys with no stop, which this Merrymen pack does not "
+                                "send; size one planned trade at a time")
             return run_weights(a, cfg)
         if a.top or a.whole_shares or a.cents:
             raise SizeError("--top, --whole-shares and --cents work with --weights or --targets")

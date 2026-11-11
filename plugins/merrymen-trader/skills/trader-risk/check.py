@@ -79,6 +79,8 @@ ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
                  "order_class", "take_profit_limit_price", "stop_loss_stop_price",
                  "stop_loss_limit_price", "advanced_instructions")
+# A Merrymen order also names the token address and the agent: a yes binds to both.
+FP_FIELDS = ALPACA_FIELDS + ("venue", "agent", "token")
 PRICE_FIELDS = ("qty", "notional", "limit_price", "stop_price", "take_profit_limit_price",
                 "stop_loss_stop_price", "stop_loss_limit_price")
 TYPES = {"market", "limit", "stop", "stop_limit", "trailing_stop"}
@@ -256,6 +258,30 @@ def business_days(today, n=5):
 
 # ---------------------------------------------------------------- files and helpers
 
+def merrymen_module():
+    """trader-broker/merrymen.py, the one place that reads the saved Merrymen results."""
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "trader-broker", "merrymen.py")
+    spec = importlib.util.spec_from_file_location("trader_merrymen", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_merrymen(tokens_path, agent_path, quotes_path):
+    """The saved Merrymen results, read the same way trader-budget reads them. A missing agent or
+    quote file is not an error here: check() blocks the orders that need it, with the reason."""
+    mm = merrymen_module()
+    try:
+        tdoc = mm.read_doc(tokens_path, "Merrymen token list (discover_tokens \"established\", trader-broker step 1)")
+        adoc = mm.read_doc(agent_path, "agent snapshot", required=False)
+        qdoc = mm.read_doc(quotes_path, "quotes", required=False)
+        return {"tokens": mm.token_map(tdoc), "agent": mm.agent_snapshot(adoc) if adoc is not None else None,
+                "quotes": qdoc}
+    except mm.MerrymenError as e:
+        raise RiskError(str(e))
+
+
 def read_json(path, what, required=True):
     if not path or not os.path.exists(path):
         if required:
@@ -270,7 +296,7 @@ def read_json(path, what, required=True):
 
 def fingerprint(order):
     """Same function in trader-broker/ticket.py: the exact order that was checked."""
-    core = {k: order[k] for k in ALPACA_FIELDS if k in order and order[k] is not None}
+    core = {k: order[k] for k in FP_FIELDS if k in order and order[k] is not None}
     blob = json.dumps(core, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -338,11 +364,20 @@ def rec_is_entry(rec):
     return str(rec.get("side", "")).lower() == "buy"
 
 
+# Merrymen: a proposal waiting for the owner may still fill, so it counts like a placed order
+# until it ends; one that ended without a trade (expired, refused, ...) stops counting.
+PLACED = {"placed", "proposed", "confirmed", "paper_filled"}
+
+
 def placed_today(state, today):
-    """Orders recorded as placed today by trader-broker."""
-    out = []
-    for rec in (state or {}).get("orders", []):
-        if rec.get("status") == "placed" and rec_day(rec) == today:
+    """Orders recorded as placed today by trader-broker: each order's LATEST record decides,
+    so a Merrymen proposal that expired or was refused no longer counts."""
+    out, last = [], {}
+    recs = [r for r in (state or {}).get("orders", []) if rec_day(r) == today]
+    for n, rec in enumerate(recs):
+        last[rec.get("fingerprint") or ("#", n)] = rec
+    for n, rec in enumerate(recs):
+        if last.get(rec.get("fingerprint") or ("#", n)) is rec and rec.get("status") in PLACED:
             out.append(rec)
     return out
 
@@ -370,11 +405,14 @@ def day_trades(state, today):
 
 # ---------------------------------------------------------------- the check
 
-def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None):
+def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None,
+          merrymen=None):
     """Pure function. Returns {"results": [...], "pass": n, "block": n, "warnings": [...]}.
 
     now          naive UTC (default: the real clock); its New York date is "today"
-    price_times  {SYM: naive UTC time of that price}; None = every price counts as fresh"""
+    price_times  {SYM: naive UTC time of that price}; None = every price counts as fresh
+    merrymen     with "broker": "merrymen": {"tokens": token map, "agent": snapshot or None,
+                 "quotes": the saved quote_trade results} (trader-broker/merrymen.py)"""
     c = dict(DEFAULTS)
     c.update(cfg or {})
     prices = {str(k).upper(): float(v) for k, v in (prices or {}).items() if _f(v)}
@@ -400,6 +438,14 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
     seen = set()
     results = []
     batch_entries, batch_loss = 0, 0.0
+    to_merrymen = str(c.get("broker", "")).lower() == "merrymen"
+    mmod = merrymen_module() if to_merrymen else None
+    mm = merrymen or {}
+    if to_merrymen:
+        c["paper"] = c.get("paper", True) is not False
+    flat_by = None
+    if to_merrymen:
+        flat_by = mmod.flat_by_utc(today, c.get("flat_by"), eastern_to_utc)
     if not c.get("paper", True):
         top_warn.append("LIVE account (\"paper\": false): these orders use real money")
     top_warn.extend(win_warns)
@@ -516,7 +562,9 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         held_value = acct["values"].get(sym, 0.0)
         exiting = False
         if side == "sell" and held > 1e-9:
-            if q is not None:
+            if to_merrymen:
+                exiting = True   # Merrymen's sell is capped at the agent's holding: it can never go short
+            elif q is not None:
                 exiting = q <= held + 1e-9
             elif value is not None:
                 exiting = value <= held_value + CENT
@@ -567,6 +615,20 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 reasons.append("short: selling more %s than you hold (%s shares); short selling is off. "
                                "If you bought it, record the fill first (ticket.py fill)" % (sym, _num(held)))
 
+        # Merrymen: the token, the agent's signed limits and today's quote
+        mmres = None
+        if to_merrymen:
+            if not mmod.is_merrymen(o):
+                reasons.append("format: your config sends orders to Merrymen (\"broker\": \"merrymen\") and this "
+                               "is not a Merrymen order; size it with trader-budget or ticket.py flatten")
+            else:
+                mmres = mmod.order_checks(o, kind, ref, _f(plan.get("stop")), c, mm.get("tokens") or {},
+                                          mm.get("agent"), mm.get("quotes"), now_utc, flat_by)
+                reasons.extend(mmres["block"])
+                later.extend(mmres["entry"])
+                warns.extend(mmres["warn"])
+                info.extend(mmres["info"])
+
         # day-trade checks: stop, loss, reward:risk, daily loss, trades, window, pdt
         max_loss = risk_ps = rr = stop = target = None
         if kind == "entry" and side in ("buy", "sell"):
@@ -599,6 +661,11 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                     if cap and max_loss > cap + CENT:
                         later.append("loss: %s shares x %s risk a share = %s at the stop, over your %s max loss "
                                      "per trade" % (_num(shares), _p(risk_ps), money(max_loss), money(cap)))
+                    elif mmres and mmres["loss"] is not None and mmres["loss"] > max_loss + CENT:
+                        max_loss = mmres["loss"]
+                        if cap and max_loss > cap + CENT:
+                            later.append("loss: %s at the stop with the token's price, fees and gas, over your %s "
+                                         "max loss per trade" % (money(max_loss), money(cap)))
                     min_rr = _f(c.get("min_reward_risk"))
                     if target:
                         if (long and target <= ref + CENT) or (not long and target >= ref - CENT):
@@ -778,6 +845,9 @@ def main(argv=None):
     ap.add_argument("--out", default="trader/state/risk.json", help="where the verdicts are recorded")
     ap.add_argument("--no-write", action="store_true", help="do not record the verdicts")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--mm-tokens", default=os.path.join("trader", "merrymen", "tokens.json"))
+    ap.add_argument("--mm-agent", default=os.path.join("trader", "merrymen", "agent.json"))
+    ap.add_argument("--mm-quotes", default=os.path.join("trader", "merrymen", "quotes.json"))
     a = ap.parse_args(argv)
     try:
         now = parse_now(a.now)
@@ -792,7 +862,10 @@ def main(argv=None):
         pdoc = read_json(a.prices, "prices", required=False) or {}
         prices, times = load_prices(pdoc)
         state = read_json(a.state, "broker state", required=False)
-        res = check(orders, cfg, portfolio, prices, state, a.today, now, times)
+        mmdocs = None
+        if str(cfg.get("broker", "")).lower() == "merrymen":
+            mmdocs = load_merrymen(a.mm_tokens, a.mm_agent, a.mm_quotes)
+        res = check(orders, cfg, portfolio, prices, state, a.today, now, times, mmdocs)
         if pdoc.get("as_of"):
             res["prices_as_of"] = pdoc["as_of"]
         if not a.no_write:

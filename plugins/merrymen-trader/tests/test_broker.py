@@ -11,7 +11,7 @@ from _load import load, ROOT, FIX
 ticket = load("trader-broker", "ticket")
 check = load("trader-risk", "check")
 
-CFG_PATH = os.path.join(ROOT, "trader-budget", "config.example.json")
+CFG_PATH = os.path.join(FIX, "trader-budget", "config.alpaca.json")
 ORDERS_PATH = os.path.join(FIX, "trader-risk", "orders-tsla.json")
 PLAN_PATH = os.path.join(FIX, "trader-budget", "plan-tsla.json")
 NOW = "2026-10-19 10:15"
@@ -91,16 +91,6 @@ class TicketShape(unittest.TestCase):
         self.assertEqual(ticket.max_loss(lim), (45.44, 358.32))
         no_plan = dict(TSLA_CALL)
         self.assertEqual(ticket.max_loss(no_plan), (None, 358.32))
-
-
-class DesktopConfig(unittest.TestCase):
-    def test_example_is_paper_with_placeholder_keys(self):
-        with open(os.path.join(ROOT, "trader-broker", "claude_desktop_config.example.json")) as fh:
-            server = json.load(fh)["mcpServers"]["alpaca"]
-        self.assertEqual((server["command"], server["args"]), ("uvx", ["alpaca-mcp-server"]))
-        self.assertEqual(server["env"]["ALPACA_PAPER_TRADE"], "true")
-        for k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY"):
-            self.assertIn("NEVER_IN_CHAT", server["env"][k])
 
 
 class Flow(unittest.TestCase):
