@@ -4,13 +4,19 @@
     "name": "Merrymen",
     "url": "https://merrymen.dev"
   },
-  "description": "Merrymen for Claude Code: ask about your trading agent, its trades and your portfolio from any session.",
+  "description": "Merrymen for Claude Code: ask about your trading agent, its trades and your portfolio from any session, and day-trade stock tokens through it with every trade approved by you.",
   "plugins": [
     {
       "name": "merrymen",
       "source": "./plugins/merrymen",
       "category": "productivity",
       "tags": ["trading", "agents", "mcp", "robinhood-chain"]
+    },
+    {
+      "name": "merrymen-trader",
+      "source": "./plugins/merrymen-trader",
+      "category": "productivity",
+      "tags": ["trading", "day-trading", "stock-tokens", "robinhood-chain", "paper-trading"]
     }
   ]
 }

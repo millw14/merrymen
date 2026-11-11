@@ -649,3 +649,11 @@ jobs:
       - name: Test
         working-directory: services/brain
         run: python -m pytest -q
+
+      # The merrymen-trader Claude plugin is standard-library Python too: the
+      # pre-trade checks and the proposal log behind its trade proposals. Its
+      # suite is offline (fixtures only, no network), so it rides on this
+      # job's Python rather than a runner of its own.
+      - name: Test the merrymen-trader plugin
+        working-directory: plugins/merrymen-trader
+        run: python -m unittest discover -s tests
