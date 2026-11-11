@@ -7,6 +7,7 @@ import { buildRevokeSolanaSessionsInstruction, buildSetSolanaBreakerInstruction,
   SOLANA_WRAPPED_SOL_MINT } from "../../../packages/core/src/solana-live";
 import { displaySolanaAmount, displaySolanaAmountOrNull, solanaUnits } from "../lib/solana-amounts";
 import { RequestError } from "./request-json";
+import { solanaSignInRefusal, type SolanaSignInRefusal } from "../lib/solana-sign-in";
 import type { SolanaApi } from "./SolanaAutomation";
 import { OWNER_MAX_PRIORITY_FEE_LAMPORTS, readOwnerPaidTransaction, secondsUntil, type OwnerPaidInstruction } from "./SolanaPermission";
 
@@ -171,22 +172,27 @@ const FRESH_MINIMUM = /^[1-9][0-9]{0,38}$/;
  * A SOLANA ROUTE'S ANSWER, WITH WHAT ITS BODY SAYS BEYOND THE SENTENCE.
  *
  * requestJson keeps only a refusal's sentence and status. solanaResponse
- * (web/src/lib/solana-api.ts) adds two fields the page acts on, kept here
+ * (web/src/lib/solana-api.ts) adds three fields the page acts on, kept here
  * only after validation; anything else reads as absent:
  * - notSaved: THIS request saved and sent nothing. It says nothing about an
  *   earlier submission of the same bytes (savedNothing).
  * - freshMinOutAmount: on a price-moved 409, what the fresh quote guarantees,
  *   in the output token's base units: a canonical positive integer.
+ * - signIn: why the sign-in itself was refused, by code (solana-sign-in.ts),
+ *   so the page can offer the way out instead of the bare refusal.
  * SolanaScreen's solanaRequestJson throws it for every Solana route.
  */
 export class SolanaRequestError extends RequestError {
   readonly notSaved: boolean;
   readonly freshMinOutAmount: string | null;
+  readonly signIn: SolanaSignInRefusal | null;
   constructor(message: string, status: number, body?: unknown) {
     super(message, status);
-    const fields: { notSaved?: unknown; freshMinOutAmount?: unknown } = body !== null && typeof body === "object" ? body : {};
+    const fields: { notSaved?: unknown; freshMinOutAmount?: unknown; signIn?: unknown } = body !== null && typeof body === "object" ? body : {};
     this.notSaved = fields.notSaved === true;
     this.freshMinOutAmount = typeof fields.freshMinOutAmount === "string" && FRESH_MINIMUM.test(fields.freshMinOutAmount) ? fields.freshMinOutAmount : null;
+    // Only a refusal says why the sign-in was refused.
+    this.signIn = status === 401 || status === 403 ? solanaSignInRefusal(fields.signIn) : null;
   }
 }
 

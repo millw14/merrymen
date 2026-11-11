@@ -15,7 +15,7 @@ import { ownerKeyExportEnabled, pageTrustsVaultProgram, releasedProgramSha256, S
 import { checkPreparedPermission, PermissionReview, PermissionTerms, permissionExpiry, secondsUntil, type PreparedPermission, type SignedPermissionTerms } from "./SolanaPermission";
 import { deriveSolanaAta, deriveSolanaVaultAddress } from "../../../packages/core/src/solana-live";
 import { solanaUnits as units, displaySolanaAmount as display, displaySolanaAmountOrNull } from "../lib/solana-amounts";
-import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
+import { SOLANA_OTHER_SIGN_IN, solanaAccountLoginText, type SolanaAccountLogin, type SolanaSignInRefusal } from "../lib/solana-sign-in";
 import { CopyButton, shortAddress } from "./CopyButton";
 import { count as groupedCount } from "../lib/format";
 import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_MISCONFIGURED, SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION,
@@ -95,6 +95,47 @@ export const SOLANA_PRICE_MOVED = "The price moved. Preview again; nothing was s
  */
 function otherSignIn(error: unknown): boolean {
   return error instanceof RequestError && (error.status === 403 || error.status === 409) && error.message === SOLANA_OTHER_SIGN_IN;
+}
+/** Why a Solana route refused the sign-in itself, by its code (solana-sign-in.ts); null for any other answer. */
+function signInRefusalOf(error: unknown): SolanaSignInRefusal | null {
+  return error instanceof SolanaRequestError ? error.signIn : null;
+}
+const LOGIN_NAMES = { twitter: "X", email: "email", google: "Google" } as const;
+
+/**
+ * THE WAY OUT OF A REFUSED SIGN-IN, in place of the account (solana-sign-in.ts says when each is answered).
+ *
+ * The refusal is the server's and this changes none of it; it only offers the press that ends it:
+ * - signed-out: the sign-in finishes here. PrivySignIn proves the wallet sign-in's login and mints the session for
+ *   that login's own account, as it does anywhere on the site; there was no session for it to replace.
+ * - expired: the wallet sign-in signs out, so the owner can sign in again.
+ * - mismatch: both logins are named, and the owner chooses. Signing in with the account's own login signs the
+ *   wallet sign-in out first; keeping the wallet sign-in's login opens that login's account across the site.
+ *   Nothing switches until a button says so: the account someone is signed in to is never swapped by itself.
+ */
+function SignInRepair({ refusal, account, login, switching, signingOut, error, onSignOut, onSwitch, onDone }: {
+  refusal: SolanaSignInRefusal; account: SolanaAccountLogin | null; login: string | null; switching: boolean; signingOut: boolean; error: string;
+  onSignOut: () => void; onSwitch: () => void; onDone: () => void;
+}) {
+  const failure = error ? <p role="alert" className="solana-error">{error}</p> : null;
+  if (refusal.problem === "signed-out") return <div className="solana-card"><h2>Finish signing in</h2>
+    <p>Confirm this browser&apos;s sign-in to open your Solana account.</p>{failure}<SignIn onDone={onDone} /></div>;
+  if (refusal.problem === "expired") return <div className="solana-card"><h2>Sign in again</h2>
+    <p>Your wallet sign-in on this browser has expired.</p>{failure}
+    <button disabled={signingOut} onClick={onSignOut}>{signingOut ? "Signing out…" : "Sign in again"}</button></div>;
+  const named = account && account.provider !== "wallet" ? LOGIN_NAMES[account.provider] : null, loginText = login ?? "a different login";
+  return <div className="solana-card"><h2>Two different sign-ins</h2>
+    <p>You&apos;re signed in to Merrymen with {solanaAccountLoginText(account)}, but this browser&apos;s wallet sign-in is {loginText}. Solana needs both to be the same login.</p>
+    {failure}
+    {!switching && <div className="solana-row">
+      <button disabled={signingOut} onClick={onSignOut}>{signingOut ? "Signing out…" : named ? `Sign in with ${named}` : "Sign in again"}</button>
+      <button className="solana-secondary" disabled={signingOut} onClick={onSwitch}>Use this wallet sign-in instead</button>
+    </div>}
+    <p className="solana-fine">{refusal.loginHasAccount
+      ? `Using the wallet sign-in opens the Merrymen account of ${loginText}, everywhere on the site.`
+      : `Using the wallet sign-in starts a new, empty Merrymen account for ${loginText}. The account you're signed in to now stays as it is.`}</p>
+    {switching && <SignIn onDone={onDone} />}
+  </div>;
 }
 /** The market's zero-output answer: no route buys this amount (TOO_SMALL in web/src/lib/solana-api.ts; pinned the same way). */
 export const SOLANA_TOO_SMALL = "This amount is too small to trade: no route returns anything for it. Nothing was sent or recorded. Try a larger amount.";
@@ -284,6 +325,17 @@ function ConnectedSolana() {
   const [notice, setNotice] = useState("");
   // The account's wallet was verified with another sign-in (otherSignIn): no wallet to create or verify here.
   const [otherLogin, setOtherLogin] = useState(false);
+  // The sign-in itself was refused, by code (signInRefusalOf): SignInRepair shows in place of the account.
+  const [signInRefusal, setSignInRefusal] = useState<SolanaSignInRefusal | null>(null);
+  // The login of the account the Merrymen session is for, as the last mismatch named it. Kept through the wallet
+  // sign-out SignInRepair offers, so the sign-in that follows can say which login to choose.
+  const [accountLogin, setAccountLogin] = useState<SolanaAccountLogin | null>(null);
+  // switching: the owner chose to keep the wallet sign-in's login, and its sign-in is finishing on the card.
+  const [switching, setSwitching] = useState(false), [signingOut, setSigningOut] = useState(false);
+  const refused = useCallback((refusal: SolanaSignInRefusal) => {
+    setSignInRefusal(refusal);
+    if (refusal.account) setAccountLogin(refusal.account);
+  }, []);
   const [dust, setDust] = useState<DustLot | null>(null);
   // The USDG deposit address the page derived itself, for a program its pin trusts; the funding card shows only that.
   const [depositAccount, setDepositAccount] = useState<string | null>(null);
@@ -322,7 +374,7 @@ function ConnectedSolana() {
     if (!requestedIdentity) throw new Error("Sign in before opening your Solana account.");
     const token = await tokenSource.current();
     if (requestedIdentity !== identity.current || requestedEpoch !== accountEpoch.current) throw new Error("Your signing account changed. Refresh before continuing.");
-    if (!token) throw new Error("Your sign-in expired. Sign in again.");
+    if (!token) throw new SolanaRequestError("Your sign-in expired. Sign in again.", 401, { signIn: { problem: "expired" } });
     const result = await solanaRequestJson<T>(`/api/solana/${path}`, { signal,
       headers: { Authorization: `Bearer ${token}`, "X-Merrymen-Privy-Did": requestedIdentity, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
       ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }),
@@ -337,7 +389,7 @@ function ConnectedSolana() {
     if (epoch !== accountEpoch.current || signal?.aborted) return null;
     if (statusRevision.current !== null && statusRevision.current !== next.binding?.revision) { setPreview(null); discardReview(); }
     statusRevision.current = next.binding?.revision ?? null;
-    setStatus(next); setOtherLogin(false);
+    setStatus(next); setOtherLogin(false); setSignInRefusal(null);
     if (next.binding) {
       setMode(next.binding.requestedMode);
       if (next.binding.limits) {
@@ -363,23 +415,29 @@ function ConnectedSolana() {
     accountEpoch.current++;
     setStatus(null); setError(""); setNotice(""); setOtherLogin(false); setDust(null); setConsent(false); setPreview(null); setReceipt(null); setRegistration(null); request.current = null; statusRevision.current = null;
     discardReview(); setReviewLapsed(false); setSetupStep(null); setSetupAsked(false); setEditingLimits(false);
+    setSignInRefusal(null); setSwitching(false);
     if (!signer.authenticated) return;
     const abort = new AbortController();
     // The first read can be paced too (the status route allows a burst, then one read every few seconds): a wait, not a failure.
     void refresh(abort.signal).catch((e: unknown) => {
       if (abort.signal.aborted) return;
+      const refusal = signInRefusalOf(e);
+      if (refusal) { refused(refusal); return; }
       if (otherSignIn(e)) { setOtherLogin(true); return; }
       const paced = pacedAnswer(e);
       if (paced !== null) setNotice(paced); else setError(e instanceof Error ? e.message : "Could not load your Solana account.");
     });
     return () => { accountEpoch.current++; abort.abort(); };
-  }, [signer.did, signer.authenticated, refresh, discardReview]);
+  }, [signer.did, signer.authenticated, refresh, discardReview, refused]);
   const act = async (fn: () => Promise<void>) => {
     if (inFlight.current) return;
     inFlight.current = true; setBusy(true); setError(""); setNotice("");
     const epoch = accountEpoch.current;
     try { await fn(); } catch (e) {
       if (epoch !== accountEpoch.current) return;
+      // The sign-in itself was refused: SignInRepair replaces the account until it is put right.
+      const refusal = signInRefusalOf(e);
+      if (refusal) { refused(refusal); return; }
       // Said once, in the wallet card, which then offers no wallet to create or verify.
       if (otherSignIn(e)) { setOtherLogin(true); return; }
       // Paced before anything ran: the server's own words say to wait. The page
@@ -893,7 +951,19 @@ function ConnectedSolana() {
   // connected wallet is not the verified one, which needs attention. Otherwise it sits below the trading cards, and the
   // dock keeps its address and the refresh one press away.
   const walletFirst = !binding || !sameWallet;
-  if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p><SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
+  if (!signer.authenticated) return <div className="solana-card"><p>Sign in with the same account you use for Robinhood Chain.</p>
+    {accountLogin && <p>Your Merrymen account signs in with {solanaAccountLoginText(accountLogin)}.</p>}
+    <SignIn onDone={() => { void refresh().catch(() => undefined); }} /></div>;
+  if (signInRefusal) return <SignInRepair refusal={signInRefusal} account={signInRefusal.account ?? accountLogin} login={signer.login}
+    switching={switching} signingOut={signingOut} error={error}
+    onSignOut={() => {
+      setSigningOut(true); setError("");
+      // Only the wallet sign-in ends; the page then asks for a sign-in, naming the account's own login.
+      void signer.signOutWallet().catch(() => setError("The wallet sign-in did not sign out. Try again.")).finally(() => setSigningOut(false));
+    }}
+    onSwitch={() => { setError(""); setSwitching(true); }}
+    // The session is now this browser's wallet sign-in's account (or, signed out before, the first one): read it afresh.
+    onDone={() => { setSwitching(false); setSignInRefusal(null); void act(() => refresh()); }} />;
   const walletCard = <div id="solana-wallet" className="solana-card"><h2>{binding || otherLogin ? "Wallet ownership" : "Get started"}</h2>
       {otherLogin && <p role="alert" className="solana-error">{SOLANA_OTHER_SIGN_IN}</p>}
       {binding ? <><p className="solana-address">{binding.owner}</p><p>{sameWallet ? "Verified wallet connected." : "Connect the exact embedded wallet shown above before signing a permission."}</p>

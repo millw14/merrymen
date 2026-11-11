@@ -14,7 +14,7 @@ import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruct
 import { JSDOM } from "jsdom";
 import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-command";
 import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
-import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
+import { SOLANA_OTHER_SIGN_IN, SOLANA_SIGN_IN_MISMATCH } from "../lib/solana-sign-in";
 import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
 import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "../lib/solana-live-caps";
@@ -122,6 +122,8 @@ let walletOpen = 0;
 /** What the fixture wallet returns for a signature request (a promise: the wallet stays open until it settles). */
 let signedBytes: () => Uint8Array | Promise<Uint8Array>;
 let signerDid = "did:privy:alice";
+/** The fixture's wallet sign-in: whether it is signed in, its login in words, and how often the page signed it out. */
+let signerAuthenticated = true, signerLogin: string | null = "email (james@example.com)", walletSignOuts = 0;
 /** The fixture wallet's address: null until create() makes one, as Privy shows a new wallet on a later render. */
 let signerAddress: string | null = OWNER, createCount = 0;
 /** The release pin SolanaRecovery reads (SOLANA_VAULT_RELEASES); undefined reads the real one. */
@@ -158,9 +160,11 @@ before(async () => {
     if (parent?.filename === path) {
       if (id === "./SolanaScreen.css") return {};
       if (id === "@/lib/privy-client") return { privyEnabled: () => true };
-      if (id === "./HostedControls") return { SignIn: () => React.createElement("p", null, "Sign in") };
+      // A sign-in that finishes when pressed, as PrivySignIn does once its proof lands.
+      if (id === "./HostedControls") return { SignIn: ({ onDone }: { onDone: () => void }) => React.createElement("button", { type: "button", onClick: onDone }, "Sign in") };
       if (id === "./useSolanaOwner") return { useSolanaOwner: () => ({
-        ready: true, authenticated: true, did: signerDid, address: signerAddress, ambiguous: false,
+        ready: true, authenticated: signerAuthenticated, did: signerAuthenticated ? signerDid : null, address: signerAddress, ambiguous: false,
+        login: signerAuthenticated ? signerLogin : null, signOutWallet: async () => { walletSignOuts++; signerAuthenticated = false; },
         getAccessToken: async () => "fixture-token", create: async () => { createCount++; signerAddress = OWNER; }, signBinding: async () => "fixture-signature",
         signSetup: async () => { signCount++; walletOpen++; try { return await signedBytes(); } finally { walletOpen--; } },
         exportKey: async () => { exportCount++; },
@@ -172,6 +176,7 @@ before(async () => {
   finally { intercept.mock.restore(); }
 });
 beforeEach(() => {
+  signerAuthenticated = true; signerLogin = "email (james@example.com)"; walletSignOuts = 0;
   ui = testDom(); signerDid = "did:privy:alice"; signerAddress = OWNER; createCount = 0; state = initial(); calls = []; signCount = 0; exportCount = 0; walletOpen = 0; signedBytes = () => Uint8Array.from([1, 2, 3]); releases = undefined;
   respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
   globalThis.fetch = async (url, init) => {
@@ -324,6 +329,85 @@ test("a status answer that another sign-in verified this account's wallet offers
   signerDid = "did:privy:bob"; await render(); await settle();
   assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 0);
   assert.ok(ui.container.textContent!.includes(OWNER) && /Verified wallet connected/.test(ui.container.textContent!));
+});
+/** The status route's answer while the session and the wallet sign-in are different logins (solana-auth.ts). */
+const mismatchAnswer = (loginHasAccount: boolean) => json({ error: SOLANA_SIGN_IN_MISMATCH, ownerFacing: true,
+  signIn: { problem: "mismatch", account: { provider: "twitter", handle: "jamesc" }, loginHasAccount } }, 403);
+test("a session and a wallet sign-in of different logins: both are named, and nothing switches until the owner chooses", async () => {
+  respond = async (path) => { if (path === "status") return mismatchAnswer(false); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  const text = ui.container.textContent!;
+  assert.match(text, /Two different sign-ins/);
+  assert.match(text, /signed in to Merrymen with X \(@jamesc\), but this browser's wallet sign-in is email \(james@example\.com\)/);
+  assert.match(text, /starts a new, empty Merrymen account for email \(james@example\.com\)\. The account you're signed in to now stays as it is/);
+  assert.ok(!text.includes(SOLANA_SIGN_IN_MISMATCH), "the bare refusal is not what the page says");
+  assert.equal(button("Set up my account"), undefined, "no wallet is offered for the wrong login");
+  assert.equal(walletSignOuts, 0); assert.equal(button("Sign in"), undefined, "no sign-in runs by itself");
+  // Sign in with the account's own login: the wallet sign-in ends, and the sign-in that follows names that login.
+  await press("Sign in with X");
+  assert.equal(walletSignOuts, 1);
+  await render(); await settle();
+  assert.match(ui.container.textContent!, /Your Merrymen account signs in with X \(@jamesc\)\./);
+  assert.ok(button("Sign in"));
+  // The right login now: the account opens.
+  signerAuthenticated = true; signerDid = "did:privy:james-x";
+  respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.ok(!/Two different sign-ins/.test(ui.container.textContent!));
+  assert.ok(ui.container.textContent!.includes(OWNER));
+});
+test("keeping the wallet sign-in's login finishes its sign-in, then reads that account", async () => {
+  let switched = false;
+  respond = async (path) => { if (path === "status") return switched ? json(state) : mismatchAnswer(true); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.match(ui.container.textContent!, /opens the Merrymen account of email \(james@example\.com\), everywhere on the site/);
+  await press("Use this wallet sign-in instead");
+  assert.equal(walletSignOuts, 0, "the wallet sign-in is kept");
+  assert.equal(button("Sign in with X"), undefined, "one choice at a time");
+  // The sign-in's proof lands (PrivySignIn's onDone): the session is now that login's account.
+  switched = true;
+  const reads = calls.filter((call) => call.path === "status").length;
+  await press("Sign in");
+  assert.equal(calls.filter((call) => call.path === "status").length, reads + 1, "read afresh once");
+  assert.ok(!/Two different sign-ins/.test(ui.container.textContent!));
+  assert.ok(ui.container.textContent!.includes(OWNER));
+});
+test("an action refused for a different login shows the same choice, not a bare error", async () => {
+  respond = async (path) => {
+    if (path === "status") return json({ binding: null, runtime: null });
+    if (path.startsWith("bind?owner=")) return mismatchAnswer(false);
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Set up my account");
+  assert.match(ui.container.textContent!, /Two different sign-ins/);
+  assert.ok(button("Sign in with X") && button("Use this wallet sign-in instead"));
+  assert.equal(calls.filter((call) => call.path === "bind").length, 0, "nothing was signed or posted");
+});
+test("no Merrymen session in this browser: the sign-in finishes on the page, then the account opens", async () => {
+  let session = false;
+  respond = async (path) => {
+    if (path !== "status") throw new Error("Unexpected fixture route");
+    return session ? json(state) : json({ error: "Sign in before opening your Solana account.", ownerFacing: true, signIn: { problem: "signed-out", account: null, loginHasAccount: false } }, 401);
+  };
+  await render(); await settle();
+  assert.match(ui.container.textContent!, /Finish signing in/);
+  assert.ok(!ui.container.textContent!.includes("Sign in before opening your Solana account."), "a way forward, not the bare refusal");
+  session = true; await press("Sign in");
+  assert.ok(!/Finish signing in/.test(ui.container.textContent!));
+  assert.ok(ui.container.textContent!.includes(OWNER));
+});
+test("an expired wallet sign-in offers to sign in again, from the server's answer or a missing token", async () => {
+  respond = async (path) => { if (path === "status") return json({ error: "Your sign-in expired. Sign in again.", ownerFacing: true, signIn: { problem: "expired" } }, 401); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.match(ui.container.textContent!, /Your wallet sign-in on this browser has expired/);
+  await press("Sign in again");
+  assert.equal(walletSignOuts, 1);
+  // A refusal that only looks like one, without its code, stays a plain error.
+  await ui.close(); ui = testDom(); signerAuthenticated = true;
+  respond = async (path) => { if (path === "status") return json({ error: "Your sign-in expired. Sign in again.", ownerFacing: true, signIn: { problem: "nonsense" } }, 401); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.ok(!/has expired/.test(ui.container.textContent!));
+  assert.match(ui.container.textContent!, /Your sign-in expired\. Sign in again\./);
 });
 test("a verify the bind route refuses as another sign-in's stops offering create and verify, and names the way back", async () => {
   respond = async (path) => {

@@ -11,7 +11,7 @@ import { SolanaPaperPriceMovedError, SolanaPaperServiceError } from "../../../wo
 import { SolanaSettlementError } from "../../../worker/src/solana-settlement";
 import { authenticateSolana, SolanaWebError } from "./solana-auth";
 import { getSolanaBindingStore, SolanaBindingError } from "./solana-binding-store";
-import { SOLANA_OTHER_SIGN_IN } from "./solana-sign-in";
+import { SOLANA_OTHER_SIGN_IN, type SolanaSignInRefusal } from "./solana-sign-in";
 import { solanaEnabled } from "./solana-enabled";
 
 export async function solanaRequestBody(req: Request, allowed: readonly string[]): Promise<Record<string, unknown>> {
@@ -224,8 +224,9 @@ export async function solanaResponse(action: () => Promise<unknown>) {
   try { return NextResponse.json(await action(), { headers }); }
   catch (error) {
     let status = 503, message = "Solana is temporarily unavailable. Nothing was confirmed; refresh to check existing requests before retrying.", notSaved = false;
+    let signIn: SolanaSignInRefusal | null = null;
     if (setupError(error)) message = NOT_AVAILABLE;
-    else if (error instanceof SolanaWebError) { status = error.status; message = error.message; }
+    else if (error instanceof SolanaWebError) { status = error.status; message = error.message; signIn = error.signIn; }
     else if (error instanceof SolanaBindingError) { status = error.code === "invalid" ? 400 : 409; message = error.message; }
     else if (error instanceof SolanaPaperStoreError && Object.hasOwn(PAPER_BOOK_REFUSALS, error.code)) { status = 409; message = PAPER_BOOK_REFUSALS[error.code]!; }
     else if (error instanceof SolanaPaperValidationError || error instanceof SolanaPaperStoreError) { status = 400; message = error.message; }
@@ -245,6 +246,6 @@ export async function solanaResponse(action: () => Promise<unknown>) {
     // Unknown provider/storage errors are never reflected: they may contain
     // endpoints, API keys, sealed session keys, SQL values or wallet material.
     const fresh = status === 409 && message === PRICE_MOVED ? freshMinimum(error) : undefined;
-    return NextResponse.json({ error: message, ownerFacing: true, ...(notSaved ? { notSaved: true } : {}), ...(fresh ? { freshMinOutAmount: fresh } : {}) }, { status, headers });
+    return NextResponse.json({ error: message, ownerFacing: true, ...(signIn ? { signIn } : {}), ...(notSaved ? { notSaved: true } : {}), ...(fresh ? { freshMinOutAmount: fresh } : {}) }, { status, headers });
   }
 }
