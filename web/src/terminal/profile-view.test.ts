@@ -172,8 +172,11 @@ describe("the owner's own read, as the page takes it", () => {
 
   it("carries the owner's current value and dollar P&L, as sent", async () => {
     assert.deepEqual((await read(answer()))!.figures,
-      { book: "live", equityUsdg: 103, equityAt: 3_000, pnlUsdg: 2, pnlAt: 3_000, underReview: false, pnlEstimated: false });
+      { book: "live", equityUsdg: 103, equityAt: 3_000, held: false, pnlUsdg: 2, pnlAt: 3_000, underReview: false, pnlEstimated: false });
     assert.equal((await read(answer({}, { pnlEstimated: true })))!.figures!.pnlEstimated, true);
+    // A held value says so, as its own read did; anything but `true` is not held.
+    assert.equal((await read(answer({}, { held: true })))!.figures!.held, true);
+    assert.equal((await read(answer({}, { held: "yes" })))!.figures!.held, false);
   });
 
   it("figures the server could not read, or an older server that sent none, are null — never zero", async () => {

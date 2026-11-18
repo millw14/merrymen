@@ -412,6 +412,12 @@ export interface OwnFigures {
   book: "paper" | "live" | null;
   equityUsdg: number | null;
   equityAt: number | null;
+  /**
+   * The value above is a held mark (pending reconciliation). The owner's own,
+   * because it describes this read's value: the public read beside it is a
+   * moment older and may describe another mark.
+   */
+  held: boolean;
   pnlUsdg: number | null;
   pnlAt: number | null;
   /** The return is withheld (return-review.ts), so pnlUsdg is null. */
@@ -439,7 +445,7 @@ export async function ownBookOf(
   try {
     const p = (await readFigures(db, row.smart_account, epoch, true)).performance;
     figures = {
-      book: p.book, equityUsdg: p.equityUsdg, equityAt: p.equityAt, pnlUsdg: p.pnlUsdg, pnlAt: p.pnlAt,
+      book: p.book, equityUsdg: p.equityUsdg, equityAt: p.equityAt, held: p.held, pnlUsdg: p.pnlUsdg, pnlAt: p.pnlAt,
       underReview: p.underReview, pnlEstimated: p.pnlEstimated === true,
     };
   } catch {

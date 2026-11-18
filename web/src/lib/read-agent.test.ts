@@ -394,8 +394,8 @@ test("profile and leaderboard publish the same held/as-of headline and only the 
 });
 
 /** The money a page prints from a book's figures, and what places it. */
-const money = (p: { book: unknown; equityUsdg: unknown; equityAt: unknown; pnlUsdg: unknown; pnlAt: unknown; underReview: unknown; pnlEstimated?: unknown }) =>
-  ({ book: p.book, equityUsdg: p.equityUsdg, equityAt: p.equityAt, pnlUsdg: p.pnlUsdg, pnlAt: p.pnlAt, underReview: p.underReview, pnlEstimated: p.pnlEstimated === true });
+const money = (p: { book: unknown; equityUsdg: unknown; equityAt: unknown; held: unknown; pnlUsdg: unknown; pnlAt: unknown; underReview: unknown; pnlEstimated?: unknown }) =>
+  ({ book: p.book, equityUsdg: p.equityUsdg, equityAt: p.equityAt, held: p.held, pnlUsdg: p.pnlUsdg, pnlAt: p.pnlAt, underReview: p.underReview, pnlEstimated: p.pnlEstimated === true });
 
 test("the owner's own read carries the value and dollar P&L a private profile withholds: the published figures, by the same read", async () => {
   // "Why can't he see his balance": a private book's current value read
@@ -419,6 +419,7 @@ test("the owner's own read carries the value and dollar P&L a private profile wi
     assert.equal(own.figuresRead, true);
     assert.deepEqual(own.figures, money((await profileOf(db, identity, true))!.performance!));
     assert.equal(own.figures!.equityUsdg, 105, "the newest valuation, held or not");
+    assert.equal(own.figures!.held, true, "and says it is held, as its own read does");
     assert.equal(own.figures!.pnlAt, T0 + 60, "and the P&L of the last measured one");
     assert.ok(Math.abs(own.figures!.pnlUsdg! - 0.0025) < 1e-9);
     assert.equal((own.figures as unknown as Record<string, unknown>).publicBook, undefined, "the book is not called published");

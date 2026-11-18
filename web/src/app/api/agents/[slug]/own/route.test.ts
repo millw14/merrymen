@@ -108,7 +108,7 @@ it("the owner's session gets its own current value and dollar P&L on a private b
   const body = (await res.json()) as Record<string, unknown>;
   assert.equal(body.figuresRead, true);
   assert.deepEqual(body.figures, {
-    book: "live", equityUsdg: 103, equityAt: 3000, pnlUsdg: 2, pnlAt: 3000, underReview: false, pnlEstimated: false,
+    book: "live", equityUsdg: 103, equityAt: 3000, held: false, pnlUsdg: 2, pnlAt: 3000, underReview: false, pnlEstimated: false,
   });
   // Only the money and what places it: the book stays private, and the
   // return and its counts are the public read's to say.

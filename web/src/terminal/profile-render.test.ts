@@ -393,11 +393,39 @@ it("the owner's paper book says paper once, as it always did", async () => {
 it("signing out on the owner's page takes their figures off it at once", async () => {
   globalThis.fetch = (async () => json(ownAnswer())) as typeof fetch;
   const a = agent({ publicBook: false, performance: privatePerformance() });
-  await render(a, { isMine: true });
+  // What each commit put on screen, read before any effect runs: a figure only
+  // an effect clears would be painted for a frame, which `act` alone hides.
+  const painted: (string | null)[] = [];
+  function Probe() {
+    React.useLayoutEffect(() => { painted.push(valueShown()); });
+    return null;
+  }
+  // One tree for both renders, so the page keeps its state across the switch.
+  const page = (isMine: boolean) => ui.render(React.createElement(React.Fragment, null,
+    React.createElement(Profile, { agent: a, theses: [], tokens: [], onBack() {}, onToken() {}, isMine }),
+    React.createElement(Probe)));
+  await page(true);
   await act(async () => {});
   assert.equal(valueShown(), "$1,125.00");
   // Same page, same agent: the session is no longer the owner's.
-  await render(a, { isMine: false });
+  painted.length = 0;
+  await page(false);
+  assert.deepEqual(painted, ["Private"], "the first commit after sign-out already shows Private");
   assert.equal(valueShown(), "Private");
   assert.doesNotMatch(text(), /1,125|\+\$125|Only you can see/);
+});
+
+it("the owner's value keeps its own read's held flag, and its dollars sit only beside the return they were measured with", async () => {
+  // A mark landed between the public read and the owner's: the public one is
+  // held and older, the owner's newer and unheld, measured at another time.
+  globalThis.fetch = (async () => json(ownAnswer({ equityUsdg: 1_300, equityAt: nowSec() - 5, held: false, pnlUsdg: 300, pnlAt: nowSec() - 5 }))) as typeof fetch;
+  await render(agent({ publicBook: false, performance: { ...privatePerformance(), held: true, pnlAt: nowSec() - 300 } }), { isMine: true });
+  await act(async () => {});
+  const current = ui.container.querySelector(".profile-current-value")!;
+  assert.equal(valueShown(), "$1,300.00");
+  assert.doesNotMatch(current.textContent!, /Pending reconciliation/, "the owner's value is not held");
+  assert.doesNotMatch(current.getAttribute("title")!, /pending reconciliation/);
+  assert.equal(ui.container.querySelector(".profile-pnl"), null, "no dollars beside a return of another valuation");
+  assert.equal(ui.container.querySelector(".public-return")!.textContent, "+12.5%");
+  assert.doesNotMatch(text(), /\+\$300|\$0\.00/);
 });

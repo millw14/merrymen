@@ -9,6 +9,7 @@ import { Board } from "./screens/Board";
 import { DesktopSidebar } from "./Desktop";
 import { performanceOf, type AgentPerformance } from "./agent-performance";
 import type { OwnFigures } from "@/lib/read-agent";
+import { fullDateTime } from "@/lib/format";
 
 (globalThis as unknown as { React: typeof React }).React = React;
 const noop = () => {};
@@ -199,7 +200,7 @@ test("the owner's own figures replace Private on their own view, by the publishe
     ...agent,
   }) as LiveAgent;
   const own = (over: Partial<OwnFigures> = {}): OwnFigures => ({
-    book: "live", equityUsdg: 1125, equityAt: 1_790_000_100, pnlUsdg: 125, pnlAt: 1_790_000_100, underReview: false, pnlEstimated: false, ...over,
+    book: "live", equityUsdg: 1125, equityAt: 1_790_000_100, held: false, pnlUsdg: 125, pnlAt: 1_790_000_100, underReview: false, pnlEstimated: false, ...over,
   });
 
   // Nobody passes figures but the owner's view: a stranger, the board, a read
@@ -234,4 +235,79 @@ test("the owner's own figures replace Private on their own view, by the publishe
   // A published book prints its own figures, whatever else is passed.
   const pub = performanceOf(priv({ publicBook: true, equityUsdg: 900, pnlUsdg: -100 }), undefined, own());
   assert.deepEqual([pub.value, pub.pnl, pub.ownerOnly], ["$900.00", "−$100.00", false]);
+});
+
+test("the owner's figures keep their own read's held flag and time, and their dollars sit only beside the return they were measured with", () => {
+  // The owner's read lands a moment after the public one, so a worker mark can
+  // arrive between them. A published book's value, held flag, valuation time,
+  // dollar P&L and percentage all come from one read; the owner's page must
+  // never pair a value with another read's "Pending reconciliation" or time,
+  // or print a dollar P&L beside a percentage of another valuation.
+  const now = 1_790_010_000;
+  const priv = (over: Partial<AgentPerformance> = {}) => ({
+    slug: "shogun", name: "Shogun", handle: null, mode: "live", pnlBps: 1250, curve: [], landed: 3,
+    performance: performance({ publicBook: false, equityUsdg: null, pnlUsdg: null, fills: 3, fillsAtMark: 3, valuation: "current", ...over }),
+  }) as unknown as LiveAgent;
+  const pub = (over: Partial<AgentPerformance> = {}) => ({ ...priv({ publicBook: true, ...over }) }) as LiveAgent;
+  const own = (over: Partial<OwnFigures> = {}): OwnFigures => ({
+    book: "live", equityUsdg: 1125, equityAt: now - 60, held: false, pnlUsdg: 125, pnlAt: now - 60, underReview: false, pnlEstimated: false, ...over,
+  });
+  const valued = (at: number) => `Valued ${fullDateTime(at * 1000)}`;
+
+  // A newer, unheld mark landed after the public read: the reviewer's case.
+  const newer = performanceOf(
+    priv({ held: true, equityAt: now - 60, pnlAt: now - 300, pnlBps: 1250 }), now,
+    own({ equityUsdg: 1300, equityAt: now - 5, held: false, pnlUsdg: 300, pnlAt: now - 5 }),
+  );
+  assert.equal(newer.value, "$1,300.00");
+  assert.equal(newer.held, false, "the owner's value is not held, whatever the older public mark was");
+  assert.ok(newer.title.includes(valued(now - 5)), newer.title);
+  assert.doesNotMatch(newer.title, /pending reconciliation/);
+  assert.equal(newer.pnl, null, "no dollars beside a percentage of another valuation");
+  assert.equal(newer.bps, 1250, "the percentage stays the public read's");
+  assert.equal(newer.ownerOnly, true);
+
+  // The owner's read trails: an older, held mark. Its own flag and time go with it.
+  const older = performanceOf(
+    priv({ held: false, equityAt: now - 5, pnlAt: now - 5 }), now,
+    own({ equityUsdg: 1100, equityAt: now - 60, held: true, pnlAt: now - 300 }),
+  );
+  assert.deepEqual([older.value, older.held, older.pnl], ["$1,100.00", true, null]);
+  assert.ok(older.title.includes(valued(now - 60)) && /pending reconciliation/.test(older.title), older.title);
+
+  // A held mark newer than the measured one, with the same measured valuation
+  // in both reads: the dollars stand, and the value says it is pending.
+  const pending = performanceOf(priv({ pnlAt: now - 300 }), now, own({ equityAt: now - 5, held: true, pnlAt: now - 300 }));
+  assert.deepEqual([pending.value, pending.pnl, pending.held], ["$1,125.00", "+$125.00", true]);
+
+  // "as of" follows the value shown: a stale public time does not stamp a fresh owner value, nor the reverse.
+  const stale = now - 2 * 60 * 60;
+  assert.equal(performanceOf(priv({ equityAt: stale }), now, own({ equityAt: now - 5 })).asOf, null);
+  assert.match(performanceOf(priv({ equityAt: now - 5 }), now, own({ equityAt: stale })).asOf ?? "", /^as of /);
+
+  // ONE SNAPSHOT, OWNER VS PUBLISHED: a live book with unpriced gas whose only
+  // figure is the dollar P&L (no percentage on a net contribution of zero or
+  // less). The private read says nothing is estimated, because it carries no
+  // figure (book-performance.ts); the owner's read and the published read do.
+  const snapshot = { equityAt: now - 60, pnlAt: now - 60, held: false, gasComplete: false, pnlBps: null };
+  const ownerView = performanceOf({ ...priv({ ...snapshot, pnlEstimated: false }), pnlBps: null } as LiveAgent, now,
+    own({ equityUsdg: 120, pnlUsdg: 49.5, pnlEstimated: true }));
+  const published = performanceOf({ ...pub({ ...snapshot, equityUsdg: 120, pnlUsdg: 49.5, pnlEstimated: true }), pnlBps: null } as LiveAgent, now);
+  assert.deepEqual(
+    [ownerView.value, ownerView.pnl, ownerView.held, ownerView.estimated, ownerView.gasIncomplete, ownerView.title, ownerView.asOf],
+    [published.value, published.pnl, published.held, published.estimated, published.gasIncomplete, published.title, published.asOf],
+  );
+  assert.equal(ownerView.pnl, "≈ +$49.50");
+  assert.match(ownerView.title, /Approximate: some gas costs are not on record yet/);
+  // The owner's estimate counts only beside the dollars it qualifies: from
+  // another valuation, it is neither printed nor said.
+  const elsewhere = performanceOf({ ...priv({ ...snapshot, pnlEstimated: false }), pnlBps: null } as LiveAgent, now,
+    own({ equityUsdg: 120, pnlUsdg: 49.5, pnlEstimated: true, pnlAt: now - 5 }));
+  assert.deepEqual([elsewhere.pnl, elsewhere.estimated], [null, false]);
+  assert.match(elsewhere.title, /Some gas costs are not on record yet\.?$/);
+
+  // A stranger's view of the same private read is unchanged by all of this.
+  const stranger = performanceOf(priv({ held: true, equityAt: now - 60 }), now);
+  assert.deepEqual([stranger.value, stranger.held, stranger.ownerOnly], ["Private", true, false]);
+  assert.ok(stranger.title.includes(valued(now - 60)));
 });
