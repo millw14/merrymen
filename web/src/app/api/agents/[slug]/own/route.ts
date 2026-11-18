@@ -6,7 +6,8 @@ import { walletNotSupported } from "@/lib/route-guard";
 
 /**
  * THE OWNER'S OWN VIEW OF THEIR PROFILE: its trades with their sizes and
- * dollars, which the public route withholds from everyone on a private book.
+ * dollars, and its current value and dollar P&L (read-agent.ts OwnFigures),
+ * which the public route withholds from everyone on a private book.
  *
  * A SEPARATE ROUTE, NOT A BRANCH OF THE PUBLIC ONE. /api/agents/[slug] answers
  * the same thing to every caller and takes no session; mixing a per-owner
