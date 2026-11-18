@@ -6,12 +6,13 @@
  * an agent may be said to run, which chart windows its history can back, what
  * the stats line may claim, and how the owner's book switch reports back.
  */
-import type { HowItTrades } from "@/lib/read-agent";
+import type { HowItTrades, OwnFigures } from "@/lib/read-agent";
 import type { ProfileTrade } from "@/lib/profile-trades";
 import { holdWords } from "@/lib/hold-time";
 import { count, displayLocale, pctBps, usd } from "@/lib/format";
 import { isStrategyId, strategyLabel, type StrategyGlance, type StrategyId } from "./strategy";
 import { requestJson, UNREACHABLE } from "./request-json";
+import { ownFiguresFromWire } from "./agent-performance";
 import type { LiveAgent } from "./live";
 
 /**
@@ -206,10 +207,12 @@ export function topTradeFigures(t: ProfileTrade, showMoney: boolean): { pct: str
 
 // ── the owner's own view ──────────────────────────────────────────────────────
 
-/** The owner's own trades with their money in — see read-agent.ts ownBookOf. */
+/** The owner's own trades and balance with their money in — see read-agent.ts ownBookOf. */
 export interface OwnBookView {
   recentTrades: ProfileTrade[] | null;
   topTrades: ProfileTrade[] | null;
+  /** Their current value and dollar P&L. Null when unread or malformed: the page keeps "Private". */
+  figures: OwnFigures | null;
 }
 
 /**
@@ -223,16 +226,18 @@ export interface OwnBookView {
  *
  * Null on any failure — signed out, not theirs, unreachable, a malformed
  * answer — and the page then shows the public figures, which carry no money.
- * A list the server could not read comes back null rather than empty.
+ * A list or figures the server could not read come back null, never empty or
+ * zero.
  */
 export async function fetchOwnBook(slug: string): Promise<OwnBookView | null> {
   try {
-    const r = await requestJson<{ recentTrades?: unknown; activityRead?: unknown; topTrades?: unknown; topTradesRead?: unknown }>(
+    const r = await requestJson<{ recentTrades?: unknown; activityRead?: unknown; topTrades?: unknown; topTradesRead?: unknown; figures?: unknown; figuresRead?: unknown }>(
       `/api/agents/${encodeURIComponent(slug)}/own`,
     );
     return {
       recentTrades: r.activityRead === true && Array.isArray(r.recentTrades) ? (r.recentTrades as ProfileTrade[]) : null,
       topTrades: r.topTradesRead === true && Array.isArray(r.topTrades) ? (r.topTrades as ProfileTrade[]) : null,
+      figures: r.figuresRead === true ? ownFiguresFromWire(r.figures) : null,
     };
   } catch {
     return null;

@@ -7,7 +7,8 @@ import { autonomyOf } from "@merrymen/core";
 import { loadLive, type LiveAgent, type LiveMine } from "./live";
 import { Board } from "./screens/Board";
 import { DesktopSidebar } from "./Desktop";
-import type { AgentPerformance } from "./agent-performance";
+import { performanceOf, type AgentPerformance } from "./agent-performance";
+import type { OwnFigures } from "@/lib/read-agent";
 
 (globalThis as unknown as { React: typeof React }).React = React;
 const noop = () => {};
@@ -186,4 +187,51 @@ test("a row silent since the recovery hold is stamped by nothing but its own fac
     assert.doesNotMatch(rows.find(r => r.textContent!.includes("Unvalued"))!.querySelector(".rank-value")!.getAttribute("title")!, /Valued \S/, "no time is invented for an unvalued book");
     assert.doesNotMatch(doc.body.textContent!, /expire|re-?sign|renew/i);
   }
+});
+
+test("the owner's own figures replace Private on their own view, by the published book's rules — and only there", () => {
+  // "Why can't he see his balance": the owner's own private book read
+  // "Private". Their session-checked figures are the dollars; the return and
+  // its state stay the public read's, one rule for every viewer.
+  const priv = (over: Partial<AgentPerformance> = {}, agent: Partial<LiveAgent> = {}) => ({
+    slug: "shogun", name: "Shogun", handle: null, mode: "live", pnlBps: 1250, curve: [], landed: 3,
+    performance: performance({ publicBook: false, equityUsdg: null, pnlUsdg: null, fills: 3, fillsAtMark: 3, valuation: "current", ...over }),
+    ...agent,
+  }) as LiveAgent;
+  const own = (over: Partial<OwnFigures> = {}): OwnFigures => ({
+    book: "live", equityUsdg: 1125, equityAt: 1_790_000_100, pnlUsdg: 125, pnlAt: 1_790_000_100, underReview: false, pnlEstimated: false, ...over,
+  });
+
+  // Nobody passes figures but the owner's view: a stranger, the board, a read
+  // pending or refused all keep "Private".
+  for (const none of [undefined, null]) {
+    const f = performanceOf(priv(), undefined, none);
+    assert.deepEqual([f.value, f.pnl, f.ownerOnly], ["Private", null, false]);
+  }
+
+  const mine = performanceOf(priv(), undefined, own());
+  assert.deepEqual([mine.value, mine.pnl, mine.ownerOnly, mine.bps, mine.state], ["$1,125.00", "+$125.00", true, 1250, null]);
+  assert.equal(performanceOf(priv(), undefined, own({ pnlUsdg: -0.004 })).pnl, "−$0.00400", "a sub-cent loss is not $0.00");
+  assert.equal(performanceOf(priv(), undefined, own({ pnlEstimated: true })).pnl, "≈ +$125.00", "an estimate says so");
+
+  // Unknown is never zero: a figure the owner's read could not give is "—".
+  const unread = performanceOf(priv(), undefined, own({ equityUsdg: null, pnlUsdg: null }));
+  assert.deepEqual([unread.value, unread.pnl, unread.ownerOnly], ["—", null, false]);
+  assert.equal(performanceOf(priv(), undefined, own({ equityUsdg: 0, pnlUsdg: 0 })).value, "$0.00", "a measured zero is a zero");
+
+  // Money of another book is not printed under this book's label.
+  assert.equal(performanceOf(priv(), undefined, own({ book: "paper" })).value, "Private");
+
+  // A review hold withholds the dollar P&L, from either read; the value stays.
+  const held = performanceOf(priv({ underReview: true, pnlBps: null }, { pnlBps: null }), undefined, own());
+  assert.deepEqual([held.state, held.pnl, held.value], ["Return under review", null, "$1,125.00"]);
+  const ownHeld = performanceOf(priv(), undefined, own({ underReview: true }));
+  assert.deepEqual([ownHeld.pnl, ownHeld.value], [null, "$1,125.00"]);
+  // So does any state that replaces the return: no flat dollar for a book that never traded.
+  const never = performanceOf(priv({ pnlBps: 0, fills: 0, fillsAtMark: 0, book: "paper" }, { pnlBps: null, mode: "paper" }), undefined, own({ book: "paper", pnlUsdg: 0 }));
+  assert.deepEqual([never.state, never.pnl, never.value], ["No trades yet", null, "$1,125.00"]);
+
+  // A published book prints its own figures, whatever else is passed.
+  const pub = performanceOf(priv({ publicBook: true, equityUsdg: 900, pnlUsdg: -100 }), undefined, own());
+  assert.deepEqual([pub.value, pub.pnl, pub.ownerOnly], ["$900.00", "−$100.00", false]);
 });

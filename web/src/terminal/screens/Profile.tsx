@@ -93,7 +93,17 @@ export function Profile({
     .filter((t) => t.slug === agent.slug || (!t.slug && t.name === agent.name))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   const g = agent.glance;
-  const performance = performanceOf(agent, Math.floor(useNow(60_000) / 1000));
+  /**
+   * THE OWNER'S OWN FIGURES, on the owner's own page of a private book.
+   *
+   * The public read withholds a private book's money from everyone, so the
+   * owner's own sizes, dollars and current value come from their
+   * session-checked read (profile-view.ts fetchOwnBook). Asked for only here,
+   * and the server decides whether this session owns the slug. Re-read
+   * whenever the public read is.
+   */
+  const own = useOwnBook(isMine && agent.publicBook === false ? agent.slug : null, agent.recentTrades);
+  const performance = performanceOf(agent, Math.floor(useNow(60_000) / 1000), own?.figures);
   const displayPnl = performance.bps;
   // A book's own trades, where the server counted them: a paper book whose
   // only simulated activity was transfers has made no paper trades, however
@@ -115,15 +125,6 @@ export function Profile({
   const mentioned = [
     ...new Set(posts.flatMap((t) => (t.symbol ? [t.symbol] : []))),
   ];
-  /**
-   * THE OWNER'S OWN FIGURES, on the owner's own page of a private book.
-   *
-   * The public read withholds a private book's money from everyone, so the
-   * owner's own sizes and dollars come from their session-checked read
-   * (profile-view.ts fetchOwnBook). Asked for only here, and the server decides
-   * whether this session owns the slug. Re-read whenever the public read is.
-   */
-  const own = useOwnBook(isMine && agent.publicBook === false ? agent.slug : null, agent.recentTrades);
   const recentTrades = own?.recentTrades ?? agent.recentTrades;
   const topTrades = own?.topTrades ?? agent.topTrades;
   /**
@@ -213,6 +214,7 @@ export function Profile({
             <span className="account-label">{performance.bookLabel} current value</span>
             <strong>{performance.value}</strong>
             {performance.held && <small>Pending reconciliation</small>}
+            {performance.ownerOnly && <small>Only you can see the dollar figures</small>}
           </div>}
           {/* BOTH COUNTERS, because `landed` alone is not "how much this agent
               has done". read-agent.ts keeps them apart deliberately — folding
