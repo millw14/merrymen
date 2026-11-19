@@ -221,7 +221,8 @@ describe("From ETH", () => {
     assert.ok(!JSON.stringify(price.body).includes(OWNER), "the owner's own wallet never goes to Relay");
 
     const quote = ui.container.querySelector(".deposit-quote")!.textContent!;
-    assert.match(quote, /You send0\.998 ETH on Ethereum \(about \$1792\.40\)/);
+    // Dollars go through format.ts, so the locale places the symbol and groups the digits.
+    assert.match(quote, /You send0\.998 ETH on Ethereum \(about \$1,792\.40\)/);
     assert.match(quote, /Your agent getsabout 1788\.82 USDG/);
     assert.match(quote, /At least1779\.87 USDG, or Relay refunds you/);
     assert.match(quote, /RouteRelay: ETH on Ethereum → USDG on Robinhood Chain/);

@@ -9,7 +9,6 @@ import {
   agentGasOf,
   amountForUsd,
   formatAmount,
-  formatFixed,
   maxSendable,
   parseAmount,
   reserveFor,
@@ -29,6 +28,7 @@ import {
 } from "@/lib/relay-deposit";
 import { isSourceAddress, readSourceBalance } from "@/lib/source-balance";
 import { arrivalOf, balanceOf, type Arrival, type ArrivalWatch } from "@/lib/deposit-arrival";
+import { usd as formatUsd } from "@/lib/format";
 import { QrCode } from "./QrCode";
 
 /**
@@ -336,12 +336,17 @@ function balanceLine(source: DepositSource, from: string, fromValid: boolean, re
   return `This wallet holds ${formatAmount(read.value, source.decimals, source.inputDecimals)} ${source.asset} on ${source.network}.`;
 }
 
-/** Relay's dollar figure as "$12.34", "<$0.01", or nothing when it gave none. */
+/**
+ * Relay's dollar figure through the app's one money formatter, so the symbol
+ * sits where the owner's locale puts it. Truncated to whole cents first, so it
+ * never shows more than Relay said. "<$0.01" for dust, nothing when Relay
+ * gave no figure.
+ */
 function usd(text: string | null): string {
   const micros = usdMicrosOf(text);
   if (micros === null) return "";
-  if (micros > 0n && micros < 10_000n) return "<$0.01";
-  return `$${formatFixed(micros, 6, 2)}`;
+  if (micros > 0n && micros < 10_000n) return `<${formatUsd(0.01)}`;
+  return formatUsd(Number(micros / 10_000n) / 100);
 }
 
 function QuoteCard({ quote, source }: { quote: DepositQuote; source: DepositSource }) {
