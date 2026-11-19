@@ -1,0 +1,104 @@
+/*
+ * ADD MONEY: THREE WAYS IN (DepositWays.tsx).
+ *
+ * Written in the Ledger look from the start: cream on warm black, hairlines,
+ * light type, mono labels. The one thing to do next (copy the address, or
+ * continue on Relay) is the cream pill `.flow-primary` already is. Lime stays
+ * off this panel: nothing is traded here, and the money moves on relay.link.
+ * Loads before ledger.css, which still wins any tie.
+ */
+
+/* The three ways: a row of words with a hairline under it, the chosen one underlined in cream. */
+.terminal-host .hosted-funding .deposit-ways {
+  display: flex;
+  gap: 20px;
+  margin: 4px 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.terminal-host .hosted-funding .deposit-ways button {
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  margin-bottom: -1px;
+  background: none;
+  color: var(--faint);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+.terminal-host .hosted-funding .deposit-ways button[aria-selected="true"] {
+  color: var(--tx);
+  border-bottom-color: var(--tx);
+}
+
+/* The QR code sits on its own cream tile (QrCode.tsx), centred in the card. */
+.terminal-host .hosted-funding .deposit-qr {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 4px auto;
+  border-radius: 8px;
+}
+.terminal-host .hosted-funding .deposit-facts { margin-top: 4px; }
+.terminal-host .hosted-funding .deposit-facts > div { padding: 8px 0; border-top: 1px solid var(--line); }
+.terminal-host .hosted-funding .deposit-facts dd .deposit-quiet { display: block; font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+
+/* Where the ETH is: the source picker. It is the amount presets' pill row
+   (terminal.css), whose chosen pill is already cream, not lime. */
+.terminal-host .hosted-funding .deposit-sources { margin: 0 0 16px; }
+@media (max-width: 420px) {
+  .terminal-host .hosted-funding .deposit-sources { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.terminal-host .hosted-funding .deposit-field { display: grid; gap: 6px; margin: 0 0 12px; }
+.terminal-host .hosted-funding .deposit-field > span:first-child {
+  font-family: var(--font-geist-mono), var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.terminal-host .hosted-funding .deposit-field em { font-style: normal; text-transform: none; letter-spacing: 0; }
+.terminal-host .hosted-funding .deposit-field input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--tx);
+  font: inherit;
+  font-size: 15px;
+}
+.terminal-host .hosted-funding .deposit-field input[aria-invalid="true"] { border-color: var(--down); }
+.terminal-host .hosted-funding .deposit-amount { display: flex; gap: 8px; align-items: stretch; }
+.terminal-host .hosted-funding .deposit-amount input { font-size: 22px; letter-spacing: -0.03em; }
+.terminal-host .hosted-funding .deposit-amount button {
+  flex: none;
+  min-width: 64px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.terminal-host .hosted-funding .deposit-amount button:disabled { opacity: 0.45; }
+
+.terminal-host .hosted-funding .deposit-quiet { margin: 6px 0 10px; color: var(--tx-2); font-size: 12px; line-height: 1.55; }
+.terminal-host .hosted-funding .deposit-quote { margin: 8px 0 12px; border-top: 1px solid var(--line); }
+.terminal-host .hosted-funding .deposit-quote > div { padding: 10px 0; }
+.terminal-host .hosted-funding .deposit-refusal p { margin: 8px 0; color: var(--tx-2); font-size: 13px; line-height: 1.5; }
+.terminal-host .hosted-funding .deposit-gas a { color: var(--tx); text-underline-offset: 3px; }
+.terminal-host .hosted-funding .deposit-convert > .flow-primary { margin-top: 8px; text-decoration: none; }
+
+/* What the agent's balance says about the deposit, after the owner leaves for Relay. */
+.terminal-host .hosted-funding .deposit-watch {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.terminal-host .hosted-funding .deposit-watch p { margin: 0; }

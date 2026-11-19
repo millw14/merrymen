@@ -22,6 +22,7 @@ import { RecoveryNotice } from "./RecoveryNotice";
 import { pausedRecovery, recoveryFunds } from "./recovery-view";
 import { GloamFunding } from "./GloamFunding";
 import { GloamWithdrawal } from "./GloamWithdrawal";
+import { DepositWays } from "./DepositWays";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -124,8 +125,6 @@ export function AccountEntry({account,accountFailed=false,portfolio="ok",retryin
   return <section className="hosted-entry"><h2>Your agent starts here</h2><p>Create an agent to manage your portfolio and follow its trades here.</p>{account.session.hosted && !account.session.address ? <SignIn onDone={onSignedIn}/> : <a className="flow-primary" href="/create">Create an agent</a>}</section>;
 }
 export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";account:AccountState;onClose:()=>void}) {
-  const [copied,setCopied]=useState(false);
-  const [error,setError]=useState("");
   const [ownerKey]=useState(()=>{const grant=loadGrant("spot");return grant?.smartAccount.toLowerCase()===account.status.grant?.smartAccount.toLowerCase() ? grant?.demoOwnerPrivateKey ?? "" : "";});
   const grant=account.status.grant;
   return <section className="hosted-funding"><header className="flow-top"><span>{mode==="deposit" ? "Add money" : "Withdraw"}</span><button aria-label="Close funding" onClick={onClose}><X size={18}/></button></header>{mode==="withdraw" ? <>{grant && <GloamWithdrawal account={grant.smartAccount as `0x${string}`} chainId={grant.chainId} ownerKey={ownerKey ? ownerKey as `0x${string}` : undefined}/>}<RecoverPanel initialOwnerKey={ownerKey}/></> : grant ? <>
@@ -155,14 +154,12 @@ export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";a
       const after = !held && advice?.funding ? <p className="fund-blocker" role="status">{advice.say}</p> : null;
       return <>
         {first}
-        <p className="fund-lead">Send dollars (USDG) to your merryman&apos;s account. You can withdraw any time.</p>
-        <div className="fund-address-card">
-          <label>Your merryman&apos;s account</label>
-          <p className="funding-address">{grant.smartAccount}</p>
-          <button className="flow-primary" onClick={()=>{void navigator.clipboard.writeText(grant.smartAccount).then(()=>setCopied(true)).catch(()=>setError("Could not copy. Select the address above to copy it."));}}>{copied ? "Address copied" : "Copy deposit address"}</button>
-          {error && <p role="alert">{error}</p>}
-        </div>
-        <p className="fund-chain-warning"><strong>Send USDG on {grant.chainId===4663 ? "Robinhood Chain" : `chain ${grant.chainId}`} — and only there.</strong> This address on any other network is not your agent: funds sent there are stuck, and no re-sign moves them back. Your balance updates after the transfer is recorded.</p>
+        <p className="fund-lead">Add dollars (USDG) to your merryman&apos;s account: send USDG, or convert ETH or SOL on the way in. You can withdraw any time.</p>
+        {/* The address, its QR code and copy button, and the network warning
+            are the Send USDG way, which is what shows first. ETH and SOL
+            price through Relay and are signed on relay.link (DepositWays). */}
+        <DepositWays agent={grant.smartAccount} chainId={grant.chainId} balances={account.status.balances}
+          gasSponsored={account.status.gasSponsored} ownerAddress={account.session.address}/>
         {after}
         {!held && <EnergyFunding energy={account.status.energy} chainId={grant.chainId}/>}
       </>;

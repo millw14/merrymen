@@ -332,7 +332,11 @@ describe("the funding screens warn the chain, not just name it", () => {
     // Reported from X, Oct 2026: $5 funded on ETH mainnet to an agent address.
     // The panel named the chain once in small print beside a big copy button.
     // Naming is not warning — the stuck-funds sentence sits in the same breath.
-    const src = readFileSync(new URL("../terminal/HostedControls.tsx", import.meta.url), "utf8");
+    // The address card moved into DepositWays (its "Send USDG" way) in Nov
+    // 2026, and the warning moved with it: still the same breath.
+    const panel = readFileSync(new URL("../terminal/HostedControls.tsx", import.meta.url), "utf8");
+    assert.match(panel, /<DepositWays\b/);
+    const src = readFileSync(new URL("../terminal/DepositWays.tsx", import.meta.url), "utf8");
     assert.match(src, /and only there/);
     assert.match(src, /funds sent there are stuck/);
   });
