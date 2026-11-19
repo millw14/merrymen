@@ -393,6 +393,73 @@ test("profile and leaderboard publish the same held/as-of headline and only the 
   } finally { raw.close(); }
 });
 
+/** The money a page prints from a book's figures, and what places it. */
+const money = (p: { book: unknown; equityUsdg: unknown; equityAt: unknown; held: unknown; pnlUsdg: unknown; pnlAt: unknown; underReview: unknown; pnlEstimated?: unknown }) =>
+  ({ book: p.book, equityUsdg: p.equityUsdg, equityAt: p.equityAt, held: p.held, pnlUsdg: p.pnlUsdg, pnlAt: p.pnlAt, underReview: p.underReview, pnlEstimated: p.pnlEstimated === true });
+
+test("the owner's own read carries the value and dollar P&L a private profile withholds: the published figures, by the same read", async () => {
+  // "Why can't he see his balance": a private book's current value read
+  // "Private" to its own owner. ownBookOf reads it with the public page's own
+  // call and only the money switch on, so a held mark, a gas estimate and a
+  // review hold land exactly as they would on a published book.
+  const { raw, db } = await ledger();
+  try {
+    const none = (await ownBookOf(db, identity))!;
+    assert.equal(none.figuresRead, true);
+    assert.deepEqual(none.figures, money((await profileOf(db, identity, true))!.performance!));
+    assert.deepEqual([none.figures!.equityUsdg, none.figures!.pnlUsdg], [null, null], "no valuation yet is unknown, not zero");
+
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 30, sponsored: true });
+    await mark(db, T0 + 60, 100.0025);
+    await fill(db, { side: "sell", coin: "CASH", qty: "1", at: T0 + H, pnl: 1, cash: 6 });
+    await heldMark(db, T0 + 2 * H, 105);
+    const hidden = (await profileOf(db, identity, false))!.performance!;
+    assert.deepEqual([hidden.equityUsdg, hidden.pnlUsdg], [null, null], "premise: the public read withholds both");
+    const own = (await ownBookOf(db, identity))!;
+    assert.equal(own.figuresRead, true);
+    assert.deepEqual(own.figures, money((await profileOf(db, identity, true))!.performance!));
+    assert.equal(own.figures!.equityUsdg, 105, "the newest valuation, held or not");
+    assert.equal(own.figures!.held, true, "and says it is held, as its own read does");
+    assert.equal(own.figures!.pnlAt, T0 + 60, "and the P&L of the last measured one");
+    assert.ok(Math.abs(own.figures!.pnlUsdg! - 0.0025) < 1e-9);
+    assert.equal((own.figures as unknown as Record<string, unknown>).publicBook, undefined, "the book is not called published");
+
+    // A transfer home booked twice puts the return under review: withheld from
+    // the owner as from a published page, and the valuation stays.
+    const log = db.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, tx_hash, log_index, chain_id, source, at)
+      VALUES (?, 2, ?, ?, ?, ?, ?, ?, ?)`);
+    await log.run(ACCOUNT, "out", 10, "0xhome", null, 4663, "transfer-intent", T0 + 3 * H);
+    await log.run(ACCOUNT, "out", 10, "0xhome", 0, 4663, "chain-log", T0 + 3 * H + 30);
+    await mark(db, T0 + 3 * H + 60, 95);
+    const review = (await ownBookOf(db, identity))!.figures!;
+    assert.deepEqual(review, money((await profileOf(db, identity, true))!.performance!));
+    assert.deepEqual([review.underReview, review.pnlUsdg, review.pnlEstimated, review.equityUsdg], [true, null, false, 95]);
+
+    // A figures read that fails costs the figures, said unread — not the trades.
+    const failed = (await ownBookOf(db, identity, async () => { throw new Error("connection reset"); }))!;
+    assert.equal(failed.figuresRead, false);
+    assert.equal(failed.figures, null, "unread, never zeros");
+    assert.equal(failed.activityRead, true);
+    assert.equal(failed.recentTrades.length, 2);
+  } finally { raw.close(); }
+});
+
+test("the owner's own figures of a paper book are the paper book's, as published", async () => {
+  const { raw, db } = await ledger();
+  try {
+    const paper = db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode)
+      VALUES (?, '0', 0, 0, ?, ?, 2, 'paper')`);
+    await db.prepare("UPDATE agents SET mode = 'paper'").run();
+    await paper.run(ACCOUNT, 1000, T0);
+    await fill(db, { side: "buy", coin: "CASH", qty: "1", at: T0 + 30, status: "paper" });
+    await paper.run(ACCOUNT, 1012.5, T0 + H);
+    const own = (await ownBookOf(db, identity))!.figures!;
+    assert.deepEqual(own, money((await profileOf(db, identity, true))!.performance!));
+    assert.deepEqual([own.book, own.equityUsdg, own.pnlUsdg], ["paper", 1012.5, 12.5]);
+    assert.equal((await profileOf(db, identity, false))!.performance!.equityUsdg, null, "still private to everyone else");
+  } finally { raw.close(); }
+});
+
 test("a retained paper headline stays paper across live/idle heartbeats and agrees with the board", async () => {
   const { raw, db } = await ledger();
   try {

@@ -16,6 +16,10 @@ import { DatabaseSync } from "node:sqlite";
  * anything the request says, and the public route stays exactly as private as
  * it was. Driven end to end against a real ledger, a real identity store and a
  * real session cookie.
+ *
+ * The same for the book's current value and dollar P&L: a private book printed
+ * "Private" to its own owner ("why can't he see his balance"). The owner's read
+ * carries them; the public route still carries none.
  */
 const A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
 const B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
@@ -46,7 +50,8 @@ before(async () => {
   ({ GET: OWN } = await import("./route"));
   ({ GET: PUBLIC } = await import("../route"));
 
-  // The ledger the worker writes, with one private round trip on it.
+  // The ledger the worker writes, with one private round trip on it: 100 USDG
+  // in on the chain, 1 USDG of gas, valued at 103 — a 2 USDG net P&L.
   const { wrapSqlite } = await import("../../../../../../../worker/src/db");
   const { applyLedgerSchema } = await import("../../../../../../../worker/src/store");
   const raw = new DatabaseSync(path.join(dir, "merrymen.db"));
@@ -54,16 +59,18 @@ before(async () => {
     const db = wrapSqlite(raw);
     await applyLedgerSchema(db);
     await db.prepare(
-      `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, mode, epoch)
-       VALUES (?, 'Shogun', '0x1', '0x2', 4663, '{}', 0, 0, 'live', 1)`,
+      `INSERT INTO agents (smart_account, name, owner_address, session_key_address, chain_id, caps, granted_at, expires_at, mode, epoch, contributions_known)
+       VALUES (?, 'Shogun', '0x1', '0x2', 4663, '{}', 0, 0, 'live', 1, 1)`,
     ).run(ACCOUNT);
+    await db.prepare(`INSERT INTO flows (agent_id, epoch, direction, amount_usdg, tx_hash, source, at) VALUES (?, 1, 'in', 100, '0xtx', 'chain-log', 500)`).run(ACCOUNT);
     const fill = db.prepare(
-      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source)
-       VALUES (?, 'swap', 'x', ?, ?, ?, ?, 'landed', ?, 1, ?, 'CASH', '1', ?, ?, 'receipt')`,
+      `INSERT INTO trades (agent_id, kind, target, sell_token, buy_token, amount_usdg, user_op_hash, status, created_at, epoch, fill_side, fill_symbol, fill_qty_raw, fill_cash_usdg, realized_pnl_usdg, basis_source, gas_wei, gas_usdg)
+       VALUES (?, 'swap', 'x', ?, ?, ?, ?, 'landed', ?, 1, ?, 'CASH', '1', ?, ?, 'receipt', '1000', 0.5)`,
     );
     // The executor writes both token legs on every fill.
     await fill.run(ACCOUNT, "0xusdg", "0xcash", 10, "0xop1", 1_000, "buy", 10, null);
     await fill.run(ACCOUNT, "0xcash", "0xusdg", 13, "0xop2", 2_000, "sell", 13, 3);
+    await db.prepare(`INSERT INTO equity (agent_id, eth_wei, cash_usdg, vault_usdg, equity_usdg, at, epoch, mode) VALUES (?, '0', 0, 0, 103, 3000, 1, 'live')`).run(ACCOUNT);
   } finally {
     raw.close();
   }
@@ -95,6 +102,19 @@ it("the owner's session gets its own sizes and dollars, never cached for anyone 
   assert.deepEqual(body.topTrades.map((t) => t.realizedPnlUsdg), [3]);
 });
 
+it("the owner's session gets its own current value and dollar P&L on a private book, and nothing that calls it published", async () => {
+  const res = await OWN(request(A), ctx());
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as Record<string, unknown>;
+  assert.equal(body.figuresRead, true);
+  assert.deepEqual(body.figures, {
+    book: "live", equityUsdg: 103, equityAt: 3000, held: false, pnlUsdg: 2, pnlAt: 3000, underReview: false, pnlEstimated: false,
+  });
+  // Only the money and what places it: the book stays private, and the
+  // return and its counts are the public read's to say.
+  assert.doesNotMatch(JSON.stringify(body), /publicBook|pnlBps|liveRank/);
+});
+
 it("no session, or somebody else's, gets the same 404 as no agent at all — and the ledger is not what decides", async () => {
   // Anyone but the owner is told nothing, not even that an owner's view exists
   // here: signed out, a stranger, a forged tenant and an unknown slug all get
@@ -115,17 +135,32 @@ it("no session, or somebody else's, gets the same 404 as no agent at all — and
   }
   assert.deepEqual(seen.map(([status]) => status), [404, 404, 404, 404, 404]);
   assert.equal(new Set(seen.map(([, body]) => body)).size, 1, "one body for all of them");
-  assert.doesNotMatch(String(seen[1]![1]), /recentTrades|topTrades/);
+  assert.doesNotMatch(String(seen[1]![1]), /recentTrades|topTrades|figures|equityUsdg|pnlUsdg/);
   assert.equal((await OWN(request(A), ctx("../etc"))).status, 400);
 });
 
 it("the public route is not widened: the owner's own cookie gets the private view there", async () => {
   const res = await PUBLIC(request(A, `https://app.example.test/api/agents/${slug}`), ctx());
   assert.equal(res.status, 200);
-  const body = (await res.json()) as { publicBook: boolean; recentTrades: { sizeUsdg: number | null; realizedPnlUsdg: number | null }[] };
+  const text = await res.text();
+  const body = JSON.parse(text) as {
+    publicBook: boolean; recentTrades: { sizeUsdg: number | null; realizedPnlUsdg: number | null }[];
+    performance: { publicBook: boolean; equityUsdg: number | null; pnlUsdg: number | null; pnlBps: number | null };
+  };
   assert.equal(body.publicBook, false);
   assert.equal(body.recentTrades.length, 2);
   assert.ok(body.recentTrades.every((t) => t.sizeUsdg === null && t.realizedPnlUsdg === null));
+  // The balance too: the percentage is public, the dollars are not, whoever asks.
+  assert.equal(body.performance.publicBook, false);
+  assert.equal(body.performance.equityUsdg, null);
+  assert.equal(body.performance.pnlUsdg, null);
+  assert.equal(body.performance.pnlBps, 200);
+  assert.doesNotMatch(text, /"figures"|"figuresRead"/);
+  // One answer for every caller — owner, stranger, signed out — byte for byte.
+  for (const tenant of [B, null]) {
+    const other = await PUBLIC(request(tenant, `https://app.example.test/api/agents/${slug}`), ctx());
+    assert.equal(await other.text(), text);
+  }
 });
 
 it("self-hosted has no sessions to check, so there is no owner's view to serve", async () => {

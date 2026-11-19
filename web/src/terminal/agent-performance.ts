@@ -1,4 +1,5 @@
 import { fullDateTime, shortDateTime, subCentUsd, usd } from "@/lib/format";
+import type { OwnFigures } from "@/lib/read-agent";
 import type { LiveAgent } from "./live";
 
 /** A current valuation and a separately measured return, from the ledger. */
@@ -79,6 +80,32 @@ export function performanceFromWire(raw: unknown): AgentPerformance {
 }
 
 /**
+ * The owner's own figures (read-agent.ts OwnFigures) as the wire sent them, or
+ * null. A book it does not name is money it cannot place, so the whole answer
+ * is refused. A dollar figure without the time it was measured is unread, and
+ * a return under review carries no dollar P&L — the rules performanceFromWire
+ * applies to a published book's.
+ */
+export function ownFiguresFromWire(raw: unknown): OwnFigures | null {
+  if (!raw || typeof raw !== "object") return null;
+  const f = raw as Record<string, unknown>;
+  if (f.book !== "paper" && f.book !== "live" && f.book !== null) return null;
+  const underReview = f.underReview === true;
+  const equityAt = timestamp(f.equityAt);
+  const pnlAt = timestamp(f.pnlAt);
+  return {
+    book: f.book,
+    equityUsdg: equityAt === null ? null : number(f.equityUsdg),
+    equityAt,
+    held: f.held === true,
+    pnlUsdg: underReview || pnlAt === null ? null : number(f.pnlUsdg),
+    pnlAt,
+    underReview,
+    pnlEstimated: f.pnlEstimated === true && !underReview,
+  };
+}
+
+/**
  * How old a valuation may be before a page says when it was taken, in plain
  * text beside the figure. A worker values its book about every four minutes,
  * so twenty minutes is five missed ticks: not a slow mirror, a stopped book.
@@ -136,35 +163,67 @@ function dollars(n: number): string {
   return n !== 0 && Math.abs(n) < 0.01 ? subCentUsd(n) : usd(n);
 }
 
-/** The same evidence and privacy rule on the board, sidebar and profile. */
-export function performanceOf(agent: LiveAgent, nowSec?: number) {
+/**
+ * The same evidence and privacy rule on the board, sidebar and profile.
+ *
+ * `own` is the owner's own money from their session-checked read, and only the
+ * profile's owner view passes it. Without it — a stranger, the board, a read
+ * still pending or refused — a private book is "Private", as it always was.
+ */
+export function performanceOf(agent: LiveAgent, nowSec?: number, own?: OwnFigures | null) {
   const p = agent.performance;
   const book = p ? p.book : agent.mode === "paper" ? "paper" : agent.mode === "live" ? "live" : null;
   const bps = p ? number(p.pnlBps) : number(agent.mode === "paper" ? agent.paperPnlBps : agent.pnlBps);
   const bookLabel = book === "paper" ? "Paper" : book === "live" ? "Live" : "Book unavailable";
   const published = p?.publicBook === true;
-  const equity = published ? number(p.equityUsdg) : null;
-  const pnl = published ? number(p.pnlUsdg) : null;
-  const equityAt = timestamp(p?.equityAt);
+  // THE OWNER'S DOLLARS IN PLACE OF "Private", on their own private book: what
+  // a published book would print. Only under the book the label names, and
+  // only the money and what places it — the return and its state stay the
+  // public read's, so the state rule below is still one rule for every viewer.
+  // The owner's read follows the public one by a moment and may trail or lead
+  // it by one valuation; matching on the book alone keeps that from flashing
+  // "Private", and the rules below keep each figure beside its own read's time.
+  const owner = own && p && !published && own.book === p.book ? own : null;
+  // THE VALUE IS ONE READ'S. On the owner's view the value, whether it is held
+  // and when it was taken all come from the owner's read, as all three come from
+  // one read on a published book. A mark that lands between the two reads must
+  // not put a newer value under an older one's time or "Pending reconciliation".
+  const equity = owner ? number(owner.equityUsdg) : published ? number(p.equityUsdg) : null;
+  const equityAt = owner ? owner.equityAt : timestamp(p?.equityAt);
+  const held = owner ? owner.held : p?.held === true;
   const pnlAt = timestamp(p?.pnlAt);
+  // THE OWNER'S DOLLAR P&L ONLY BESIDE THE RETURN IT WAS MEASURED WITH: their
+  // read must have measured the same valuation as the public percentage beside
+  // it, and neither may be under review. Otherwise the line is left out for
+  // that moment, never a dollar figure from another valuation.
+  const ownPnl = owner && pnlAt !== null && owner.pnlAt === pnlAt && !owner.underReview && p?.underReview !== true ? owner : null;
+  const pnl = owner ? (ownPnl ? number(ownPnl.pnlUsdg) : null) : published ? number(p.pnlUsdg) : null;
+  // ONE APPROXIMATE FLAG for the percentage, the dollars and the gas note, as on
+  // a published book. A private read raises it only beside a figure it carries
+  // (book-performance.ts), so with the dollar P&L the only figure it is the
+  // owner's read that says so.
+  const estimated = p?.pnlEstimated === true || ownPnl?.pnlEstimated === true;
   const title = [
     `${bookLabel} portfolio`,
     equityAt !== null ? `Valued ${fullDateTime(equityAt * 1000)}` : "Valuation time unavailable",
     pnlAt !== null ? `P&L measured ${fullDateTime(pnlAt * 1000)}` : "Measured P&L unavailable",
-    p?.held ? "Latest value is pending reconciliation; P&L uses the last measured valuation." : "",
-    p?.gasComplete === false ? (p.pnlEstimated ? "Approximate: some gas costs are not on record yet, so the exact return may be slightly lower." : "Some gas costs are not on record yet.") : "",
+    held ? "Latest value is pending reconciliation; P&L uses the last measured valuation." : "",
+    p?.gasComplete === false ? (estimated ? "Approximate: some gas costs are not on record yet, so the exact return may be slightly lower." : "Some gas costs are not on record yet.") : "",
     p?.valuation === "awaiting" ? "A newer trade is not in this return yet; it waits for the next valuation." : "",
   ].filter(Boolean).join(". ");
   const { state, note } = stateOf(agent, p, bps);
-  const approx = p?.pnlEstimated === true ? "≈ " : "";
+  const approx = estimated ? "≈ " : "";
+  const pnlText = pnl === null || state !== null ? null : `${approx}${pnl > 0 ? "+" : pnl < 0 ? "−" : ""}${dollars(Math.abs(pnl))}`;
   return {
     book, bookLabel, bps, title,
-    value: p && !published ? "Private" : equity === null ? "—" : dollars(equity),
-    pnl: pnl === null || state !== null ? null : `${approx}${pnl > 0 ? "+" : pnl < 0 ? "−" : ""}${dollars(Math.abs(pnl))}`,
-    held: p?.held === true,
+    value: p && !published && !owner ? "Private" : equity === null ? "—" : dollars(equity),
+    pnl: pnlText,
+    /** A dollar figure here is the owner's own, which nobody else is shown. */
+    ownerOnly: owner !== null && (equity !== null || pnlText !== null),
+    held,
     gasIncomplete: p?.gasComplete === false,
     /** The figure is approximate (gas not all on record): print it with "≈". */
-    estimated: p?.pnlEstimated === true,
+    estimated,
     /**
      * Printed IN PLACE OF the percentage when not null — see stateOf. The
      * same words on every surface; a page that prints `bps` without checking

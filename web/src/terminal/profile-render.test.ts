@@ -3,7 +3,7 @@ import { afterEach, beforeEach, it } from "node:test";
 import React, { act } from "react";
 import { Profile } from "./screens/Profile";
 import type { ProfileAgent } from "./profile-view";
-import { json, testDom } from "./test-dom";
+import { deferred, json, testDom } from "./test-dom";
 
 /**
  * THE PROFILE, RENDERED — what a stranger and the owner actually see.
@@ -304,4 +304,128 @@ it("an owner's read that could not read the fills does not claim to show the own
   await act(async () => {});
   assert.match(text(), /Trade sizes are private\./);
   assert.doesNotMatch(text(), /Only you can see/);
+});
+
+// ── the owner's own balance on a private book ───────────────────────────────
+// "Why can't he see his balance": the current value read "Private" to the one
+// person it belongs to. Their session-checked read carries it; nobody else's.
+const privatePerformance = (book: "live" | "paper" = "live") => ({
+  book, equityUsdg: null, equityAt: nowSec() - 60, pnlUsdg: null, pnlBps: 1_250, pnlAt: nowSec() - 60,
+  publicBook: false, gasComplete: true, held: false, fills: 3, fillsAtMark: 3, valuation: "current" as const,
+});
+const ownAnswer = (figures: Record<string, unknown> = {}, over: Record<string, unknown> = {}) => ({
+  recentTrades: [], activityRead: true, topTrades: [], topTradesRead: true, figuresRead: true,
+  figures: { book: "live", equityUsdg: 1_125, equityAt: nowSec() - 60, pnlUsdg: 125, pnlAt: nowSec() - 60, underReview: false, pnlEstimated: false, ...figures },
+  ...over,
+});
+const valueShown = () => ui.container.querySelector(".profile-current-value strong")!.textContent;
+const OWNER_NOTE = /Only you can see the dollar figures/;
+
+it("the owner of a private book sees their own current value and dollar P&L once their read answers, said to be theirs alone", async () => {
+  const answer = deferred<Response>();
+  globalThis.fetch = (async (url: string) => (String(url).endsWith("/own") ? answer.promise : json({}, 404))) as typeof fetch;
+  await render(agent({ publicBook: false, performance: privatePerformance() }), { isMine: true });
+  // Pending: today's page, never a zero standing in for an answer.
+  assert.equal(valueShown(), "Private");
+  assert.equal(ui.container.querySelector(".profile-pnl"), null);
+  assert.doesNotMatch(text(), OWNER_NOTE);
+  await act(async () => { answer.resolve(json(ownAnswer())); });
+  assert.equal(valueShown(), "$1,125.00");
+  assert.equal(ui.container.querySelector(".profile-pnl")!.textContent, "+$125.00 P&L");
+  assert.match(ui.container.querySelector(".profile-current-value")!.textContent!, OWNER_NOTE);
+  assert.equal(ui.container.querySelector(".public-return")!.textContent, "+12.5%", "the return is the public read's");
+  assert.doesNotMatch(text(), /\$0\.00/);
+});
+
+it("a stranger to a private book still sees Private, whatever an owner's read would say", async () => {
+  globalThis.fetch = (async () => json(ownAnswer())) as typeof fetch;
+  await render(agent({ publicBook: false, performance: privatePerformance() }), { isMine: false });
+  await act(async () => {});
+  assert.equal(valueShown(), "Private");
+  assert.equal(ui.container.querySelector(".profile-pnl"), null);
+  assert.doesNotMatch(text(), /1,125|\+\$125|Only you can see/);
+});
+
+it("an owner's read that is refused, or could not read the figures, leaves Private and no note", async () => {
+  globalThis.fetch = (async () => json({ error: "Agent not found" }, 404)) as typeof fetch;
+  await render(agent({ publicBook: false, performance: privatePerformance() }), { isMine: true });
+  await act(async () => {});
+  assert.equal(valueShown(), "Private");
+  assert.doesNotMatch(text(), OWNER_NOTE);
+  // Unread is said unread by the server, and the page does not print a zero for it.
+  globalThis.fetch = (async () => json(ownAnswer({ equityUsdg: 0, pnlUsdg: 0 }, { figuresRead: false }))) as typeof fetch;
+  await render(agent({ publicBook: false, performance: privatePerformance() }), { isMine: true, key: "unread" });
+  await act(async () => {});
+  assert.equal(valueShown(), "Private");
+  assert.equal(ui.container.querySelector(".profile-pnl"), null);
+  assert.doesNotMatch(text(), /\$0\.00|Only you can see the dollar/);
+  // A figure the owner's read answered as unknown is "—", as on a published book.
+  globalThis.fetch = (async () => json(ownAnswer({ equityUsdg: null, pnlUsdg: null }))) as typeof fetch;
+  await render(agent({ publicBook: false, performance: privatePerformance() }), { isMine: true, key: "unknown" });
+  await act(async () => {});
+  assert.equal(valueShown(), "—");
+  assert.doesNotMatch(text(), /\$0\.00|Only you can see the dollar/);
+});
+
+it("a review hold withholds the owner's dollar P&L as it would a published book's", async () => {
+  globalThis.fetch = (async () => json(ownAnswer({ underReview: true, pnlUsdg: 125 }))) as typeof fetch;
+  await render(agent({ publicBook: false, pnlBps: null, performance: { ...privatePerformance(), pnlBps: null, underReview: true } }), { isMine: true });
+  await act(async () => {});
+  assert.equal(ui.container.querySelector(".public-return")!.textContent, "Return under review");
+  assert.equal(valueShown(), "$1,125.00", "the valuation stays");
+  assert.equal(ui.container.querySelector(".profile-pnl"), null);
+  assert.doesNotMatch(text(), /\+\$125/);
+});
+
+it("the owner's paper book says paper once, as it always did", async () => {
+  globalThis.fetch = (async () => json(ownAnswer({ book: "paper" }))) as typeof fetch;
+  // Both views list the same sections, so any count difference is a label.
+  const paper = () => agent({ mode: "paper", publicBook: false, performance: privatePerformance("paper"), topTrades: [], topTradesRead: true });
+  await render(paper(), { isMine: false });
+  await act(async () => {});
+  const stranger = (text().match(/paper/gi) ?? []).length;
+  await render(paper(), { isMine: true, key: "mine" });
+  await act(async () => {});
+  assert.match(ui.container.querySelector(".profile-current-value")!.textContent!, /^Paper current value\$1,125\.00/);
+  assert.equal((text().match(/paper/gi) ?? []).length, stranger, "no paper label added for the owner");
+});
+
+it("signing out on the owner's page takes their figures off it at once", async () => {
+  globalThis.fetch = (async () => json(ownAnswer())) as typeof fetch;
+  const a = agent({ publicBook: false, performance: privatePerformance() });
+  // What each commit put on screen, read before any effect runs: a figure only
+  // an effect clears would be painted for a frame, which `act` alone hides.
+  const painted: (string | null)[] = [];
+  function Probe() {
+    React.useLayoutEffect(() => { painted.push(valueShown()); });
+    return null;
+  }
+  // One tree for both renders, so the page keeps its state across the switch.
+  const page = (isMine: boolean) => ui.render(React.createElement(React.Fragment, null,
+    React.createElement(Profile, { agent: a, theses: [], tokens: [], onBack() {}, onToken() {}, isMine }),
+    React.createElement(Probe)));
+  await page(true);
+  await act(async () => {});
+  assert.equal(valueShown(), "$1,125.00");
+  // Same page, same agent: the session is no longer the owner's.
+  painted.length = 0;
+  await page(false);
+  assert.deepEqual(painted, ["Private"], "the first commit after sign-out already shows Private");
+  assert.equal(valueShown(), "Private");
+  assert.doesNotMatch(text(), /1,125|\+\$125|Only you can see/);
+});
+
+it("the owner's value keeps its own read's held flag, and its dollars sit only beside the return they were measured with", async () => {
+  // A mark landed between the public read and the owner's: the public one is
+  // held and older, the owner's newer and unheld, measured at another time.
+  globalThis.fetch = (async () => json(ownAnswer({ equityUsdg: 1_300, equityAt: nowSec() - 5, held: false, pnlUsdg: 300, pnlAt: nowSec() - 5 }))) as typeof fetch;
+  await render(agent({ publicBook: false, performance: { ...privatePerformance(), held: true, pnlAt: nowSec() - 300 } }), { isMine: true });
+  await act(async () => {});
+  const current = ui.container.querySelector(".profile-current-value")!;
+  assert.equal(valueShown(), "$1,300.00");
+  assert.doesNotMatch(current.textContent!, /Pending reconciliation/, "the owner's value is not held");
+  assert.doesNotMatch(current.getAttribute("title")!, /pending reconciliation/);
+  assert.equal(ui.container.querySelector(".profile-pnl"), null, "no dollars beside a return of another valuation");
+  assert.equal(ui.container.querySelector(".public-return")!.textContent, "+12.5%");
+  assert.doesNotMatch(text(), /\+\$300|\$0\.00/);
 });

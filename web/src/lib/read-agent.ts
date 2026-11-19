@@ -370,12 +370,14 @@ export async function readAgentSummary(
 }
 
 /**
- * THE OWNER'S OWN TRADES, WITH THEIR SIZES AND DOLLARS.
+ * THE OWNER'S OWN TRADES, WITH THEIR SIZES AND DOLLARS, AND THEIR BALANCE.
  *
  * The spec's rule for a profile's money is "the book is public OR it is the
  * owner's own view", and the public read below takes no session — so on a
- * private book it withheld the owner's own sizes from the owner too. This is
- * the owner's view: the same lists the profile shows, read with the money in.
+ * private book it withheld the owner's own sizes from the owner too — and their
+ * current value, which read "Private" to the one person it belongs to. This is
+ * the owner's view: the same lists and figures the profile shows, read with
+ * the money in.
  *
  * NEVER REACHABLE WITHOUT THE OWNER'S SESSION. Its only caller is readOwnBook,
  * which the session-checked /api/agents/[slug]/own serves; the public route and
@@ -387,9 +389,48 @@ export interface OwnBook {
   activityRead: boolean;
   topTrades: ProfileTrade[];
   topTradesRead: boolean;
+  /** The owner's current value and dollar P&L. Null when unread, never zeros. */
+  figures: OwnFigures | null;
+  figuresRead: boolean;
 }
 
-export async function ownBookOf(db: Db, identity: ProfileIdentity): Promise<OwnBook | null> {
+/**
+ * THE OWNER'S CURRENT VALUE AND DOLLAR P&L, which a private profile prints as
+ * "Private" to everyone, its owner included.
+ *
+ * What the public page would print if the book were published: the SAME read
+ * profileOf makes (readBookPerformance, same account and epoch), with only the
+ * money switch on. So a review hold, a held mark, a gas estimate and an unread
+ * figure behave exactly as they do on a published book.
+ *
+ * ONLY THE MONEY AND WHAT PLACES IT. The return, its state and the counts stay
+ * the public read's, so the page keeps one rule for them. No `publicBook`: the
+ * book is no more published for this read than it was before it.
+ */
+export interface OwnFigures {
+  /** Which book the money is; the page uses it only under the same book's label. */
+  book: "paper" | "live" | null;
+  equityUsdg: number | null;
+  equityAt: number | null;
+  /**
+   * The value above is a held mark (pending reconciliation). The owner's own,
+   * because it describes this read's value: the public read beside it is a
+   * moment older and may describe another mark.
+   */
+  held: boolean;
+  pnlUsdg: number | null;
+  pnlAt: number | null;
+  /** The return is withheld (return-review.ts), so pnlUsdg is null. */
+  underReview: boolean;
+  /** Gas not yet on record is left out: the P&L is approximate. */
+  pnlEstimated: boolean;
+}
+
+export async function ownBookOf(
+  db: Db,
+  identity: ProfileIdentity,
+  readFigures = readBookPerformance,
+): Promise<OwnBook | null> {
   const row = await agentRowOf(db, identity);
   if (!row) return null;
   const epoch = Number(row.epoch ?? 1);
@@ -398,7 +439,22 @@ export async function ownBookOf(db: Db, identity: ProfileIdentity): Promise<OwnB
   // the owner, not because the book was published.
   const activity = await readProfileTrades(db, row.smart_account, epoch, true);
   const top = await readTopTrades(db, row.smart_account, epoch, true, book);
-  return { recentTrades: activity.trades, activityRead: activity.read, topTrades: top.trades, topTradesRead: top.read };
+  // Caught on its own: a figure that could not be read costs the owner that
+  // figure, not their trades, and is said unread rather than sent as zero.
+  let figures: OwnFigures | null = null;
+  try {
+    const p = (await readFigures(db, row.smart_account, epoch, true)).performance;
+    figures = {
+      book: p.book, equityUsdg: p.equityUsdg, equityAt: p.equityAt, held: p.held, pnlUsdg: p.pnlUsdg, pnlAt: p.pnlAt,
+      underReview: p.underReview, pnlEstimated: p.pnlEstimated === true,
+    };
+  } catch {
+    /* unread */
+  }
+  return {
+    recentTrades: activity.trades, activityRead: activity.read, topTrades: top.trades, topTradesRead: top.read,
+    figures, figuresRead: figures !== null,
+  };
 }
 
 /**
