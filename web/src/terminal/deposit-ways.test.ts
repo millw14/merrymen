@@ -65,7 +65,8 @@ function priceFor(body: Record<string, unknown>, over: { recipient?: string } = 
   };
 }
 
-function stubFetch(options: { balance?: bigint | "fail"; relay?: "ok" | "refuse" | "wrong-recipient" } = {}): typeof fetch {
+type Balance = bigint | "fail";
+function stubFetch(options: { balance?: Balance | (() => Balance); relay?: "ok" | "refuse" | "wrong-recipient" } = {}): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
@@ -76,8 +77,9 @@ function stubFetch(options: { balance?: bigint | "fail"; relay?: "ok" | "refuse"
       return json(priceFor(body, options.relay === "wrong-recipient" ? { recipient: "0x2222222222222222222222222222222222222222" } : {}));
     }
     if (Object.values(SOURCE_RPC).includes(url)) {
-      if (options.balance === "fail") return json({ error: { code: 403, message: "Access forbidden" } }, 403);
-      const value = options.balance ?? ETH;
+      const balance = typeof options.balance === "function" ? options.balance() : options.balance;
+      if (balance === "fail") return json({ error: { code: 403, message: "Access forbidden" } }, 403);
+      const value = balance ?? ETH;
       return body.method === "getBalance"
         ? json({ jsonrpc: "2.0", id: 1, result: { context: { slot: 1 }, value: Number(value) } })
         : json({ jsonrpc: "2.0", id: 1, result: `0x${value.toString(16)}` });
@@ -204,7 +206,9 @@ describe("From ETH", () => {
     assert.match(text(), /This wallet holds 1 ETH on Ethereum\. Max keeps 0\.002 ETH on Ethereum so this wallet can pay its next fee\./);
 
     await ui.click("Max");
+    await settle();
     assert.equal(inputs()[1]!.value, "0.998");
+    assert.equal(calls.filter((c) => c.url === "https://ethereum-rpc.publicnode.com").length, 2, "Max reads the wallet again");
     await settle(450);
     const price = calls.find((c) => c.url === "https://api.relay.link/price")!;
     assert.deepEqual(price.body, {
@@ -258,6 +262,45 @@ describe("From ETH", () => {
     await settle();
     assert.match(text(), /This wallet holds 0\.0003 ETH on Base\. Max keeps 0\.0003 ETH on Base/);
     assert.equal(Array.from(ui.container.querySelectorAll("button")).find((b) => b.textContent === "Max")!.disabled, true);
+  });
+
+  it("reads the wallet again on Max, so funds sent since the first reading aren't offered twice", async () => {
+    let held: Balance = ETH;
+    await ui.render(view({ fetchImpl: stubFetch({ balance: () => held }) }));
+    await tab("From ETH");
+    await settle();
+    assert.match(text(), /This wallet holds 1 ETH on Ethereum\./);
+    // The owner sends half of it on Relay, then comes back and presses Max.
+    held = ETH / 2n;
+    await ui.click("Max");
+    await settle();
+    assert.equal(inputs()[1]!.value, "0.498");
+    assert.match(text(), /This wallet holds 0\.5 ETH on Ethereum\./);
+  });
+
+  it("turns Max off, and fills nothing, when the second reading fails", async () => {
+    let held: Balance = ETH;
+    await ui.render(view({ fetchImpl: stubFetch({ balance: () => held }) }));
+    await tab("From ETH");
+    await settle();
+    held = "fail";
+    await ui.click("Max");
+    await settle();
+    assert.equal(inputs()[1]!.value, "");
+    assert.match(text(), /Couldn't read this wallet's ETH on Ethereum, so Max is off\./);
+    assert.equal(Array.from(ui.container.querySelectorAll("button")).find((b) => b.textContent === "Max")!.disabled, true);
+  });
+
+  it("says Max has nothing to send when the wallet has dropped to its reserve since the first reading", async () => {
+    let held: Balance = ETH;
+    await ui.render(view({ fetchImpl: stubFetch({ balance: () => held }) }));
+    await tab("From ETH");
+    await settle();
+    held = 2_000_000_000_000_000n;
+    await ui.click("Max");
+    await settle();
+    assert.equal(inputs()[1]!.value, "");
+    assert.match(text(), /This wallet now holds no more than it needs for its own fee, so Max has nothing to send\./);
   });
 
   it("shows Relay's refusal in our words and offers no link to sign", async () => {

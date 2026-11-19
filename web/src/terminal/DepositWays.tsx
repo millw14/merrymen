@@ -231,29 +231,44 @@ function Convert({ sources, agent, balances, gasSponsored, defaultFrom, fetchImp
   const gasAside = !needsGas ? 0n : priceHere ? amountForUsd(source, priceHere.amountIn, priceHere.amountInUsd) : null;
   const max = read?.done ? maxSendable(source, read.value, reserve + (gasAside ?? 0n)) : null;
   const onMax = async () => {
-    if (!read?.done || read.value === null) return;
+    if (!fromValid || !read?.done || read.value === null) return;
     const key = balanceKey;
     setMaxError("");
-    let aside = gasAside;
-    if (aside === null) {
-      const probe = read.value - reserve;
-      if (probe <= 0n) return;
-      setMaxBusy(true);
-      const parsed = await requestRelayPrice({ source, amount: probe, agent }, fetchImpl);
-      setMaxBusy(false);
+    setMaxBusy(true);
+    try {
+      // Read the wallet again: the owner may have sent from it on Relay, or
+      // received into it, since the reading above. An answer for a wallet or
+      // network changed meanwhile is dropped.
+      const value = await readSourceBalance(source, from, fetchImpl);
       if (liveKey.current !== key) return;
-      if (parsed.ok) {
-        setUnitPrice({ sourceId: source.id, amountIn: parsed.quote.amountIn, amountInUsd: parsed.quote.amountInUsd });
-        aside = amountForUsd(source, parsed.quote.amountIn, parsed.quote.amountInUsd);
-      }
+      setBalance({ key, value, done: true });
+      if (value === null) return; // the balance line now says Max is off, and why
+      let aside = gasAside;
       if (aside === null) {
-        setMaxError("Couldn't price your agent's gas top-up, so Max can't set it aside. Type an amount instead.");
-        return;
+        const probe = value - reserve;
+        if (probe <= 0n) {
+          setMaxError("This wallet can't cover its own fee and your agent's gas top-up, so Max has nothing to send.");
+          return;
+        }
+        const parsed = await requestRelayPrice({ source, amount: probe, agent }, fetchImpl);
+        if (liveKey.current !== key) return;
+        if (parsed.ok) {
+          setUnitPrice({ sourceId: source.id, amountIn: parsed.quote.amountIn, amountInUsd: parsed.quote.amountInUsd });
+          aside = amountForUsd(source, parsed.quote.amountIn, parsed.quote.amountInUsd);
+        }
+        if (aside === null) {
+          setMaxError("Couldn't price your agent's gas top-up, so Max can't set it aside. Type an amount instead.");
+          return;
+        }
       }
+      const result = maxSendable(source, value, reserve + aside);
+      if (result.kind === "ok") setAmountText(formatAmount(result.amount, source.decimals, source.inputDecimals));
+      else setMaxError(aside > 0n
+        ? "This wallet can't cover its own fee and your agent's gas top-up, so Max has nothing to send."
+        : "This wallet now holds no more than it needs for its own fee, so Max has nothing to send.");
+    } finally {
+      setMaxBusy(false);
     }
-    const result = maxSendable(source, read.value, reserve + aside);
-    if (result.kind === "ok") setAmountText(formatAmount(result.amount, source.decimals, source.inputDecimals));
-    else setMaxError("This wallet can't cover its own fee and your agent's gas top-up, so Max has nothing to send.");
   };
   const tooMuch = amount !== null && read?.done && read.value !== null && amount > read.value;
   const intoReserve = !tooMuch && amount !== null && read?.done && read.value !== null && read.value - amount < reserve;
