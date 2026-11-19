@@ -725,23 +725,30 @@ html[lang|="ko"] .terminal-host {
     "Noto Sans CJK KR", system-ui, sans-serif;
 }
 
+/*
+ * LEDGER, the terminal's palette since November 2026. Cream on a warm black,
+ * with hairlines one step above the page. `--tx` is also the colour of the one
+ * thing to do next (a cream pill with `--ink` on it); `--lime` is kept for
+ * where money moves and for small "on" signals. What the look does with these
+ * is in ledger.css, which loads last.
+ */
 .terminal-host {
-  --bg: #070806;
-  --card: #12130f;
-  --raised: #1a1b16;
-  --tx: #ecece4;
-  --tx-2: #abada1;
-  --faint: #898c80;
-  --line: #24261e;
+  --bg: #0a0a09;
+  --card: #0f0f0d;
+  --raised: #171714;
+  --tx: #ecead9;
+  --tx-2: #a5a396;
+  --faint: #8a887b;
+  --line: #25251f;
   --up: #3dd68c;
   --down: #ff5c71;
-  --lime: #a5ce1f;
-  --ink: #111;
+  --lime: #d4f55e;
+  --ink: #0a0a09;
   --sans: "Geist Numerals", "DM Sans", system-ui, sans-serif;
   --pixel: "Geist Pixel", ui-monospace, monospace;
   --mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
   --nav: 76px; /* the old 52px bar's sum; phones derive it from the real bar in polish.css */
-  --r: 16px;
+  --r: 14px;
   --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
 }
 

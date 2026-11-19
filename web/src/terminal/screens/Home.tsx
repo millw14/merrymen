@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { PerformanceChart } from "../DitherChart";
-import { ArrowUpRight, ChartNoAxesCombined, MessageCircle, MessagesSquare, Plus, Shirt, Sparkles, Trophy } from "lucide-react";
+import { ArrowUpFromLine, ArrowUpRight, ChartNoAxesCombined, MessageCircle, MessagesSquare, OctagonX, Plus, Settings, Shirt, SlidersHorizontal, Sparkles, Trophy, Wallet } from "lucide-react";
 import { useGroupChatSupported } from "../groupchat";
 import type { LiveAgent, LiveMine, LiveToken, Thesis, TokenTab } from "../live";
 import { AgentStrip } from "../AgentStrip";
@@ -183,6 +183,18 @@ export function Home({
             </>
           )}
         </MerrymanHero>
+
+        {/* SHORTCUTS. The places an owner otherwise reaches through Me or a menu: taking money out, his limits, his
+            wallet and its permission, settings, and stopping him. Five tiles that fit a phone without scrolling, so
+            the stop is never off screen. Links only: every control stays on its own screen, behind its own
+            confirmation. (What he is doing is already said in the hero, by his own status pill.) */}
+        {mine && <nav className="home-quick" aria-label="Shortcuts">
+          <Link className="home-quick-link" href="/withdraw"><ArrowUpFromLine size={16} aria-hidden="true"/> Withdraw</Link>
+          <Link className="home-quick-link" href="/limits"><SlidersHorizontal size={16} aria-hidden="true"/> Limits</Link>
+          <Link className="home-quick-link" href="/grant"><Wallet size={16} aria-hidden="true"/> Wallet</Link>
+          <Link className="home-quick-link" href="/settings"><Settings size={16} aria-hidden="true"/> Settings</Link>
+          <Link className="home-quick-link stop" href="/grant#permission-security"><OctagonX size={16} aria-hidden="true"/> Stop</Link>
+        </nav>}
 
         {mine && <Link className="owner-trades-link" href="/agent#trades">
           <ChartNoAxesCombined size={20} aria-hidden="true"/>

@@ -49,7 +49,13 @@
   padding: 0 16px;
   min-width: 0;
 }
-.terminal-host .mm-chip {
+/* The status chip sits on the hero's stage, and only there. Written for every
+   .mm-chip in the terminal, these rules also caught the example buttons in
+   Settings ("be more careful"), which carry the same class: all four were
+   lifted out of their row onto one spot at the foot of the first screen.
+   :where() keeps the weight each rule has always had, so nothing that
+   outranked the chip's rules stops outranking them. */
+.terminal-host :where(.mm-hero-stage) .mm-chip {
   position: absolute;
   left: 14px;
   bottom: 14px;
@@ -67,16 +73,16 @@
   letter-spacing: 0.01em;
   color: var(--tx);
 }
-.terminal-host .mm-chip i {
+.terminal-host :where(.mm-hero-stage) .mm-chip i {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--faint);
   box-shadow: 0 0 0 4px rgb(255 255 255 / 0.06);
 }
-.terminal-host .mm-chip.tone-good i { background: var(--up); box-shadow: 0 0 0 4px rgb(61 214 140 / 0.18); animation: mm-chip-pulse 2.4s ease-in-out infinite; }
-.terminal-host .mm-chip.tone-warn i { background: #f3c14b; box-shadow: 0 0 0 4px rgb(243 193 75 / 0.2); }
-.terminal-host .mm-chip.tone-bad i { background: var(--down); }
+.terminal-host :where(.mm-hero-stage) .mm-chip.tone-good i { background: var(--up); box-shadow: 0 0 0 4px rgb(61 214 140 / 0.18); animation: mm-chip-pulse 2.4s ease-in-out infinite; }
+.terminal-host :where(.mm-hero-stage) .mm-chip.tone-warn i { background: #f3c14b; box-shadow: 0 0 0 4px rgb(243 193 75 / 0.2); }
+.terminal-host :where(.mm-hero-stage) .mm-chip.tone-bad i { background: var(--down); }
 @keyframes mm-chip-pulse {
   50% { box-shadow: 0 0 0 7px rgb(61 214 140 / 0.04); }
 }
@@ -273,7 +279,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .terminal-host .mm-chip.tone-good i { animation: none; }
+  .terminal-host :where(.mm-hero-stage) .mm-chip.tone-good i { animation: none; }
 }
 
 /* ── chat header ── */

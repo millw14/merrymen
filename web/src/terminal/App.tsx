@@ -62,6 +62,8 @@ import { DRAFT, adoptDraft } from "@/merryman/wardrobe-store";
 import "@/merryman/merryman.css";
 import "@/merryman/wardrobe.css";
 import "./merryman-shell.css";
+import "./quick-access.css";
+import { CopyButton } from "./CopyButton";
 import { Home } from "./screens/Home";
 import { CreateAgent } from "./screens/CreateAgent";
 import Settings from "./screens/Settings";
@@ -100,6 +102,8 @@ import { ticksOf } from "./ticker";
 import { goTo } from "./navigate";
 import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
+// LAST: the look itself. Each rule in it restates one from the sheets above and wins on order.
+import "./ledger.css";
 
 const PerpsWorkspace = dynamic(() => import("./PerpsWorkspace").then(module => module.PerpsWorkspace), { ssr: false, loading: () => <p role="status">Loading Perps…</p> });
 const SolanaScreen = dynamic(() => import("./SolanaScreen").then((module) => module.SolanaScreen));
@@ -681,7 +685,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
         {selectedWallet === "invalid" && <section className="perps-desk"><h1>Unknown wallet selection</h1><p>No wallet controls were opened.</p><a href="/home">Return to Spot</a></section>}
         {selectedWallet === "perps" && <PerpsWorkspace key={`${epoch}:${screen.kind}`} screen={screen.kind} offered={perps}/>}
         {!isolatedWallet && screen.kind === "grant" && <p><a href="/withdraw?wallet=perps">Perps withdrawal &amp; recovery</a></p>}
-        {screen.kind === "solana" && <SolanaScreen key={epoch}/>}
+        {screen.kind === "solana" && <SolanaScreen key={epoch} onSignedIn={invalidateOwnerView}/>}
         {!isolatedWallet && screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {!isolatedWallet && screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings} agentDown={agentDown}/>}
         {!isolatedWallet && screen.kind === "grant" && <Wallet key={epoch}/>}
@@ -813,6 +817,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
                 <span className="profile-session-who" title={account.session.address}>
                   signed in as <code>{account.session.address}</code>
                 </span>
+                <CopyButton text={account.session.address} label="Copy address" className="profile-session-copy" />
                 <SignOut
                   after={() => {
                     invalidateOwnerView();

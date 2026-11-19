@@ -5,7 +5,8 @@ import { strategyName } from "../strategy";
 import { Empty } from "../ui";
 import { BalanceFigure } from "../studio";
 import Link from "../Link";
-import { ChartNoAxesCombined, SlidersHorizontal, Wallet, Settings, ChevronRight, Plug, Shirt } from "lucide-react";
+import { ChartNoAxesCombined, SlidersHorizontal, Wallet, Settings, ChevronRight, OctagonX, Plug, Shirt } from "lucide-react";
+import { CopyButton } from "../CopyButton";
 import { MerrymanPortrait } from "@/merryman/Merryman";
 import { wordOf } from "@/merryman/mood";
 import { useOutfit } from "@/merryman/wardrobe-store";
@@ -80,7 +81,8 @@ export function You({
         </span>
         <div>
           <h2>{ownerLabel}</h2>
-          <p>1 agent</p>
+          {/* The label above is shortened; the button copies the whole address. */}
+          <p>1 agent{owner.startsWith("0x") && owner.length > 16 && <> · <CopyButton text={owner} label="Copy address" className="account-copy" /></>}</p>
         </div>
         <span className="profile-mode" title={recovery ? "RECOVERING" : mine.statusLabel ?? "Offline"}>{word}</span>
       </div>
@@ -147,7 +149,9 @@ export function You({
           </span>
           <ChevronRight size={18} aria-hidden="true"/>
         </button>
-        <button type="button" className="account-control" onClick={onStop}><Wallet size={24} aria-hidden="true"/><span><strong>Wallet & permissions</strong></span><ChevronRight size={18} aria-hidden="true"/></button>
+        <button type="button" className="account-control" onClick={onStop}><Wallet size={24} aria-hidden="true"/><span><strong>Wallet & permissions</strong><small>Renew, stop or revoke his permission</small></span><ChevronRight size={18} aria-hidden="true"/></button>
+        {/* The stop, by its own name. It opens the same screen at the section that holds it; nothing stops here. */}
+        <a className="account-control account-stop" href="/grant#permission-security"><OctagonX size={24} aria-hidden="true"/><span><strong>Stop my merryman</strong><small>Stop him now, or revoke his permission</small></span><ChevronRight size={18} aria-hidden="true"/></a>
         <Link className="account-control" href="/settings"><Settings size={24} aria-hidden="true"/><span><strong>Settings</strong></span><ChevronRight size={18} aria-hidden="true"/></Link>
         {/* Hosted only: a self-hosted install has no assistant connections (assistant-connect.ts). */}
         {assistants && <Link className="account-control" href={CONNECT_ASSISTANT_HREF}><Plug size={24} aria-hidden="true"/><span><strong>Connect to Claude</strong><small>Ask Claude about your agent</small></span><ChevronRight size={18} aria-hidden="true"/></Link>}

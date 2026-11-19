@@ -14,7 +14,7 @@ import { buildCreateSolanaSessionInstruction, buildInitializeSolanaVaultInstruct
 import { JSDOM } from "jsdom";
 import { runSolanaRecoverCommand } from "../../../worker/src/solana-recover-command";
 import { SOLANA_VAULT_RELEASES as TOOL_RELEASES, solanaRecoveryProgramTrust } from "../../../worker/src/solana-recover";
-import { SOLANA_OTHER_SIGN_IN } from "../lib/solana-sign-in";
+import { SOLANA_OTHER_SIGN_IN, SOLANA_SIGN_IN_MISMATCH } from "../lib/solana-sign-in";
 import { SOLANA_LIVE_PER_TRADE_BELOW_MINIMUM, SOLANA_REGISTERED_AFTER_REVOKE } from "../../../packages/core/src/solana";
 import { SOLANA_LIVE_CAP_DEFAULTS, SOLANA_LIVE_NOT_OPEN, SOLANA_LIVE_PAUSED, SOLANA_LIVE_PAUSED_NO_PERMISSION, SOLANA_LIVE_ROLLOUT_DIFFERS, SOLANA_LIVE_ROLLOUT_MISCONFIGURED,
   SOLANA_LIVE_ROLLOUT_MISCONFIGURED_NO_PERMISSION, solanaLiveCapRefusal, solanaLiveSavedAboveCaps, solanaLiveSessionAboveCaps } from "../lib/solana-live-caps";
@@ -122,6 +122,10 @@ let walletOpen = 0;
 /** What the fixture wallet returns for a signature request (a promise: the wallet stays open until it settles). */
 let signedBytes: () => Uint8Array | Promise<Uint8Array>;
 let signerDid = "did:privy:alice";
+/** The fixture's wallet sign-in: whether it is signed in, its login in words, and how often the page signed it out. */
+let signerAuthenticated = true, signerLogin: string | null = "email (james@example.com)", walletSignOuts = 0;
+/** The fixture wallet's address: null until create() makes one, as Privy shows a new wallet on a later render. */
+let signerAddress: string | null = OWNER, createCount = 0;
 /** The release pin SolanaRecovery reads (SOLANA_VAULT_RELEASES); undefined reads the real one. */
 let releases: Array<{ programId: string; sha256: string }> | undefined;
 let respond: (path: string, body: Record<string, unknown> | undefined) => Promise<Response>;
@@ -131,6 +135,11 @@ function initial(mode: "paper" | "live" = "paper") {
     runtime: { owner: OWNER, requestedMode: mode, paper: null as typeof paper | null, limits,
       live: { ready: false, blockers: ["Deploy and verify the vault program before enabling live trading."], programId: null as string | null, vault: null, session: null, pending: [] } } };
 }
+/**
+ * A paper account that registered a live permission before (a session on record): the only kind of paper account the
+ * owner controls show for (SolanaScreen ownerControls), as on the server, which reads live vault state only for such accounts.
+ */
+function wentLiveBefore() { Object.assign(state.runtime.live, { session: OWNER }); }
 before(async () => {
   // React DOM checks input-event support when it first loads. Supply a DOM
   // before importing the harness so typing exercises real React onChange.
@@ -151,10 +160,12 @@ before(async () => {
     if (parent?.filename === path) {
       if (id === "./SolanaScreen.css") return {};
       if (id === "@/lib/privy-client") return { privyEnabled: () => true };
-      if (id === "./HostedControls") return { SignIn: () => React.createElement("p", null, "Sign in") };
+      // A sign-in that finishes when pressed, as PrivySignIn does once its proof lands.
+      if (id === "./HostedControls") return { SignIn: ({ onDone }: { onDone: () => void }) => React.createElement("button", { type: "button", onClick: onDone }, "Sign in") };
       if (id === "./useSolanaOwner") return { useSolanaOwner: () => ({
-        ready: true, authenticated: true, did: signerDid, address: OWNER, ambiguous: false,
-        getAccessToken: async () => "fixture-token", create: async () => {}, signBinding: async () => "fixture-signature",
+        ready: true, authenticated: signerAuthenticated, did: signerAuthenticated ? signerDid : null, address: signerAddress, ambiguous: false,
+        login: signerAuthenticated ? signerLogin : null, signOutWallet: async () => { walletSignOuts++; signerAuthenticated = false; },
+        getAccessToken: async () => "fixture-token", create: async () => { createCount++; signerAddress = OWNER; }, signBinding: async () => "fixture-signature",
         signSetup: async () => { signCount++; walletOpen++; try { return await signedBytes(); } finally { walletOpen--; } },
         exportKey: async () => { exportCount++; },
       }) };
@@ -165,7 +176,8 @@ before(async () => {
   finally { intercept.mock.restore(); }
 });
 beforeEach(() => {
-  ui = testDom(); signerDid = "did:privy:alice"; state = initial(); calls = []; signCount = 0; exportCount = 0; walletOpen = 0; signedBytes = () => Uint8Array.from([1, 2, 3]); releases = undefined;
+  signerAuthenticated = true; signerLogin = "email (james@example.com)"; walletSignOuts = 0;
+  ui = testDom(); signerDid = "did:privy:alice"; signerAddress = OWNER; createCount = 0; state = initial(); calls = []; signCount = 0; exportCount = 0; walletOpen = 0; signedBytes = () => Uint8Array.from([1, 2, 3]); releases = undefined;
   respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
   globalThis.fetch = async (url, init) => {
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer fixture-token");
@@ -193,7 +205,7 @@ test("paper creation uses exact raw USDG and never sends a browser-declared owne
     if (path === "paper") { assert.deepEqual(body, { initialCashRaw: "1000000000" }); state.runtime.paper = paper; return json({ paper }); }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Create paper portfolio");
+  await render(); await ui.click("Create portfolio");
   assert.match(ui.container.textContent!, /1000 USDG/);
   assert.equal(signCount, 0);
 });
@@ -212,12 +224,12 @@ test("an uncertain paper response retries the same request ID instead of creatin
     }
     throw new Error("Unexpected fixture route");
   };
-  await render(); await ui.click("Preview trade"); await ui.click("Simulate trade"); await ui.click("Simulate trade");
+  await render(); await ui.click("Preview trade"); await ui.click("Place trade"); await ui.click("Place trade");
   assert.equal(trades.length, 2); assert.deepEqual(trades[0], trades[1]);
   assert.equal("owner" in trades[0]!, false); assert.equal("tenant" in trades[0]!, false);
-  assert.match(ui.container.textContent!, /Simulated trade recorded/);
-  assert.equal(button("Simulate trade").disabled, true);
-  await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Simulate trade");
+  assert.match(ui.container.textContent!, /Trade recorded/);
+  assert.equal(button("Place trade").disabled, true);
+  await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Place trade");
   assert.equal(trades.length, 3);
   assert.notEqual((trades[2]!.intent as { requestId: string }).requestId, (trades[0]!.intent as { requestId: string }).requestId);
 });
@@ -298,7 +310,7 @@ test("a delayed response from the previous identity never populates a new accoun
   signerDid = "did:privy:bob"; await render();
   await act(async () => { old.resolve(json(state)); });
   assert.ok(!ui.container.textContent!.includes("Solana trading mode"));
-  assert.match(ui.container.textContent!, /Verify Solana wallet/);
+  assert.match(ui.container.textContent!, /Set up my account/);
 });
 
 /** How many times the page says `text`. */
@@ -307,16 +319,114 @@ test("a status answer that another sign-in verified this account's wallet offers
   respond = async (path) => { if (path === "status") return json({ error: SOLANA_OTHER_SIGN_IN }, 403); throw new Error("Unexpected fixture route"); };
   await render(); await settle();
   assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1, "said once, in the wallet card");
-  assert.equal(button("Verify Solana wallet"), undefined); assert.equal(button("Create Solana wallet"), undefined);
+  assert.equal(button("Set up my account"), undefined);
   assert.ok(button("Refresh account"), "a refresh is still offered");
   // Still that answer on a refresh: still no wallet offered.
   await press("Refresh account");
-  assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1); assert.equal(button("Verify Solana wallet"), undefined);
+  assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1); assert.equal(button("Set up my account"), undefined);
   // The login that verified it: the account shows, and the message goes.
   respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
   signerDid = "did:privy:bob"; await render(); await settle();
   assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 0);
   assert.ok(ui.container.textContent!.includes(OWNER) && /Verified wallet connected/.test(ui.container.textContent!));
+});
+/** The status route's answer while the session and the wallet sign-in are different logins (solana-auth.ts). */
+const mismatchAnswer = (loginHasAccount: boolean) => json({ error: SOLANA_SIGN_IN_MISMATCH, ownerFacing: true,
+  signIn: { problem: "mismatch", account: { provider: "twitter", handle: "jamesc" }, loginHasAccount } }, 403);
+test("a session and a wallet sign-in of different logins: both are named, and nothing switches until the owner chooses", async () => {
+  respond = async (path) => { if (path === "status") return mismatchAnswer(false); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  const text = ui.container.textContent!;
+  assert.match(text, /Two different sign-ins/);
+  assert.match(text, /signed in to Merrymen with X \(@jamesc\), but this browser's wallet sign-in is email \(james@example\.com\)/);
+  assert.match(text, /starts a new, empty Merrymen account for email \(james@example\.com\)\. The account you're signed in to now stays as it is/);
+  assert.ok(!text.includes(SOLANA_SIGN_IN_MISMATCH), "the bare refusal is not what the page says");
+  assert.equal(button("Set up my account"), undefined, "no wallet is offered for the wrong login");
+  assert.equal(walletSignOuts, 0); assert.equal(button("Sign in"), undefined, "no sign-in runs by itself");
+  // Sign in with the account's own login: the wallet sign-in ends, and the sign-in that follows names that login.
+  await press("Sign in with X");
+  assert.equal(walletSignOuts, 1);
+  await render(); await settle();
+  assert.match(ui.container.textContent!, /Your Merrymen account signs in with X \(@jamesc\)\./);
+  assert.ok(button("Sign in"));
+  // The right login now: the account opens.
+  signerAuthenticated = true; signerDid = "did:privy:james-x";
+  respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.ok(!/Two different sign-ins/.test(ui.container.textContent!));
+  assert.ok(ui.container.textContent!.includes(OWNER));
+});
+test("keeping the wallet sign-in's login finishes its sign-in, then reads that account", async () => {
+  let switched = false;
+  respond = async (path) => { if (path === "status") return switched ? json(state) : mismatchAnswer(true); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.match(ui.container.textContent!, /opens the Merrymen account of email \(james@example\.com\), everywhere on the site/);
+  await press("Use this wallet sign-in instead");
+  assert.equal(walletSignOuts, 0, "the wallet sign-in is kept");
+  assert.equal(button("Sign in with X"), undefined, "one choice at a time");
+  // The sign-in's proof lands (PrivySignIn's onDone): the session is now that login's account.
+  switched = true;
+  const reads = calls.filter((call) => call.path === "status").length;
+  await press("Sign in");
+  assert.equal(calls.filter((call) => call.path === "status").length, reads + 1, "read afresh once");
+  assert.ok(!/Two different sign-ins/.test(ui.container.textContent!));
+  assert.ok(ui.container.textContent!.includes(OWNER));
+});
+test("a sign-in that finishes on the screen resets the whole shell, which mounts the screen again; the screen does not read twice", async () => {
+  let resets = 0;
+  respond = async (path) => { if (path === "status") return mismatchAnswer(true); throw new Error("Unexpected fixture route"); };
+  await ui.render(React.createElement(SolanaScreen, { onSignedIn: () => { resets++; } })); await settle();
+  await press("Use this wallet sign-in instead");
+  const reads = calls.filter((call) => call.path === "status").length;
+  await press("Sign in");
+  assert.equal(resets, 1, "the shell's invalidateOwnerView ran");
+  assert.equal(calls.filter((call) => call.path === "status").length, reads, "the remounted screen reads; this one does not, so the paced status route is not asked twice");
+  // The same for a session that was missing: the shell learns of the new owner at once.
+  await ui.close(); ui = testDom(); resets = 0;
+  respond = async (path) => { if (path === "status") return json({ error: "Sign in before opening your Solana account.", ownerFacing: true, signIn: { problem: "signed-out" } }, 401); throw new Error("Unexpected fixture route"); };
+  await ui.render(React.createElement(SolanaScreen, { onSignedIn: () => { resets++; } })); await settle();
+  await press("Sign in");
+  assert.equal(resets, 1);
+  // And the shell passes exactly that reset, keying the screen to its session epoch so it mounts again.
+  const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
+  assert.match(app, /<SolanaScreen key=\{epoch\} onSignedIn=\{invalidateOwnerView\}\/>/);
+});
+test("an action refused for a different login shows the same choice, not a bare error", async () => {
+  respond = async (path) => {
+    if (path === "status") return json({ binding: null, runtime: null });
+    if (path.startsWith("bind?owner=")) return mismatchAnswer(false);
+    throw new Error("Unexpected fixture route");
+  };
+  await render(); await press("Set up my account");
+  assert.match(ui.container.textContent!, /Two different sign-ins/);
+  assert.ok(button("Sign in with X") && button("Use this wallet sign-in instead"));
+  assert.equal(calls.filter((call) => call.path === "bind").length, 0, "nothing was signed or posted");
+});
+test("no Merrymen session in this browser: the sign-in finishes on the page, then the account opens", async () => {
+  let session = false;
+  respond = async (path) => {
+    if (path !== "status") throw new Error("Unexpected fixture route");
+    return session ? json(state) : json({ error: "Sign in before opening your Solana account.", ownerFacing: true, signIn: { problem: "signed-out", account: null, loginHasAccount: false } }, 401);
+  };
+  await render(); await settle();
+  assert.match(ui.container.textContent!, /Finish signing in/);
+  assert.ok(!ui.container.textContent!.includes("Sign in before opening your Solana account."), "a way forward, not the bare refusal");
+  session = true; await press("Sign in");
+  assert.ok(!/Finish signing in/.test(ui.container.textContent!));
+  assert.ok(ui.container.textContent!.includes(OWNER));
+});
+test("an expired wallet sign-in offers to sign in again, from the server's answer or a missing token", async () => {
+  respond = async (path) => { if (path === "status") return json({ error: "Your sign-in expired. Sign in again.", ownerFacing: true, signIn: { problem: "expired" } }, 401); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.match(ui.container.textContent!, /Your wallet sign-in on this browser has expired/);
+  await press("Sign in again");
+  assert.equal(walletSignOuts, 1);
+  // A refusal that only looks like one, without its code, stays a plain error.
+  await ui.close(); ui = testDom(); signerAuthenticated = true;
+  respond = async (path) => { if (path === "status") return json({ error: "Your sign-in expired. Sign in again.", ownerFacing: true, signIn: { problem: "nonsense" } }, 401); throw new Error("Unexpected fixture route"); };
+  await render(); await settle();
+  assert.ok(!/has expired/.test(ui.container.textContent!));
+  assert.match(ui.container.textContent!, /Your sign-in expired\. Sign in again\./);
 });
 test("a verify the bind route refuses as another sign-in's stops offering create and verify, and names the way back", async () => {
   respond = async (path) => {
@@ -325,10 +435,10 @@ test("a verify the bind route refuses as another sign-in's stops offering create
     throw new Error("Unexpected fixture route");
   };
   await render();
-  assert.ok(button("Verify Solana wallet"));
-  await press("Verify Solana wallet");
+  assert.ok(button("Set up my account"));
+  await press("Set up my account");
   assert.equal(timesSaid(SOLANA_OTHER_SIGN_IN), 1);
-  assert.equal(button("Verify Solana wallet"), undefined); assert.equal(button("Create Solana wallet"), undefined);
+  assert.equal(button("Set up my account"), undefined);
   assert.equal(calls.filter((call) => call.path === "bind").length, 0, "nothing was signed or posted");
   // Any other refusal of a verify is shown as before, and the button stays.
   ui = (await ui.close(), testDom());
@@ -337,9 +447,9 @@ test("a verify the bind route refuses as another sign-in's stops offering create
     if (path.startsWith("bind?owner=")) return json({ error: "That Solana wallet is already bound to another account." }, 409);
     throw new Error("Unexpected fixture route");
   };
-  await render(); await press("Verify Solana wallet");
+  await render(); await press("Set up my account");
   assert.match(ui.container.textContent!, /already bound to another account/);
-  assert.ok(button("Verify Solana wallet"));
+  assert.ok(button("Set up my account"));
 });
 test("the live permission card names a revocation signed beside the owner transaction", async () => {
   state = initial("live"); state.runtime.live.programId = PROGRAM;
@@ -350,7 +460,7 @@ test("the live permission card names a revocation signed beside the owner transa
   assert.equal(link.getAttribute("href"), "https://solscan.io/tx/revoke-sig");
 });
 test("owner recovery stays available in paper mode and retries exact signed bytes", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   const submissions: unknown[] = [];
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -381,6 +491,9 @@ test("autonomous strategy is disabled by default and saves explicit bounded sett
   };
   await render();
   assert.match(ui.container.textContent!, /Autonomous trading is disabled/);
+  // Folded to its status until asked for: no strategy field is on the page before that.
+  assert.equal(button("Save autonomous strategy"), undefined);
+  await ui.click("Set up automation");
   await ui.click("Save autonomous strategy");
   assert.deepEqual(saved, { revision: 0, strategy: { enabled: false, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 } });
   assert.equal(signCount, 0);
@@ -427,12 +540,12 @@ test("a paced answer is a wait wherever it is read: the first status load, owner
   // Saving the strategy.
   await fresh(); state = initial();
   respond = async (path) => { if (path === "status") return json(state); if (path === "strategy") return json({ error: "Too many Solana strategy changes. Try again in 9 seconds.", ownerFacing: true }, 429); throw new Error("Unexpected fixture route"); };
-  await render(); await press("Save autonomous strategy");
+  await render(); await press("Set up automation"); await press("Save autonomous strategy");
   assert.deepEqual(alerts(), []);
   assert.equal(card("Autonomous rebalancing").querySelector('[role="status"].solana-notice')?.textContent, "Too many Solana strategy changes. Try again in 9 seconds.");
 });
 test("resuming buys requires a separate owner signature without changing trading limits", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
@@ -476,8 +589,7 @@ test("live buying breaker leaves authenticated exits available and displays actu
   state.runtime.live.blockers = ["The on-chain buying breaker is paused; exits remain available."];
   await render();
   assert.equal(button("Preview trade").disabled, true);
-  const direction = ui.container.querySelector<HTMLSelectElement>("select")!;
-  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  await ui.click("Sell");
   assert.equal(button("Preview trade").disabled, false);
   assert.match(ui.container.textContent!, /123\.456789 USDG/); assert.match(ui.container.textContent!, /1\.2 wrapped SOL/);
   assert.match(ui.container.textContent!, /-1\.500001 USDG/); assert.match(ui.container.textContent!, /0\.000005 SOL/);
@@ -610,7 +722,7 @@ const unsaved = (error: string, status = 409) => json({ error, ownerFacing: true
 /** Signed wire bytes the server records by their owner signature (signatureOf), and that signature. */
 const WIRE = Uint8Array.from([1, ...new Uint8Array(64).fill(7), 9, 9, 9]), WIRE_SIGNATURE = base58Encode(new Uint8Array(64).fill(7));
 test("a refused owner submission discards the stale signed bytes and leaves Revoke usable", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
@@ -653,7 +765,7 @@ const ownerPrepare = (body: Record<string, unknown> | undefined) => {
 const revokeBeside = (signature: string, status: string, more: { revokeAgain?: boolean } = {}) => Object.assign(state.runtime.live, { ownerTransaction: { ...serverOwnerRecord()!, revoke: { signature, status, kind: "revoke", ...more } } });
 const ownerTransaction = (signature: string, status: string, kind: string) => Object.assign(state.runtime.live, { ownerTransaction: { signature, status, kind } });
 test("withdrawal bytes the server never saved do not hold back Revoke: the revocation replaces them", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
@@ -681,7 +793,7 @@ test("withdrawal bytes the server never saved do not hold back Revoke: the revoc
 });
 
 test("signed bytes the server never saved, next to a different pending server record: Revoke is prepared beside it, and only a revocation beside it, pending or landed, holds Revoke back", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
@@ -729,7 +841,7 @@ test("signed bytes the server never saved, next to a different pending server re
 });
 
 test("while the server holds a submitted withdrawal every other owner action waits for it, Revoke is prepared beside it, and then everything waits for the revocation", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return ownerPrepare(body);
@@ -816,7 +928,7 @@ test("a Revoke pressed before the page knew of a pending owner transaction is re
 
 const ownerCalls = () => calls.filter((call) => call.path === "owner").map((call) => call.body!.stage === "prepare" ? `prepare:${call.body!.action}` : "submit");
 test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports the server's record, never 'not accepted'", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   let submits = 0;
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -851,7 +963,7 @@ test("a 4xx on a re-check of accepted withdrawal bytes keeps them and reports th
 });
 
 test("a 4xx after an unknown outcome clears bytes the server holds no record of, without claiming they were never sent", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   // Real wire bytes: one owner signature, then a message.
   const signature = new Uint8Array(64).fill(9), wire = Uint8Array.from([1, ...signature, 0x80, 1, 2, 3]);
   let submits = 0;
@@ -907,7 +1019,7 @@ test("a revocation saved beside a pending withdrawal is found in the server's re
 });
 
 test("withdrawals made outside Merrymen are recorded by their signatures, read by the server, and nothing is signed", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   const first = base58Encode(new Uint8Array(64).fill(3)), second = base58Encode(new Uint8Array(64).fill(4));
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -936,7 +1048,7 @@ test("withdrawals made outside Merrymen are recorded by their signatures, read b
 });
 
 test("a refused retry keeps the signed bytes when the server's record cannot be read", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   let submits = 0, statusUp = true;
   respond = async (path, body) => {
     if (path === "status") return statusUp ? json(state) : json({ error: "Solana is temporarily unavailable.", ownerFacing: true }, 503);
@@ -955,7 +1067,7 @@ test("a refused retry keeps the signed bytes when the server's record cannot be 
 });
 
 test("a first owner submission refused without notSaved is decided by the server's record, never assumed unsaved", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   signedBytes = () => WIRE;
   let submits = 0, record: "pending" | "unheld" | "unreadable" = "pending", statusUp = true;
   respond = async (path, body) => {
@@ -979,7 +1091,7 @@ test("a first owner submission refused without notSaved is decided by the server
   assert.match(ui.container.textContent!, /Owner transaction: finalized/);
   assert.equal(signCount, 1); assert.deepEqual(ownerCalls(), ["prepare:withdraw", "submit", "submit"]);
   // The server's record cannot be read: kept, and the next refusal is a retry.
-  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unreadable"; statusUp = true;
+  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; wentLiveBefore(); calls = []; submits = 0; record = "unreadable"; statusUp = true;
   await render(); await ownerPress("Withdraw to my wallet");
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /The server could not say whether it saved this signed withdrawal, so it was kept\. This does not mean it failed/);
@@ -990,14 +1102,14 @@ test("a first owner submission refused without notSaved is decided by the server
   assert.doesNotMatch(ui.container.textContent!, /not accepted|discarded|cleared/);
   assert.match(ui.container.textContent!, /already saved\. The server holds this signed withdrawal and still records it as awaiting confirmation, so it was kept/);
   // The server holds no record of them: discarded, and the owner starts again.
-  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; calls = []; submits = 0; record = "unheld"; statusUp = true;
+  await ui.close(); ui = testDom(); state = initial(); state.runtime.live.programId = PROGRAM; wentLiveBefore(); calls = []; submits = 0; record = "unheld"; statusUp = true;
   await render(); await ownerPress("Withdraw to my wallet");
   assert.match(ui.container.textContent!, /just recorded\. The server holds no record of this signed withdrawal, so it has been discarded\. Start it again to review and sign a new one\./);
   assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Check existing owner transaction"), false);
   assert.equal(button("Withdraw to my wallet").disabled, false);
 });
 test("a refused retry marked notSaved still keeps bytes the server's record holds, and never says they were not sent", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   signedBytes = () => WIRE;
   let submits = 0;
   respond = async (path, body) => {
@@ -1025,7 +1137,7 @@ test("a refused retry marked notSaved still keeps bytes the server's record hold
   assert.equal(signCount, 1);
 });
 test("a 404 or a sign-in answer to signed owner bytes is not a refusal: the bytes are kept", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   const answers = [refusal("Solana trading is not available.", 404), refusal("Your sign-in expired.", 401), refusal("Too many requests.", 429), refusal(SOLANA_OTHER_SIGN_IN, 403), refusal("Request timed out.", 408)];
   respond = async (path, body) => {
     if (path === "status") return json(state);
@@ -1292,15 +1404,15 @@ test("a previewed minimum expires with its quote and the trade needs a new previ
     };
     await render(); await ui.click("Preview trade");
     assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
-    assert.equal(button("Simulate trade").disabled, false);
+    assert.equal(button("Place trade").disabled, false);
     // The page re-renders when the quote's lifetime has passed (its timer fires a millisecond after).
     await act(async () => { mock.timers.tick(lifetime + 1); });
     // Its minimum is no longer offered and nothing can be traded on it.
     assert.ok(!ui.container.textContent!.includes("Minimum received"));
     assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
-    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Place trade"), false);
     assert.equal(trades.length, 0);
-    await ui.click("Preview trade"); await ui.click("Simulate trade");
+    await ui.click("Preview trade"); await ui.click("Place trade");
     assert.equal(trades.length, 1);
     // The trade carries exactly the minimum the owner was shown: the server refuses it, sending nothing, below that.
     assert.equal((trades[0]!.intent as { minOutAmount?: string }).minOutAmount, "9950000");
@@ -1334,15 +1446,15 @@ test("a trade carries the minimum of its own preview, and nothing is sent withou
     throw new Error("Unexpected fixture route");
   };
   await render(); await ui.click("Preview trade");
-  assert.equal(button("Simulate trade").disabled, false);
+  assert.equal(button("Place trade").disabled, false);
   // A different amount drops the preview: its minimum belonged to another trade.
   await type("USDG to spend", "2");
-  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Place trade"), false);
   assert.doesNotMatch(ui.container.textContent!, /Minimum received/);
   assert.equal(trades.length, 0);
   // The new amount's own preview, and its own minimum, travel with its trade.
   minimum = "19900000";
-  await ui.click("Preview trade"); await ui.click("Simulate trade");
+  await ui.click("Preview trade"); await ui.click("Place trade");
   assert.equal(trades.length, 1);
   const intent = trades[0]!.intent as { amountRaw: string; minOutAmount?: string };
   assert.equal(intent.amountRaw, "2000000"); assert.equal(intent.minOutAmount, "19900000");
@@ -1407,17 +1519,17 @@ test("a paced preview or trade (429) is a wait, not a failure: nothing more is s
   pacePreview = false;
   await ui.click("Preview trade");
   assert.equal(ui.container.querySelector(".solana-notice")?.textContent ?? null, null, "the next request clears the wait");
-  await ui.click("Simulate trade");
+  await ui.click("Place trade");
   assert.equal(alert(), null);
   assert.match(ui.container.querySelector(".solana-notice[role=status]")!.textContent!, /^Too many Solana trade requests\. This request was not processed/);
   assert.equal(trades.length, 1);
   // The preview the owner saw is still there, to try again with the same request and minimum.
   assert.match(ui.container.textContent!, /Minimum received: 0\.00995 wrapped SOL/);
-  assert.equal(button("Simulate trade").disabled, false);
+  assert.equal(button("Place trade").disabled, false);
   paceTrade = false;
-  await ui.click("Simulate trade");
+  await ui.click("Place trade");
   assert.equal(trades.length, 2); assert.deepEqual(trades[1], trades[0]);
-  assert.match(ui.container.textContent!, /Simulated trade recorded/);
+  assert.match(ui.container.textContent!, /Trade recorded/);
 });
 const PRICE_MOVED = "The price moved. Preview again; nothing was sent.";
 test("the page's price-moved and too-small sentences, and its write-off slippage, are the server's own", async () => {
@@ -1440,13 +1552,13 @@ test("a price-moved refusal drops the stale preview and offers the fresh minimum
   };
   const moved = (fresh?: unknown) => () => json({ error: PRICE_MOVED, ownerFacing: true, ...(fresh === undefined ? {} : { freshMinOutAmount: fresh }) }, 409);
   const alert = () => ui.container.querySelector('[role="alert"]')?.textContent ?? null;
-  const offer = () => [...ui.container.querySelectorAll("button")].find((item) => item.textContent === "Simulate trade at the new minimum");
+  const offer = () => [...ui.container.querySelectorAll("button")].find((item) => item.textContent === "Place trade at the new minimum");
   answers = [moved("9000000")];
-  await render(); await ui.click("Preview trade"); await ui.click("Simulate trade");
+  await render(); await ui.click("Preview trade"); await ui.click("Place trade");
   assert.equal(trades.length, 1); assert.equal((trades[0]!.intent as { minOutAmount: string }).minOutAmount, "9950000");
   // Nothing went wrong and nothing was sent: no alert, and the refused minimum is never offered again.
   assert.equal(alert(), null);
-  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade"), false);
+  assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Place trade"), false);
   assert.match(ui.container.textContent!, /The price moved, so nothing was sent\. The current quote guarantees at least 0\.009 wrapped SOL, below the 0\.00995 wrapped SOL you previewed\./);
   assert.doesNotMatch(ui.container.textContent!, /Minimum received/);
   // Nothing more is sent until the owner clicks.
@@ -1455,16 +1567,16 @@ test("a price-moved refusal drops the stale preview and offers the fresh minimum
   assert.equal(offer()!.disabled, false);
   // The click sends exactly the fresh minimum, as the same trade: same request ID, same amount.
   answers = [() => json({ receipt: { mode: "paper", requestId: (trades[0]!.intent as { requestId: string }).requestId } })];
-  await ui.click("Simulate trade at the new minimum");
+  await ui.click("Place trade at the new minimum");
   assert.equal(trades.length, 2);
   const [first, second] = trades.map((trade) => trade.intent as Record<string, unknown>);
   assert.equal(second!.minOutAmount, "9000000");
   assert.deepEqual({ ...second, minOutAmount: undefined }, { ...first, minOutAmount: undefined });
-  assert.match(ui.container.textContent!, /Simulated trade recorded/);
+  assert.match(ui.container.textContent!, /Trade recorded/);
   // If it moves again, the server refuses again, and the next fresh minimum is offered against the one just refused.
   await ui.click("Start a new trade"); await ui.click("Preview trade");
   answers = [moved("9500000"), moved("9400000")];
-  await ui.click("Simulate trade"); await ui.click("Simulate trade at the new minimum");
+  await ui.click("Place trade"); await ui.click("Place trade at the new minimum");
   assert.equal(trades.length, 4);
   assert.equal((trades[3]!.intent as { minOutAmount: string }).minOutAmount, "9500000");
   assert.match(ui.container.textContent!, /guarantees at least 0\.0094 wrapped SOL, below the 0\.0095 wrapped SOL you previewed/);
@@ -1484,9 +1596,9 @@ test("a price-moved refusal without a usable fresh minimum offers nothing to tra
   // Missing, malformed, not canonical, or not below the refused minimum of 9950000: never offered.
   for (const value of [undefined, "0", "09000000", "-9000000", "9e6", "9000000.0", " 9000000", 9_000_000, "1".repeat(40), "9950000", "9950001"]) {
     fresh = value;
-    await ui.click("Preview trade"); await ui.click("Simulate trade");
+    await ui.click("Preview trade"); await ui.click("Place trade");
     const buttons = [...ui.container.querySelectorAll("button")].map((item) => item.textContent);
-    assert.ok(!buttons.some((text) => text?.startsWith("Simulate trade")), JSON.stringify(value));
+    assert.ok(!buttons.some((text) => text?.startsWith("Place trade")), JSON.stringify(value));
     assert.doesNotMatch(ui.container.textContent!, /Minimum received|new minimum|guarantees at least/);
     assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null);
     assert.equal(ui.container.querySelector(".solana-notice")?.textContent, PRICE_MOVED);
@@ -1504,10 +1616,10 @@ test("a fresh minimum expires like a preview, and is then never sent", async () 
       if (path === "intent" && body?.action === "trade") { trades.push(body); return json({ error: PRICE_MOVED, ownerFacing: true, freshMinOutAmount: "9000000" }, 409); }
       throw new Error("Unexpected fixture route");
     };
-    await render(); await ui.click("Preview trade"); await ui.click("Simulate trade");
-    assert.ok([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Simulate trade at the new minimum"));
+    await render(); await ui.click("Preview trade"); await ui.click("Place trade");
+    assert.ok([...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Place trade at the new minimum"));
     await act(async () => { mock.timers.tick(20_001); });
-    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent?.startsWith("Simulate trade")), false);
+    assert.equal([...ui.container.querySelectorAll("button")].some((item) => item.textContent?.startsWith("Place trade")), false);
     assert.match(ui.container.textContent!, /This quote expired\. Preview again/);
     assert.equal(trades.length, 1);
   } finally { mock.timers.reset(); }
@@ -1539,8 +1651,7 @@ test("a paper lot is offered for write-off only after the market answers its who
   assert.equal(hasButton("Check for write-off"), true);
   assert.equal([...ui.container.querySelectorAll("button")].filter((item) => item.textContent === "Check for write-off").length, 1, "never for the wrapped SOL lot the form sells");
   // Selling part of the wrapped SOL lot is just too small: no offer.
-  const direction = [...ui.container.querySelectorAll("label")].find((item) => item.textContent?.startsWith("Direction"))!.querySelector("select")!;
-  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  await ui.click("Sell");
   await type("Wrapped SOL to sell", "0.000000004");
   await ui.click("Preview trade");
   assert.equal(ui.container.querySelector('[role="alert"]')?.textContent, TOO_SMALL);
@@ -1553,7 +1664,7 @@ test("a paper lot is offered for write-off only after the market answers its who
   assert.match(text(), /Wrapped SOL: 0\.000000005No route buys back this whole lot: the market quotes nothing for it, so it cannot be sold\./);
   // Nothing is sent until the owner confirms, and "Keep it" sends nothing.
   await ui.click("Write off…");
-  assert.match(text(), /Write off this whole lot of 0\.000000005 wrapped SOL\? It is booked at zero: removed from your paper portfolio at no value, which frees its position slot\. This cannot be undone\./);
+  assert.match(text(), /Write off this whole lot of 0\.000000005 wrapped SOL\? It is booked at zero: removed from your portfolio at no value, which frees its position slot\. This cannot be undone\./);
   assert.equal(writeOffs.length, 0);
   await ui.click("Keep it");
   assert.equal(hasButton("Write off at zero"), false); assert.equal(hasButton("Write off…"), false);
@@ -1648,10 +1759,10 @@ test("a booked write-off says so and shows the lot gone, even when the status re
     // The success is said first, the failed read after it, and nothing reads as a failure.
     assert.equal(ui.container.querySelector('[role="alert"]')?.textContent ?? null, null, label);
     assert.equal(ui.container.querySelector(".solana-notice")!.textContent,
-      `The lot was written off at zero and removed from your paper portfolio. Your account could not be read again just now: ${failure}`, label);
+      `The lot was written off at zero and removed from your portfolio. Your account could not be read again just now: ${failure}`, label);
     // The lot is gone from the portfolio, with nothing left to check or write off.
     assert.doesNotMatch(ui.container.textContent!, new RegExp(BONK), label);
-    assert.match(ui.container.textContent!, /Paper portfolio1000 USDGSimulated cash\. 0 open position\(s\)\./, label);
+    assert.match(ui.container.textContent!, /Portfolio Paper1000 USDGNo open positions\./, label);
     assert.equal(hasButton("Check for write-off"), false, label);
     assert.equal(hasButton("Write off…"), false, label); assert.equal(hasButton("Write off at zero"), false, label);
   }
@@ -1721,8 +1832,8 @@ test("receipts show the minimum the recorded trade enforced, not the earlier pre
     if (path === "intent" && body?.action === "trade") return json({ receipt: { mode: "paper", requestId: "r", intent: { outputMint: OWNER }, quote: { minOutAmount: "9950000" }, outputAmountRaw: "9990000" } });
     throw new Error("Unexpected fixture route");
   };
-  await ui.click("Refresh account"); await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Simulate trade");
-  assert.match(ui.container.textContent!, /Simulated output: 0\.00999 wrapped SOL, against a quoted minimum of 0\.00995 wrapped SOL\./);
+  await ui.click("Refresh account"); await ui.click("Start a new trade"); await ui.click("Preview trade"); await ui.click("Place trade");
+  assert.match(ui.container.textContent!, /Received 0\.00999 wrapped SOL, against a quoted minimum of 0\.00995 wrapped SOL\./);
 });
 
 const EXPORT_FLAG = "NEXT_PUBLIC_MERRYMEN_SOLANA_OWNER_KEY_EXPORT";
@@ -1826,7 +1937,7 @@ test("owner controls show the owner wallet's SOL against what revoke and withdra
 });
 
 test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and shows what the owner wallet must hold", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
@@ -1851,7 +1962,7 @@ test("Withdraw native SOL prepares the runtime's withdraw-sol in lamports, and s
 });
 const COST = /needs your owner wallet to hold at least/;
 test("the owner-controls cost line describes only the action in flight: gone once it finishes, and after a refused prepare", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   let prepare: (body: Record<string, unknown>) => Promise<Response> = async (body) =>
     json({ prepared: { transactionBase64: await ownerBytes(body, priorityFee(200_000, 50_000n)), requiredLamports: "905880", ownerLamports: "10000000" } });
   respond = async (path, body) => {
@@ -1886,7 +1997,7 @@ test("the owner-controls cost line describes only the action in flight: gone onc
   assert.equal(calls.filter((call) => call.path === "owner" && call.body?.stage === "submit").length, 1, "only the revocation was ever submitted");
 });
 test("every owner action is reviewed before the wallet opens: what it does, its fee and what the wallet must hold", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") {
@@ -1931,7 +2042,7 @@ test("every owner action is reviewed before the wallet opens: what it does, its 
   assert.doesNotMatch(text(), /Review before your wallet opens/);
 });
 test("a reviewed owner transaction not signed in time is discarded without opening the wallet", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"], now: Date.now() });
   try {
     respond = async (path, body) => {
@@ -1957,7 +2068,7 @@ test("a reviewed owner transaction not signed in time is discarded without openi
 });
 
 test("a click on Sign with my wallet after the review's deadline, before its timer has run, opens no wallet and sends nothing", () => onTestClock(async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   respond = async (path, body) => {
     if (path === "status") return json(state);
     if (path === "owner" && body?.stage === "prepare") return prepareAnswer(body);
@@ -1986,7 +2097,7 @@ test("a click on Sign with my wallet after the review's deadline, before its tim
 }));
 
 test("owner transaction bytes that do anything but what the owner asked never reach the wallet, and the fee shown is the one they carry", async () => {
-  state.runtime.live.programId = PROGRAM;
+  state.runtime.live.programId = PROGRAM; wentLiveBefore();
   const vault = await deriveSolanaVaultAddress(PROGRAM, OWNER), stranger = base58Encode(new Uint8Array(32).fill(9));
   const usdgAccount = (wallet: string) => deriveSolanaAta(wallet, SOLANA_USDG_MINT, TOKEN_2022_PROGRAM);
   const wsolAccount = (wallet: string) => deriveSolanaAta(wallet, SOLANA_WRAPPED_SOL_MINT, SOLANA_CLASSIC_TOKEN_PROGRAM);
@@ -2456,7 +2567,7 @@ const liveSwitch = () => [...ui.container.querySelectorAll("label")].find((item)
 /** The live rollout as status reports it. */
 const access = (onList: boolean, misconfigured = false) => ({ onList, misconfigured, caps: misconfigured ? null : { ...SOLANA_LIVE_CAP_DEFAULTS } });
 
-test("off the live list a paper account is told why and offered no live switch; on it the page names the caps and refuses a live limit above one before sending anything", async () => {
+test("off the live list a paper account sees only its limits, with no mode switch and no word about live; on it the page names the caps and refuses a live limit above one before sending anything", async () => {
   const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
   runtime.liveAccess = access(false);
   const saved: Array<Record<string, unknown>> = [];
@@ -2466,8 +2577,16 @@ test("off the live list a paper account is told why and offered no live switch; 
     throw new Error("Unexpected fixture route");
   };
   await render();
+  // Paper is all this account can do: nothing to choose, nothing said about live, and its limits saved as just that.
   assert.equal(!!liveSwitch(), false, "no live switch");
-  assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN));
+  assert.equal(ui.container.querySelectorAll("input[type=radio]").length, 0, "no mode switch at all");
+  assert.ok(!ui.container.textContent!.includes(SOLANA_LIVE_NOT_OPEN));
+  assert.ok(ui.container.textContent!.includes("Trading limits")); assert.ok(!ui.container.textContent!.includes("Saved preference"));
+  // Saved limits fold to one line, and the form opens only when asked for.
+  assert.match(ui.container.textContent!, /Trading limits10 USDG a trade · 50 USDG a day · 20 trades a day · 20% maximum drawdown · until \d{4}-\d\d-\d\d \d\d:\d\d UTC/);
+  assert.equal(button("Save limits"), undefined);
+  await press("Change limits");
+  assert.ok(button("Save limits"));
   // A list or cap setting the server cannot read: said, and no switch either.
   runtime.liveAccess = access(false, true); await press("Refresh account");
   assert.equal(!!liveSwitch(), false); assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_ROLLOUT_MISCONFIGURED));
@@ -2539,8 +2658,7 @@ test("an account that went live and is off the list keeps its live switch for ex
   assert.ok(ui.container.textContent!.includes(SOLANA_LIVE_PAUSED));
   assert.doesNotMatch(ui.container.textContent!, /Live limits on this platform/, "no caps to fit: it cannot register while off the list");
   assert.equal(button("Preview trade").disabled, true, "no buy");
-  const direction = ui.container.querySelector<HTMLSelectElement>("select")!;
-  await act(async () => { direction.value = "sell"; direction.dispatchEvent(new ui.dom.window.Event("change", { bubbles: true })); });
+  await ui.click("Sell");
   assert.equal(button("Preview trade").disabled, false, "a sale back to USDG");
   // Back on the list with saved limits above the caps: registration waits for limits within them.
   runtime.liveAccess = access(true); Object.assign(state.runtime.live, { session: null, blockers: [] });
@@ -2649,4 +2767,233 @@ test("on the list, while the server says the registered permission allows more t
   await ui.click("Save Solana mode and limits");
   assert.equal(saved.length, 1, "nothing sent");
   assert.ok(ui.container.textContent!.includes(solanaLiveCapRefusal(state.binding.limits!, SOLANA_LIVE_CAP_DEFAULTS, "save")!), ui.container.textContent!);
+});
+
+test("a paper trade reads as what went in, what came out and when; open positions read as words", () => {
+  const WRAPPED = "So11111111111111111111111111111111111111112", token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+  const at = Date.UTC(2026, 10, 9, 11, 50);
+  const buy = { side: "buy", createdAtMs: at, inputAmountRaw: "10000000", outputAmountRaw: "111234567", intent: { inputMint: SOLANA_USDG_MINT, outputMint: WRAPPED } };
+  assert.equal(screen.paperTradeLine(buy, []), "Buy · 10 USDG → 0.111234567 wrapped SOL · 2026-11-09 11:50 UTC");
+  // Another token's amount needs its decimals: from a lot still held, otherwise the row names the token alone.
+  const sell = { side: "sell", createdAtMs: at, inputAmountRaw: "250000", outputAmountRaw: "1500000", intent: { inputMint: token, outputMint: SOLANA_USDG_MINT } };
+  assert.equal(screen.paperTradeLine(sell, [{ mint: token, decimals: 5 }]), "Sell · 2.5 DezX…B263 → 1.5 USDG · 2026-11-09 11:50 UTC");
+  assert.equal(screen.paperTradeLine(sell, []), "Sell · DezX…B263 → 1.5 USDG · 2026-11-09 11:50 UTC");
+  // A malformed record still reads as its side; it never throws and blanks the list.
+  assert.equal(screen.paperTradeLine({ side: "buy", createdAtMs: Number.NaN, inputAmountRaw: "x", intent: null }, []), "Buy");
+  assert.equal(screen.paperTradeLine({ side: "buy", createdAtMs: 1e20 }, []), "Buy");
+  assert.deepEqual([0, 1, 2].map((count) => screen.openPositions(count)), ["No open positions.", "1 open position.", "2 open positions."]);
+});
+
+test("owner controls show only where they act on something: none for a paper account that never went live", async () => {
+  state.runtime.live.programId = PROGRAM;
+  respond = async (path) => { if (path === "status") return json(state); throw new Error("Unexpected fixture route"); };
+  const ownerCard = () => [...ui.container.querySelectorAll("button")].some((item) => item.textContent === "Revoke all Solana sessions");
+  await render();
+  assert.equal(ownerCard(), false, "a paper account with no session, book, vault, record or pending trade has nothing to revoke or withdraw");
+  // Every sign of live state the server reports brings the card back, as it reads live vault state for exactly these accounts.
+  const signs: Array<[string, Record<string, unknown>]> = [
+    ["a session", { session: OWNER }], ["a live book", { book: { realizedPnlUsdgRaw: "0", networkFeesLamports: "0" } }],
+    ["vault balances", { balances: { slot: 1, cashUsdg: "0", wsolRaw: "0" } }], ["an owner record", { ownerTransaction: { signature: "owner-proof", status: "pending" } }],
+    ["a pending trade", { pending: [{ requestId: "r1" }] }], ["live history", { history: [{ requestId: "r1", status: "finalized" }] }],
+    ["the owner wallet read", { ownerWallet: { lamports: "1", revokeLamports: "1", withdrawLamports: "1" } }],
+    ["recoverable SOL read", { recoverable: { nativeLamports: "0", unsyncedWsolLamports: "0" } }],
+  ];
+  for (const [label, sign] of signs) {
+    state = initial(); state.runtime.live.programId = PROGRAM; Object.assign(state.runtime.live, sign);
+    await press("Refresh account");
+    assert.equal(ownerCard(), true, label);
+  }
+  state = initial("live"); state.runtime.live.programId = PROGRAM; await press("Refresh account");
+  assert.equal(ownerCard(), true, "live mode");
+  // A status without its runtime is not proof of nothing to act on: the card stays.
+  state = initial(); (state as { runtime: unknown }).runtime = null; await press("Refresh account");
+  assert.equal(ownerCard(), true, "no runtime in the status");
+});
+
+/** A server for a new account: no binding until bind, then whatever settings and paper saved. */
+function freshAccount(options: { failSettingsOnce?: string } = {}) {
+  let bound: Record<string, unknown> | null = null, book: unknown = null, failSettings = options.failSettingsOnce;
+  respond = async (path, body) => {
+    if (path === "status") return json(bound ? { binding: bound, runtime: { ...initial().runtime, paper: book } } : { binding: null, runtime: null });
+    if (path === `bind?owner=${encodeURIComponent(OWNER)}`) return json({ nonce: "nonce-1", message: "Verify this wallet" });
+    if (path === "bind") { bound = { ...initial().binding, limits: null, revision: 1 }; return json({ binding: bound }); }
+    if (path === "settings") {
+      if (failSettings) { const said = failSettings; failSettings = undefined; return json({ error: said }, 400); }
+      bound = { ...bound!, limits: body!.limits, revision: 2 }; return json({ binding: bound });
+    }
+    if (path === "paper") { book = { ...paper }; return json({ paper: book }); }
+    throw new Error(`Unexpected fixture route ${path}`);
+  };
+}
+
+test("one press sets a new account up: wallet, one signature, a week of default paper limits and a 1,000 USDG portfolio, then one status read", async () => {
+  signerAddress = null; freshAccount();
+  await render();
+  assert.match(ui.container.textContent!, /a paper portfolio of 1,000 USDG/);
+  const started = Date.now();
+  await press("Set up my account"); await settle();
+  assert.equal(createCount, 1, "the wallet is created first, and once");
+  // Verified, limits saved and portfolio opened on the routes' own answers; the status is read once, at the end.
+  assert.deepEqual(calls.map((call) => call.path), ["status", `bind?owner=${encodeURIComponent(OWNER)}`, "bind", "settings", "paper", "status"]);
+  assert.deepEqual(calls[2]!.body, { owner: OWNER, nonce: "nonce-1", signature: "fixture-signature" });
+  const settings = calls[3]!.body!, saved = settings.limits as Record<string, unknown>;
+  assert.equal(settings.mode, "paper"); assert.equal(settings.liveConsent, false); assert.equal(settings.revision, 1);
+  assert.deepEqual({ ...saved, expiresAtMs: 0 }, { perTradeUsdg: "10000000", dailyUsdg: "50000000", maxOpsPerDay: 20, maxDrawdownBps: 2000, expiresAtMs: 0 });
+  assert.ok(Math.abs(Number(saved.expiresAtMs) - (started + 168 * 3_600_000)) < 60_000, "paper limits last a week");
+  assert.deepEqual(calls[4]!.body, { initialCashRaw: "1000000000" });
+  assert.equal(button("Set up my account"), undefined);
+  assert.match(ui.container.textContent!, /Wallet ownership.*Verified wallet connected/);
+  assert.match(ui.container.textContent!, /Portfolio Paper1000 USDGNo open positions\./);
+  assert.equal(signCount, 0, "verifying signs a message, never a transaction");
+});
+
+test("a setup stopped part way carries on from the step that failed, and never verifies the wallet twice", async () => {
+  freshAccount({ failSettingsOnce: "These limits could not be saved." });
+  await render(); await press("Set up my account");
+  assert.match(ui.container.textContent!, /These limits could not be saved\./);
+  // What it did save shows: the verified wallet, and the portfolio card finishes the rest in one press.
+  assert.match(ui.container.textContent!, /Verified wallet connected/);
+  calls = [];
+  await press("Create portfolio");
+  assert.deepEqual(calls.map((call) => call.path), ["settings", "paper", "status"]);
+  assert.match(ui.container.textContent!, /Portfolio Paper1000 USDG/);
+  assert.equal(createCount, 0, "the fixture wallet already existed");
+});
+
+test("paper limits that ran out renew as they were, for a week, in one press, and then fold to one line", async () => {
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  state.binding.limits = { ...limits, expiresAtMs: Date.now() - 60_000 };
+  const saved: Array<Record<string, unknown>> = [];
+  respond = async (path, body) => {
+    if (path === "status") return json(state);
+    if (path === "settings") { saved.push(body!); state.binding = { ...state.binding, limits: body!.limits as typeof limits, revision: 1 }; return json({ binding: state.binding }); }
+    throw new Error("Unexpected fixture route");
+  };
+  await render();
+  assert.match(ui.container.textContent!, /Your limits expired at \d{4}-\d\d-\d\d \d\d:\d\d UTC\. Trading resumes once they are renewed\./);
+  const started = Date.now();
+  await press("Renew for 7 days");
+  assert.equal(saved.length, 1); assert.equal(saved[0]!.mode, "paper"); assert.equal(saved[0]!.liveConsent, false);
+  const renewed = saved[0]!.limits as typeof limits;
+  assert.deepEqual({ ...renewed, expiresAtMs: 0 }, { ...limits, expiresAtMs: 0 }, "the same limits");
+  assert.ok(Math.abs(renewed.expiresAtMs - (started + 168 * 3_600_000)) < 60_000, "for another week");
+  assert.match(ui.container.textContent!, /Trading limits10 USDG a trade · 50 USDG a day · 20 trades a day · 20% maximum drawdown · until /);
+  assert.equal(button("Save limits"), undefined);
+  await press("Change limits");
+  assert.ok(button("Save limits"));
+});
+
+test("quick amounts never exceed what one trade may be or what the account holds; usage counts the last 24 hours only", () => {
+  const now = Date.UTC(2026, 10, 10, 12), WRAPPED = "So11111111111111111111111111111111111111112";
+  const trades = [{ createdAtMs: now - 3_600_000, notionalUsdgRaw: "10000000" }, { createdAtMs: now - 23 * 3_600_000, notionalUsdgRaw: "2500000" },
+    { createdAtMs: now - 25 * 3_600_000, notionalUsdgRaw: "40000000" }, null, { createdAtMs: "yesterday" }];
+  assert.deepEqual(screen.paperUsage({ trades }, now), { usedRaw: "12500000", trades: 2 });
+  assert.equal(screen.paperUsage({}, now), null); assert.equal(screen.paperUsage(null, now), null);
+  const book = { cashRaw: "1000000000", positions: [{ mint: WRAPPED, amountRaw: "667234567" }], trades };
+  type Input = Parameters<typeof screen.quickMax>[0];
+  const max = (input: Partial<Input> & Pick<Input, "side">) => {
+    const answer = screen.quickMax({ mode: "paper", limits, paper: book, tradable: null, nowMs: now, ...input });
+    return answer && [answer.raw.toString(), answer.held.toString(), answer.decimals];
+  };
+  // A buy: the per-trade limit (10), below the cash (1000) and what is left of the day (50 - 12.5).
+  assert.deepEqual(max({ side: "buy" }), ["10000000", "1000000000", 6]);
+  assert.deepEqual(max({ side: "buy", limits: { ...limits, dailyUsdg: "15000000" } }), ["2500000", "1000000000", 6], "what is left of the day");
+  assert.deepEqual(max({ side: "buy", limits: { ...limits, dailyUsdg: "12000000" } }), ["0", "1000000000", 6], "a day already used up");
+  assert.deepEqual(max({ side: "buy", paper: { ...book, cashRaw: "1500000" } }), ["1500000", "1500000", 6], "the cash");
+  assert.deepEqual(max({ side: "buy", paper: { cashRaw: "1000000000", positions: [] } }), ["10000000", "1000000000", 6], "no trade list: cash and the per-trade limit");
+  // A sale: the whole wrapped SOL holding, and nothing where none is held.
+  assert.deepEqual(max({ side: "sell" }), ["667234567", "667234567", 9]);
+  assert.deepEqual(max({ side: "sell", paper: { ...book, positions: [] } }), ["0", "0", 9]);
+  // No trades left today: nothing to fill, either way.
+  assert.deepEqual(max({ side: "buy", limits: { ...limits, maxOpsPerDay: 2 } }), ["0", "1000000000", 6]);
+  assert.deepEqual(max({ side: "sell", limits: { ...limits, maxOpsPerDay: 2 } }), ["0", "667234567", 9]);
+  // Live: the session's tradable balances, a sale within the SOL-per-trade limit.
+  const tradable = { cashUsdg: "5000000", wsolRaw: "1200000000" };
+  assert.deepEqual(max({ side: "buy", mode: "live", paper: null, tradable }), ["5000000", "5000000", 6]);
+  assert.deepEqual(max({ side: "sell", mode: "live", paper: null, tradable, limits: liveLimits() }), ["250000000", "1200000000", 9]);
+  // A missing figure is no chips, never a guess.
+  assert.equal(max({ side: "buy", mode: "live", paper: null }), null); assert.equal(max({ side: "buy", limits: null }), null);
+  assert.equal(max({ side: "buy", paper: null }), null); assert.equal(max({ side: "buy", paper: { ...book, cashRaw: "-5" } }), null);
+});
+
+test("the trade form's quick amounts and Sell all only fill the field: nothing is previewed, traded or saved", async () => {
+  const WRAPPED = "So11111111111111111111111111111111111111112";
+  state.runtime.paper = { ...paper, positions: [{ mint: WRAPPED, decimals: 9, amountRaw: "667234567", costBasisUsdgRaw: "60000000" }] } as never;
+  await render();
+  const pressed = () => [...ui.container.querySelectorAll(".solana-segment button")].map((item) => `${item.textContent}:${item.getAttribute("aria-pressed")}`);
+  assert.deepEqual(pressed(), ["Buy:true", "Sell:false"]);
+  assert.match(ui.container.textContent!, /Cash: 1000 USDG/);
+  await ui.click("Max"); assert.equal(field("USDG to spend"), "10");
+  await ui.click("50%"); assert.equal(field("USDG to spend"), "5");
+  await ui.click("25%"); assert.equal(field("USDG to spend"), "2.5");
+  await ui.click("Sell"); assert.deepEqual(pressed(), ["Buy:false", "Sell:true"]);
+  assert.match(ui.container.textContent!, /Holding: 0\.667234567 wrapped SOL/);
+  await ui.click("All"); assert.equal(field("Wrapped SOL to sell"), "0.667234567");
+  await ui.click("50%"); assert.equal(field("Wrapped SOL to sell"), "0.333617283");
+  // From the portfolio: one press fills a sale of the whole holding, whichever side the form was on.
+  await ui.click("Buy"); await ui.click("Sell all");
+  assert.deepEqual(pressed(), ["Buy:false", "Sell:true"]); assert.equal(field("Wrapped SOL to sell"), "0.667234567");
+  assert.deepEqual(calls.map((call) => call.path), ["status"]);
+});
+
+test("the dock keeps every card, the wallet's address and the refresh one press away; a wallet that is not the verified one comes first", async () => {
+  const copied: string[] = [];
+  const clipboard = () => Object.defineProperty(ui.dom.window.navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { copied.push(text); } } });
+  const dock = () => [...ui.container.querySelectorAll(".solana-dock button")].map((item) => item.textContent);
+  const titles = () => [...ui.container.querySelectorAll("h2")].map((item) => item.textContent ?? "");
+  clipboard(); await render();
+  assert.deepEqual(dock(), ["Portfolio", "Trade", "Limits", "Automation", "Wallet", "So11…1112", "Refresh account"]);
+  for (const id of ["solana-book", "solana-trade", "solana-limits", "solana-automation", "solana-wallet"]) assert.ok(ui.container.querySelector(`#${id}`), id);
+  assert.equal([...ui.container.querySelectorAll("button")].filter((item) => item.textContent === "Refresh account").length, 1);
+  // What is traded and the form that trades it come before the settings and the wallet.
+  assert.deepEqual(titles(), ["Portfolio Paper", "Trade USDG ↔ wrapped SOL", "Solana trading mode", "Autonomous rebalancing", "Wallet ownership"]);
+  // The short address copies the whole one, and so does the wallet card's own button.
+  await press("So11…1112"); assert.deepEqual(copied, [OWNER]); assert.ok(button("Copied"));
+  await press("Copy address"); assert.deepEqual(copied, [OWNER, OWNER]);
+  assert.equal(ui.container.querySelector<HTMLAnchorElement>("#solana-wallet a")!.href, `https://solscan.io/account/${OWNER}`);
+  // A browser that refuses the clipboard is told so; nothing claims a copy.
+  await ui.close(); ui = testDom(); await render();
+  await press("Copy address");
+  assert.ok(button("Not copied. Select it instead")); assert.equal(button("Copied"), undefined);
+  // A connected wallet that is not the verified one: its card comes first, and the dock offers no address to copy.
+  await ui.close(); ui = testDom(); signerAddress = "Other11111111111111111111111111111111111111"; await render();
+  assert.equal(titles()[0], "Wallet ownership");
+  assert.deepEqual(dock(), ["Portfolio", "Trade", "Limits", "Automation", "Wallet", "Refresh account"]);
+  assert.match(ui.container.textContent!, /Connect the exact embedded wallet shown above/);
+});
+
+test("a paper-only account sees what it used of its 24-hour limits beside them, and its result line", async () => {
+  const runtime = state.runtime as typeof state.runtime & { liveAccess?: ReturnType<typeof access> };
+  runtime.liveAccess = access(false);
+  const now = Date.now();
+  state.runtime.paper = { ...paper, initialCashRaw: "1000000000", realizedPnlRaw: "-250000", trades: [
+    { requestId: "a", side: "buy", createdAtMs: now - 60_000, notionalUsdgRaw: "10000000" }, { requestId: "b", side: "sell", createdAtMs: now - 120_000, notionalUsdgRaw: "2500000" },
+    { requestId: "c", side: "buy", createdAtMs: now - 26 * 3_600_000, notionalUsdgRaw: "40000000" }] } as never;
+  await render();
+  assert.match(ui.container.textContent!, /Last 24 hours: 12\.5 of 50 USDG traded · 2 of 20 trades\./);
+  assert.equal(ui.container.querySelector("progress.solana-meter")!.getAttribute("value"), "25");
+  assert.deepEqual([...ui.container.querySelectorAll(".solana-stats span")].map((item) => item.textContent), ["Started with 1000 USDG", "Realized P&L -0.25 USDG"]);
+});
+
+test("the strategy card folds to its status: a saved strategy in one line, its fields one press away", async () => {
+  Object.assign(state.binding, { strategy: { enabled: true, targetSolBps: 5000, rebalanceBps: 500, tradeUsdgRaw: "1000000", intervalSeconds: 60 } });
+  await render();
+  assert.match(ui.container.textContent!, /Keeps 50% in wrapped SOL, in trades of up to 1 USDG, checked every 60 seconds\./);
+  assert.match(ui.container.textContent!, /Waiting for Solana worker/);
+  assert.equal(button("Save autonomous strategy"), undefined);
+  await ui.click("Change strategy");
+  assert.ok(button("Save autonomous strategy"));
+});
+
+test("the Solana screen cannot be pushed wider than the app's body by its own dock", () => {
+  // In the app the screen is a flex item of a column body and centred with auto margins, which sizes it to fit its content.
+  // The dock is a row of buttons that does not wrap: without a stated width and a zero minimum, a phone's page became as wide
+  // as that row and scrolled sideways. jsdom lays nothing out, so this pins the rule itself.
+  const css = readFileSync(new URL("./SolanaScreen.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  // Every declaration made on the screen itself, whichever block states it.
+  const screenRule = [...css.matchAll(/(?:^|\})\s*\.solana-screen\s*\{([^}]*)(?=\})/g)].map((match) => match[1]).join(";").replace(/\s+/g, "");
+  assert.match(screenRule, /(^|;)width:100%/); assert.match(screenRule, /(^|;)min-width:0/); assert.match(screenRule, /(^|;)box-sizing:border-box/);
+  const dockRule = (/\.solana-dock\s*\{([^}]*)\}/.exec(css)?.[1] ?? "").replace(/\s+/g, "");
+  assert.match(dockRule, /overflow-x:auto/, "the dock scrolls inside the screen rather than widening it");
 });

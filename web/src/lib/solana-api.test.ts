@@ -25,6 +25,14 @@ test("Solana routes reject authority fields and oversized bodies", async () => {
   await assert.rejects(solanaRequestBody(new Request("https://example.test", { method: "POST", body: JSON.stringify({ amount: "x".repeat(20_000) }) }), ["amount"]), (e: unknown) => e instanceof SolanaWebError && e.status === 413);
   assert.deepEqual(await solanaRequestBody(new Request("https://example.test", { method: "POST", body: '{"amount":"1"}' }), ["amount"]), { amount: "1" });
 });
+test("a refused sign-in carries its code to the page, and no other refusal does", async () => {
+  const signIn = { problem: "mismatch", account: { provider: "twitter", handle: "jamesc" }, loginHasAccount: true } as const;
+  const refused = await solanaResponse(async () => { throw new SolanaWebError(403, "Your Merrymen sign-in and your wallet sign-in are different logins.", signIn); });
+  assert.equal(refused.status, 403);
+  assert.deepEqual(await refused.json(), { error: "Your Merrymen sign-in and your wallet sign-in are different logins.", ownerFacing: true, signIn });
+  const plain = await solanaResponse(async () => { throw new SolanaWebError(403, "Cross-origin Solana requests are not allowed."); });
+  assert.deepEqual(await plain.json(), { error: "Cross-origin Solana requests are not allowed.", ownerFacing: true });
+});
 test("unexpected errors cannot reflect RPC credentials, session seeds or SQL values", async () => {
   const response = await solanaResponse(async () => { throw new Error("https://rpc.example?api-key=secret sessionSecretKey=private SQL value"); });
   assert.equal(response.status, 503);

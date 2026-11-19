@@ -5,9 +5,16 @@ import { useWallets, useCreateWallet, useExportWallet, useSignMessage, useSignTr
 import { base58Encode } from "../../../packages/core/src/ids";
 
 const creations = new Map<string, Promise<unknown>>();
+/** The wallet sign-in's own login in words, for a page that must name it: "X (@name)", "email (address)", "Google (address)". */
+export function walletLoginText(user: { twitter?: { username?: string | null } | null; email?: { address?: string | null } | null; google?: { email?: string | null } | null } | null | undefined): string | null {
+  if (user?.twitter?.username) return `X (@${user.twitter.username})`;
+  if (user?.email?.address) return `email (${user.email.address})`;
+  if (user?.google?.email) return `Google (${user.google.email})`;
+  return null;
+}
 /** A separate signer hook: Solana owner IDs are never lowercased or sent to viem. */
 export function useSolanaOwner() {
-  const { authenticated, ready: loginReady, user, getAccessToken } = usePrivy();
+  const { authenticated, ready: loginReady, user, getAccessToken, logout } = usePrivy();
   const { wallets, ready } = useWallets();
   const { createWallet } = useCreateWallet();
   const { signMessage } = useSignMessage();
@@ -28,6 +35,14 @@ export function useSolanaOwner() {
   return {
     ready: loginReady && ready, authenticated, did, address: wallet?.address ?? null,
     ambiguous: matches.length > 1, getAccessToken,
+    /** This login, in words (walletLoginText); null when signed out or unnamed. */
+    login: authenticated ? walletLoginText(user) : null,
+    /**
+     * Ends the wallet sign-in (Privy) in this browser, and nothing else: the
+     * Merrymen session and every saved grant stay. For a page whose wallet
+     * sign-in is the wrong login, so the owner can sign in with the right one.
+     */
+    async signOutWallet() { await logout(); },
     async create() {
       if (!did || !authenticated) throw new Error("Sign in before creating a Solana wallet.");
       let pending = creations.get(did);

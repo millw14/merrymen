@@ -4,6 +4,7 @@ import { ed25519 } from "@noble/curves/ed25519";
 import { NextRequest } from "next/server";
 import { base58Encode } from "../../../packages/core/src/ids";
 import { authenticateSolana, solanaBindingMessage, verifySolanaBindingSignature, SolanaWebError, type SolanaAuthDependencies } from "./solana-auth";
+import { SOLANA_SIGN_IN_MISMATCH, solanaAccountLogin, solanaAccountLoginText, solanaSignInRefusal } from "./solana-sign-in";
 
 const TENANT = `0x${"11".repeat(20)}` as const;
 const OTHER = `0x${"22".repeat(20)}` as const;
@@ -41,6 +42,62 @@ test("Solana authentication requires the current cookie and verified DID to name
   await assert.rejects(authenticateSolana(request(), dependencies({ tenant: () => null })), (e: unknown) => e instanceof SolanaWebError && e.status === 401);
   await assert.rejects(authenticateSolana(request(), dependencies({ verifyToken: async () => ({ ok: false }) })), (e: unknown) => e instanceof SolanaWebError && e.status === 401);
   for (const mapped of [OTHER, null]) await assert.rejects(authenticateSolana(request(), dependencies({ tenantForDid: async () => mapped })), (e: unknown) => e instanceof SolanaWebError && e.status === 403);
+});
+/** The refusal authenticateSolana throws, for its fields. */
+async function refusal(deps: SolanaAuthDependencies, req = request()): Promise<SolanaWebError> {
+  try { await authenticateSolana(req, deps); } catch (e) { assert.ok(e instanceof SolanaWebError); return e; }
+  assert.fail("expected a refusal");
+}
+test("a refused sign-in says why by code, and a mismatch names the account's login without deciding anything by it", async () => {
+  // A Solana page asked to open with no Merrymen session, or a wallet token that does not verify.
+  assert.deepEqual((await refusal(dependencies({ tenant: () => null }))).signIn, { problem: "signed-out", account: null, loginHasAccount: false });
+  assert.deepEqual((await refusal(dependencies({ verifyToken: async () => ({ ok: false }) }))).signIn, { problem: "expired", account: null, loginHasAccount: false });
+  // A session for one login and a wallet sign-in of another: named, and whether that other login has an account.
+  const lookups: string[] = [];
+  const accountLogin = async (tenant: `0x${string}`) => { lookups.push(tenant); return { provider: "twitter" as const, handle: "jamesc" }; };
+  for (const [mapped, loginHasAccount] of [[OTHER, true], [null, false]] as const) {
+    const mismatch = await refusal(dependencies({ tenantForDid: async () => mapped, accountLogin }));
+    assert.equal(mismatch.status, 403);
+    assert.equal(mismatch.message, SOLANA_SIGN_IN_MISMATCH);
+    assert.deepEqual(mismatch.signIn, { problem: "mismatch", account: { provider: "twitter", handle: "jamesc" }, loginHasAccount });
+  }
+  assert.deepEqual(lookups, [TENANT, TENANT], "the login asked about is the session's own account's");
+  // The lookup only words the answer: one that fails, or none at all, still refuses, naming no login.
+  for (const deps of [dependencies({ tenantForDid: async () => OTHER, accountLogin: async () => { throw new Error("store down"); } }), dependencies({ tenantForDid: async () => OTHER })]) {
+    const mismatch = await refusal(deps);
+    assert.equal(mismatch.status, 403);
+    assert.deepEqual(mismatch.signIn, { problem: "mismatch", account: null, loginHasAccount: true });
+  }
+  // A matching sign-in never looks the login up.
+  lookups.length = 0;
+  assert.deepEqual(await authenticateSolana(request(), dependencies({ accountLogin })), principal);
+  assert.deepEqual(lookups, []);
+  // Every other refusal carries no code: the cross-origin and changed-identity answers stay as they were.
+  for (const headers of [{ origin: "https://evil.example" }, { "x-merrymen-privy-did": "did:privy:bob" }]) {
+    const other = await refusal(dependencies({ accountLogin }), request(headers));
+    assert.equal(other.status, 403);
+    assert.equal(other.signIn, null);
+  }
+});
+test("the account's login is shown as display words only: an X handle, never an email address", () => {
+  assert.deepEqual(solanaAccountLogin({ social: { provider: "twitter", handle: "jamesc" } }), { provider: "twitter", handle: "jamesc" });
+  assert.deepEqual(solanaAccountLogin({ social: { provider: "twitter", handle: "<script>" } }), { provider: "twitter", handle: null });
+  assert.deepEqual(solanaAccountLogin({ social: { provider: "email", handle: "someone@example.com" } }), { provider: "email", handle: null });
+  assert.deepEqual(solanaAccountLogin({ social: { provider: "google", handle: "someone" } }), { provider: "google", handle: null });
+  assert.deepEqual(solanaAccountLogin({ social: null }), { provider: "wallet", handle: null }, "an account made with the wallet login");
+  assert.equal(solanaAccountLogin({ social: { provider: "telegram", handle: "x" } }), null);
+  assert.equal(solanaAccountLogin(null), null);
+  assert.equal(solanaAccountLoginText({ provider: "twitter", handle: "jamesc" }), "X (@jamesc)");
+  assert.equal(solanaAccountLoginText({ provider: "email", handle: null }), "email");
+  assert.equal(solanaAccountLoginText({ provider: "wallet", handle: null }), "a wallet");
+  assert.equal(solanaAccountLoginText(null), "another login");
+  // What the page reads back from an answer: validated, anything else absent.
+  assert.deepEqual(solanaSignInRefusal({ problem: "mismatch", account: { provider: "twitter", handle: "jamesc" }, loginHasAccount: true }),
+    { problem: "mismatch", account: { provider: "twitter", handle: "jamesc" }, loginHasAccount: true });
+  assert.deepEqual(solanaSignInRefusal({ problem: "mismatch", account: { provider: "email", handle: "someone@example.com" } }),
+    { problem: "mismatch", account: { provider: "email", handle: null }, loginHasAccount: false });
+  assert.deepEqual(solanaSignInRefusal({ problem: "expired" }), { problem: "expired", account: null, loginHasAccount: false });
+  for (const junk of [null, "mismatch", { problem: "other" }, { problem: 1 }, []]) assert.equal(solanaSignInRefusal(junk), null);
 });
 test("browser cross-origin requests cannot mutate a bound Solana account", async () => {
   await assert.rejects(authenticateSolana(request({ origin: "https://evil.example" }), dependencies()), (e: unknown) => e instanceof SolanaWebError && e.status === 403);
