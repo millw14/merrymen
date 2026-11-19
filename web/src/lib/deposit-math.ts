@@ -73,7 +73,7 @@ export const DEPOSIT_SOURCES: Readonly<Record<SourceId, DepositSource>> = Object
 });
 
 /** The ETH sources, in the order the panel offers them. */
-export const ETH_SOURCES: readonly SourceId[] = ["eth-robinhood", "eth-base", "eth-arbitrum", "eth-ethereum"];
+export const ETH_SOURCES: readonly SourceId[] = ["eth-ethereum", "eth-base", "eth-arbitrum", "eth-robinhood"];
 
 /**
  * A decimal the owner typed, as base units, or null when it is not one.
@@ -107,6 +107,13 @@ export function formatAmount(value: bigint, decimals: number, fractionDigits = d
   const keep = Math.min(fractionDigits, decimals);
   const fraction = (abs % unit).toString().padStart(decimals, "0").slice(0, keep).replace(/0+$/, "");
   return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
+}
+
+/** Base units with exactly `digits` fraction digits, truncated: how dollars and USDG are shown ("40.00"). */
+export function formatFixed(value: bigint, decimals: number, digits: number): string {
+  const text = formatAmount(value, decimals, digits);
+  const [whole, fraction = ""] = text.split(".");
+  return digits > 0 ? `${whole}.${fraction.padEnd(digits, "0")}` : whole!;
 }
 
 /** Drop everything past `digits` fraction digits, toward zero. */

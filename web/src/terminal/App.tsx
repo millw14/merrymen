@@ -102,6 +102,7 @@ import { ticksOf } from "./ticker";
 import { goTo } from "./navigate";
 import { TickerStrip } from "@/components/shell/Ticker";
 import "./live-motion.css";
+import "./deposit.css";
 // LAST: the look itself. Each rule in it restates one from the sheets above and wins on order.
 import "./ledger.css";
 

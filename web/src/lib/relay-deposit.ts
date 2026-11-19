@@ -39,7 +39,7 @@
  * check there.
  */
 import { CASH, USDG_DECIMALS } from "@merrymen/core";
-import { EVM_NATIVE, SOL_NATIVE, formatAmount, type DepositSource } from "./deposit-math";
+import { EVM_NATIVE, SOL_NATIVE, formatAmount, formatFixed, type DepositSource } from "./deposit-math";
 
 export const RELAY_API = "https://api.relay.link";
 export const RELAY_APP = "https://relay.link";
@@ -231,6 +231,33 @@ function strip(fee: QuoteFee & { chainId?: unknown; address?: unknown }): QuoteF
   return { label: fee.label, amount: fee.amount, decimals: fee.decimals, symbol: fee.symbol, usd: fee.usd };
 }
 
+/**
+ * Ask Relay for a price, from the browser. No cookie and no referrer go with
+ * it. A network failure or timeout is a refusal with nothing shown, never a
+ * quote.
+ */
+export async function requestRelayPrice(
+  request: { source: DepositSource; amount: bigint; agent: string },
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = 10_000,
+): Promise<ParsedPrice> {
+  try {
+    const response = await fetchImpl(`${RELAY_API}/price`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(priceRequest(request.source, request.amount, request.agent)),
+      signal: AbortSignal.timeout(timeoutMs),
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+    });
+    let body: unknown = null;
+    try { body = await response.json(); } catch { body = null; }
+    return parseRelayPrice(body, request);
+  } catch {
+    return { ok: false, reason: "Couldn't reach Relay for a price. Nothing was sent. Check your connection and try again." };
+  }
+}
+
 /** "under a minute" or "about N minutes": the ETA as an owner reads it. */
 export function etaText(seconds: number): string {
   if (seconds < 60) return "under a minute";
@@ -238,9 +265,9 @@ export function etaText(seconds: number): string {
   return minutes === 1 ? "about a minute" : `about ${minutes} minutes`;
 }
 
-/** USDG base units as dollars, truncated to cents. */
+/** USDG base units as dollars, truncated to cents: "40.00". */
 export function usdgText(units: bigint): string {
-  return formatAmount(units, USDG_DECIMALS, 2);
+  return formatFixed(units, USDG_DECIMALS, 2);
 }
 
 /**

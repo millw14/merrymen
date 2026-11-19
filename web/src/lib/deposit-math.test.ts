@@ -6,6 +6,7 @@ import {
   agentGasOf,
   amountForUsd,
   formatAmount,
+  formatFixed,
   maxSendable,
   parseAmount,
   reserveFor,
@@ -43,6 +44,9 @@ describe("amounts the owner types", () => {
     assert.equal(formatAmount(20_000_000_000_000_000n, 18), "0.02");
     assert.equal(formatAmount(ETH, 18), "1");
     assert.equal(formatAmount(0n, 6, 2), "0");
+    assert.equal(formatFixed(40_000_000n, 6, 2), "40.00");
+    assert.equal(formatFixed(1_792_408_000n, 6, 2), "1792.40");
+    assert.equal(formatFixed(0n, 6, 2), "0.00");
     assert.equal(formatAmount(35_729_935n, 6, 2), "35.72");
     assert.equal(truncateTo(1_234_567_890n, 9, 4), 1_234_500_000n);
   });
