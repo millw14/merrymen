@@ -435,6 +435,31 @@ describe("after the owner leaves for Relay", () => {
     assert.doesNotMatch(watch, /fail/i);
   });
 
+  it("keeps a seen arrival when the agent then trades the USDG away, across a reload too, until Done", async () => {
+    await leave();
+    await ui.render(view({ balances: { ethWei: "1", cashUsdg: "45000000", vaultUsdg: "0" } }));
+    assert.match(ui.container.querySelector(".deposit-watch")!.textContent!, /Arrived: 40\.00 USDG reached your agent\./);
+    // The agent buys with it: the balance falls below where it started.
+    await ui.render(view({ balances: { ethWei: "1", cashUsdg: "1000000", vaultUsdg: "0" } }));
+    assert.match(ui.container.querySelector(".deposit-watch")!.textContent!, /Arrived: 40\.00 USDG reached your agent\./);
+    await ui.render(view({ balances: { ethWei: "1", cashUsdg: null, vaultUsdg: null }, now: () => Date.now() + 16 * 60_000 }));
+    assert.match(ui.container.querySelector(".deposit-watch")!.textContent!, /Arrived: 40\.00 USDG reached your agent\./);
+    await ui.remount(view({ balances: { ethWei: "1", cashUsdg: "1000000", vaultUsdg: "0" } }));
+    assert.match(ui.container.querySelector(".deposit-watch")!.textContent!, /Arrived: 40\.00 USDG reached your agent\./);
+    await ui.click("Done");
+    assert.equal(ui.container.querySelector(".deposit-watch"), null);
+    await ui.remount(view({ balances: { ethWei: "1", cashUsdg: "1000000", vaultUsdg: "0" } }));
+    assert.equal(ui.container.querySelector(".deposit-watch"), null, "dismissed stays dismissed");
+  });
+
+  it("starts fresh, from the balance now, when the owner leaves for another deposit", async () => {
+    await leave();
+    await ui.render(view({ balances: { ethWei: "1", cashUsdg: "45000000", vaultUsdg: "0" } }));
+    assert.match(ui.container.querySelector(".deposit-watch")!.textContent!, /Arrived:/);
+    await clickLink("Continue on Relay");
+    assert.match(ui.container.querySelector(".deposit-watch")!.textContent!, /Watching for at least 35\.66 USDG to reach your agent\./);
+  });
+
   it("remembers what it is waiting for across a reload of the tab", async () => {
     await leave();
     await ui.remount(view({ balances: { ethWei: "1", cashUsdg: "45000000", vaultUsdg: "0" } }));

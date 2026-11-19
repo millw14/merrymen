@@ -22,6 +22,10 @@
  *   minute the deposit lands, so a rise smaller than the quote's minimum is
  *   "partial", in the owner's words "some USDG arrived, less than the minimum",
  *   rather than either verdict.
+ * - That a deposit it saw has gone missing. The agent trades, so its balance
+ *   falls again after a deposit lands. Once a reading shows the minimum, the
+ *   watch keeps that rise (`arrived`) until the owner dismisses it or starts
+ *   another deposit, and later readings no longer change the answer.
  */
 
 /** Past this, a deposit that has not shown up is "not seen yet" rather than "waiting". */
@@ -34,6 +38,8 @@ export interface ArrivalWatch {
   minOut: bigint;
   /** When the owner opened Relay (ms). Signing happens some time after this. */
   openedAt: number;
+  /** The rise first seen at or above the minimum, once seen. Absent or null until then. */
+  arrived?: bigint | null;
 }
 
 export type Arrival =
@@ -50,6 +56,7 @@ export function balanceOf(value: string | null | undefined): bigint | null {
 }
 
 export function arrivalOf(watch: ArrivalWatch, current: bigint | null, now: number): Arrival {
+  if (watch.arrived != null) return { kind: "arrived", rise: watch.arrived };
   if (watch.baseline === null) return { kind: "no-baseline", current };
   if (current === null) return { kind: "unread" };
   const rise = current - watch.baseline;
@@ -57,4 +64,14 @@ export function arrivalOf(watch: ArrivalWatch, current: bigint | null, now: numb
   if (rise > 0n) return { kind: "partial", rise };
   const elapsedMs = Math.max(0, now - watch.openedAt);
   return elapsedMs >= ARRIVAL_PATIENCE_MS ? { kind: "late", elapsedMs } : { kind: "waiting", elapsedMs };
+}
+
+/**
+ * The watch to keep after this reading: the same watch, or one that now
+ * remembers the arrival, so a later trade can't make the deposit look missing.
+ */
+export function settleWatch(watch: ArrivalWatch, current: bigint | null, now: number): ArrivalWatch {
+  if (watch.arrived != null) return watch;
+  const arrival = arrivalOf(watch, current, now);
+  return arrival.kind === "arrived" ? { ...watch, arrived: arrival.rise } : watch;
 }

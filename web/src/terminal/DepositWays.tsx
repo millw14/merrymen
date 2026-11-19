@@ -27,7 +27,7 @@ import {
   type DepositQuote,
 } from "@/lib/relay-deposit";
 import { isSourceAddress, readSourceBalance } from "@/lib/source-balance";
-import { arrivalOf, balanceOf, type Arrival, type ArrivalWatch } from "@/lib/deposit-arrival";
+import { arrivalOf, balanceOf, settleWatch, type Arrival, type ArrivalWatch } from "@/lib/deposit-arrival";
 import { usd as formatUsd } from "@/lib/format";
 import { QrCode } from "./QrCode";
 
@@ -78,11 +78,19 @@ export function DepositWays({ agent, chainId, balances, gasSponsored, ownerAddre
   // network they would deliver to an address that is not this agent, so they
   // are not offered at all.
   const converts = chainId === ROBINHOOD_CHAIN_ID;
+  const agentUsdg = balanceOf(balances?.cashUsdg);
   const startWatch = (quote: DepositQuote) => setWatch({
-    baseline: balanceOf(balances?.cashUsdg),
+    baseline: agentUsdg,
     minOut: quote.minOut,
     openedAt: now(),
   });
+  // Once a reading shows the deposit, the watch keeps it (and so does a reload):
+  // the agent trading that USDG afterwards doesn't make the deposit missing.
+  useEffect(() => {
+    if (!watch) return;
+    const next = settleWatch(watch, agentUsdg, now());
+    if (next !== watch) setWatch(next);
+  }, [watch, agentUsdg]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <>
       {converts && (
@@ -113,7 +121,7 @@ export function DepositWays({ agent, chainId, balances, gasSponsored, ownerAddre
             defaultFrom="" fetchImpl={fetchImpl} onLeave={startWatch} />
         )}
       </div>
-      {watch && <ArrivalNote watch={watch} current={balanceOf(balances?.cashUsdg)} now={now} onDone={() => setWatch(null)} />}
+      {watch && <ArrivalNote watch={watch} current={agentUsdg} now={now} onDone={() => setWatch(null)} />}
     </>
   );
 }
@@ -442,7 +450,7 @@ function useWatch(agent: string, now: () => number): [ArrivalWatch | null, (next
   const set = useMemo(() => (next: ArrivalWatch | null) => {
     setState(next);
     try {
-      if (next) sessionStorage.setItem(keyRef.current, JSON.stringify({ baseline: next.baseline?.toString() ?? null, minOut: next.minOut.toString(), openedAt: next.openedAt }));
+      if (next) sessionStorage.setItem(keyRef.current, JSON.stringify({ baseline: next.baseline?.toString() ?? null, minOut: next.minOut.toString(), openedAt: next.openedAt, arrived: next.arrived?.toString() ?? null }));
       else sessionStorage.removeItem(keyRef.current);
     } catch { /* no memory, no harm */ }
   }, []);
@@ -454,12 +462,12 @@ function loadWatch(key: string, at: number): ArrivalWatch | null {
     if (typeof sessionStorage === "undefined") return null;
     const raw = sessionStorage.getItem(key);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { baseline?: unknown; minOut?: unknown; openedAt?: unknown };
+    const parsed = JSON.parse(raw) as { baseline?: unknown; minOut?: unknown; openedAt?: unknown; arrived?: unknown };
     const digits = (v: unknown) => (typeof v === "string" && /^\d+$/.test(v) ? BigInt(v) : null);
     const minOut = digits(parsed.minOut);
     const openedAt = typeof parsed.openedAt === "number" ? parsed.openedAt : NaN;
     if (minOut === null || !Number.isFinite(openedAt) || at - openedAt > WATCH_TTL_MS) return null;
-    return { baseline: parsed.baseline === null ? null : digits(parsed.baseline), minOut, openedAt };
+    return { baseline: parsed.baseline === null ? null : digits(parsed.baseline), minOut, openedAt, arrived: digits(parsed.arrived) };
   } catch {
     return null;
   }
