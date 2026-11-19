@@ -7489,6 +7489,19 @@ export function setSpawningForTest(tenant: `0x${string}`, ageMs: number | null):
   else spawning.set(lc, { since: Date.now() - ageMs, flagged: false });
 }
 
+/**
+ * rmSync(file, { force: true }), and whether there was anything there for it
+ * to remove. The removal runs whatever the answer: the answer only decides
+ * whether a removed agent's cleanup has anything to say (reconcile).
+ */
+function removeIfPresent(file: string): boolean {
+  let present = true;
+  try { lstatSync(file); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") present = false; }
+  rmSync(file, { force: true });
+  return present;
+}
+
 /** Bring the running set in line with the store: spawn new tenants, stop killed ones. */
 export async function reconcile(): Promise<void> {
   if (stopping) return;
@@ -8211,22 +8224,30 @@ export async function reconcile(): Promise<void> {
       // order ferry and the next pass.
       // A kill is its OWNER's, wherever its request sits (honourKill).
       const killPending = killRequested(home) && (await honourKill(slot.owner, Math.floor(Date.now() / 1000))).outcome === "failed";
-      scrubHostedGrantCache(home, current, { nowSec: Math.floor(Date.now() / 1000), writerAbsent: true, hosted: true });
-      forgetTgGroupsHome(home, log);
-      forgetPersonalMemoryHome(home, log);
+      // SAID ONLY WHEN THIS PASS CLEARED SOMETHING. A retained home is reached
+      // again on every pass (about every 17 s) for as long as it keeps its
+      // book, and every step below is idempotent: once its copies are gone,
+      // saying it again on each pass only buried the logs (six such homes
+      // filled the deploy's log window on 2026-11-18). Every step still runs
+      // every pass, so a copy written since (a refused late spawn, say) still
+      // goes, and is said when it does. A pending kill keeps its own line
+      // each pass (honourKill).
+      let cleared = scrubHostedGrantCache(home, current, { nowSec: Math.floor(Date.now() / 1000), writerAbsent: true, hosted: true }) ? 1 : 0;
+      cleared += forgetTgGroupsHome(home, log);
+      cleared += forgetPersonalMemoryHome(home, log);
       if (existsSync(path.join(home, "merrymen.db"))) {
         // Erase obsolete bot/config copies while preserving the original book
         // and all crash/consumption barriers. No raw ledger archive is made.
         for (const file of ["settings.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json"])
-          rmSync(path.join(home, file), { force: true });
+          if (removeIfPresent(path.join(home, file))) cleared++;
         fsyncDirSync(home);
-        log(`${tenant} grant removed — personal memory and cached access cleared; original accounting retained`);
+        if (cleared > 0) log(`${tenant} grant removed — personal memory and cached access cleared; original accounting retained`);
       } else if (killPending) {
         // The same copies go; the home and its pending request stay for the next pass.
         for (const file of ["settings.json", "telegram.json", "telegram-held-groups.json", "heartbeat.json"])
-          rmSync(path.join(home, file), { force: true });
+          if (removeIfPresent(path.join(home, file))) cleared++;
         fsyncDirSync(home);
-        log(`${tenant} grant removed — personal memory and cached access cleared; the home is kept while its Telegram kill is pending`);
+        if (cleared > 0) log(`${tenant} grant removed — personal memory and cached access cleared; the home is kept while its Telegram kill is pending`);
       } else {
         // A pending or consumed book must never be replaced by an empty home.
         if (ledgerSourceBlocked(home) || persistentFleetHome()) continue;
