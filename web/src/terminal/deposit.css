@@ -44,13 +44,9 @@
 .terminal-host .hosted-funding .deposit-facts > div { padding: 8px 0; border-top: 1px solid var(--line); }
 .terminal-host .hosted-funding .deposit-facts dd .deposit-quiet { display: block; font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
 
-/* Where the ETH is: the source picker. Chosen is cream, not lime: choosing a network is not a trade. */
+/* Where the ETH is: the source picker. It is the amount presets' pill row
+   (terminal.css), whose chosen pill is already cream, not lime. */
 .terminal-host .hosted-funding .deposit-sources { margin: 0 0 16px; }
-.terminal-host .hosted-funding .deposit-sources button[aria-pressed="true"] {
-  border-color: var(--tx);
-  color: var(--tx);
-  background: transparent;
-}
 @media (max-width: 420px) {
   .terminal-host .hosted-funding .deposit-sources { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

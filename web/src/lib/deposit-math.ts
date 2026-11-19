@@ -154,12 +154,22 @@ export function maxSendable(source: DepositSource, balance: bigint | null, reser
   return { kind: "ok", amount, balance, reserve };
 }
 
-/** The one quiet line under Max: what is kept, and why. */
-export function reserveLine(source: DepositSource, reserve: bigint): string {
-  const kept = `${formatAmount(reserve, source.decimals, source.inputDecimals)} ${source.asset}`;
-  return source.family === "solana"
-    ? `Max keeps ${kept} so your wallet stays open and can pay its next fee.`
-    : `Max keeps ${kept} on ${source.network} so this wallet can pay its next fee.`;
+/**
+ * The one quiet line under Max: what is kept, and why.
+ *
+ * `agentGas` is what Max also sets aside for the agent's own fees, when its
+ * ETH reads zero or could not be read. That top-up is a second transfer out of
+ * this same wallet, so a Max that ignored it would leave the wallet unable to
+ * send it.
+ */
+export function reserveLine(source: DepositSource, reserve: bigint, agentGas: bigint | null = 0n): string {
+  const amount = (v: bigint) => `${formatAmount(v, source.decimals, source.inputDecimals)} ${source.asset}`;
+  const own = source.family === "solana"
+    ? `Max keeps ${amount(reserve)} so your wallet stays open and can pay its next fee`
+    : `Max keeps ${amount(reserve)} on ${source.network} so this wallet can pay its next fee`;
+  // null: the agent needs gas and Relay has not priced the source asset yet.
+  if (agentGas === null) return `${own}, and sets aside about $2 of ${source.asset} for your agent's gas.`;
+  return agentGas > 0n ? `${own}, and sets aside ${amount(agentGas)} for your agent's gas.` : `${own}.`;
 }
 
 /**

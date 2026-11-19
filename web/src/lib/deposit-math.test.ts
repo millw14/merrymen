@@ -87,6 +87,8 @@ describe("the reserve Max keeps on the source wallet", () => {
   it("says what it keeps in one quiet line", () => {
     assert.equal(reserveLine(base, reserveFor(base)), "Max keeps 0.0003 ETH on Base so this wallet can pay its next fee.");
     assert.equal(reserveLine(sol, reserveFor(sol)), "Max keeps 0.005 SOL so your wallet stays open and can pay its next fee.");
+    assert.equal(reserveLine(base, reserveFor(base), 1_114_000_000_000_000n),
+      "Max keeps 0.0003 ETH on Base so this wallet can pay its next fee, and sets aside 0.001114 ETH for your agent's gas.");
   });
 });
 

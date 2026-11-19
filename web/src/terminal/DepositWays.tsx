@@ -169,9 +169,16 @@ function Convert({ sources, agent, balances, gasSponsored, defaultFrom, fetchImp
   const [balance, setBalance] = useState<BalanceRead | null>(null);
   const [quote, setQuote] = useState<QuoteState | null>(null);
   const [refresh, setRefresh] = useState(0);
+  // The latest price Relay gave for this source, at any amount: what sizes the
+  // agent's gas top-up, which Max sets aside.
+  const [unitPrice, setUnitPrice] = useState<{ sourceId: SourceId; amountIn: bigint; amountInUsd: string | null } | null>(null);
+  const [maxBusy, setMaxBusy] = useState(false);
+  const [maxError, setMaxError] = useState("");
   const from = fromText.trim();
   const fromValid = from !== "" && isSourceAddress(source, from);
   const balanceKey = `${sourceId}:${from}`;
+  const liveKey = useRef(balanceKey);
+  liveKey.current = balanceKey;
   const amount = parseAmount(amountText, source.decimals);
   const quoteKey = amount !== null && amount > 0n ? `${sourceId}:${amount}:${refresh}` : null;
 
@@ -197,6 +204,7 @@ function Convert({ sources, agent, balances, gasSponsored, defaultFrom, fetchImp
       void requestRelayPrice({ source, amount, agent }, fetchImpl).then((parsed) => {
         if (!live) return;
         setQuote(parsed.ok ? { key: quoteKey, status: "ok", quote: parsed.quote } : { key: quoteKey, status: "error", reason: parsed.reason });
+        if (parsed.ok) setUnitPrice({ sourceId: source.id, amountIn: parsed.quote.amountIn, amountInUsd: parsed.quote.amountInUsd });
       });
     }, 400);
     return () => { live = false; clearTimeout(timer); };
@@ -206,7 +214,39 @@ function Convert({ sources, agent, balances, gasSponsored, defaultFrom, fetchImp
   const priced = current?.status === "ok" ? current.quote : null;
   const reserve = reserveFor(source, priced?.sourceNetworkFee ?? null);
   const read = fromValid && balance?.key === balanceKey ? balance : null;
-  const max = read?.done ? maxSendable(source, read.value, reserve) : null;
+  // The agent's top-up is a second transfer out of this same wallet, so Max
+  // sets it aside whenever the panel will ask for it. Null: needed, but not
+  // priced yet, and Max prices it when pressed.
+  const agentGas = agentGasOf(balances?.ethWei, gasSponsored);
+  const needsGas = agentGas.kind === "empty" || agentGas.kind === "unread";
+  const priceHere = unitPrice?.sourceId === sourceId ? unitPrice : null;
+  const gasAside = !needsGas ? 0n : priceHere ? amountForUsd(source, priceHere.amountIn, priceHere.amountInUsd) : null;
+  const max = read?.done ? maxSendable(source, read.value, reserve + (gasAside ?? 0n)) : null;
+  const onMax = async () => {
+    if (!read?.done || read.value === null) return;
+    const key = balanceKey;
+    setMaxError("");
+    let aside = gasAside;
+    if (aside === null) {
+      const probe = read.value - reserve;
+      if (probe <= 0n) return;
+      setMaxBusy(true);
+      const parsed = await requestRelayPrice({ source, amount: probe, agent }, fetchImpl);
+      setMaxBusy(false);
+      if (liveKey.current !== key) return;
+      if (parsed.ok) {
+        setUnitPrice({ sourceId: source.id, amountIn: parsed.quote.amountIn, amountInUsd: parsed.quote.amountInUsd });
+        aside = amountForUsd(source, parsed.quote.amountIn, parsed.quote.amountInUsd);
+      }
+      if (aside === null) {
+        setMaxError("Couldn't price your agent's gas top-up, so Max can't set it aside. Type an amount instead.");
+        return;
+      }
+    }
+    const result = maxSendable(source, read.value, reserve + aside);
+    if (result.kind === "ok") setAmountText(formatAmount(result.amount, source.decimals, source.inputDecimals));
+    else setMaxError("This wallet can't cover its own fee and your agent's gas top-up, so Max has nothing to send.");
+  };
   const tooMuch = amount !== null && read?.done && read.value !== null && amount > read.value;
   const intoReserve = !tooMuch && amount !== null && read?.done && read.value !== null && read.value - amount < reserve;
   const amountInvalid = amountText.trim() !== "" && amount === null;
@@ -247,14 +287,15 @@ function Convert({ sources, agent, balances, gasSponsored, defaultFrom, fetchImp
           <button
             type="button"
             className="flow-secondary"
-            disabled={max?.kind !== "ok"}
-            onClick={() => { if (max?.kind === "ok") setAmountText(formatAmount(max.amount, source.decimals, source.inputDecimals)); }}
+            disabled={max?.kind !== "ok" || maxBusy}
+            onClick={() => void onMax()}
           >
-            Max
+            {maxBusy ? "…" : "Max"}
           </button>
         </span>
       </label>
-      <p className="deposit-quiet">{balanceLine(source, from, fromValid, read)} {reserveLine(source, reserve)}</p>
+      <p className="deposit-quiet">{balanceLine(source, from, fromValid, read)} {reserveLine(source, reserve, gasAside)}</p>
+      {maxError && <p className="flow-error" role="alert">{maxError}</p>}
       {amountInvalid && <p className="flow-error" role="alert">Enter an amount like 0.05.</p>}
       {tooMuch && <p className="flow-error" role="alert">That is more than this wallet holds.</p>}
       {intoReserve && <p className="deposit-quiet" role="status">That leaves less than {formatAmount(reserve, source.decimals, source.inputDecimals)} {source.asset} in this wallet for its next fee.</p>}

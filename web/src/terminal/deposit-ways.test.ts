@@ -308,6 +308,34 @@ describe("From ETH", () => {
     }
   });
 
+  it("sets the agent's gas top-up aside on Max, so the wallet can still send it", async () => {
+    await ui.render(view({ balances: { ethWei: "0", cashUsdg: "0", vaultUsdg: "0" } }));
+    await tab("From ETH");
+    await ui.click("Base");
+    await settle();
+    assert.match(text(), /Max keeps 0\.0003 ETH on Base so this wallet can pay its next fee, and sets aside about \$2 of ETH for your agent's gas\./);
+    await ui.click("Max");
+    await settle();
+    // Priced from Relay first (1 ETH less the reserve), then 0.001114 ETH set aside.
+    const probe = calls.find((c) => c.url === "https://api.relay.link/price")!;
+    assert.equal(probe.body.amount, "999700000000000000");
+    assert.equal(inputs()[1]!.value, "0.998586");
+    assert.match(text(), /and sets aside 0\.001114 ETH for your agent's gas\./);
+    await settle(450);
+    const gas = new URL(ui.container.querySelector<HTMLAnchorElement>(".deposit-gas a")!.href);
+    assert.equal(gas.searchParams.get("amount"), "0.001114", "the top-up asked for is the one set aside");
+  });
+
+  it("says so when it can't price the agent's top-up, rather than spend it", async () => {
+    await ui.render(view({ balances: { ethWei: null, cashUsdg: "0", vaultUsdg: "0" }, fetchImpl: stubFetch({ relay: "refuse" }) }));
+    await tab("From ETH");
+    await settle();
+    await ui.click("Max");
+    await settle();
+    assert.equal(inputs()[1]!.value, "");
+    assert.match(text(), /Couldn't price your agent's gas top-up, so Max can't set it aside\. Type an amount instead\./);
+  });
+
   it("on Robinhood Chain itself, says to send the gas straight to the same address", async () => {
     await ui.render(view({ balances: { ethWei: "0", cashUsdg: "0", vaultUsdg: "0" } }));
     await tab("From ETH");
