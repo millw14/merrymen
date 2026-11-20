@@ -30,7 +30,7 @@ let perpsGrants: Record<string, unknown> | "down";
 let ownAnswer: () => Response;
 let requests: string[];
 let readAccount: () => Promise<void>;
-const seen: Record<"home" | "you" | "entry" | "profile", Record<string, unknown> | null> = { home: null, you: null, entry: null, profile: null };
+const seen: Record<"home" | "you" | "entry" | "profile" | "wallet", Record<string, unknown> | null> = { home: null, you: null, entry: null, profile: null, wallet: null };
 
 before(() => {
   const appPath = fileURLToPath(new URL("./App.tsx", import.meta.url));
@@ -58,7 +58,7 @@ before(() => {
         void deps.readAccount();
         return () => { alive = false; };
       }, [epoch]);
-      return { shell: { banner: null, accountBusy: false }, refreshAccount: noop, invalidate: noop, tokenMissing: () => ({ loading: true }) };
+      return { shell: { banner: null, accountBusy: false }, refreshAccount: () => { void readAccount(); }, invalidate: noop, tokenMissing: () => ({ loading: true }) };
     } };
     if (id === "./chat-controller") return { useChatController: () => ({ setDraft: noop, clearThread: noop, refreshSettings: noop }) };
     if (id === "./live-news") return { useSoundPref: () => [false, noop], useLiveNews: noop };
@@ -66,6 +66,7 @@ before(() => {
     if (id === "./screens/Home") return { Home: capture("home") };
     if (id === "./screens/You") return { You: capture("you") };
     if (id === "./screens/Profile") return { Profile: capture("profile") };
+    if (id === "./screens/Wallet") return { __esModule: true, default: capture("wallet") };
     return inert;
   });
   try { App = createRequire(import.meta.url)(appPath).App; }
@@ -103,6 +104,7 @@ beforeEach(() => {
     if (url === "/api/grants") return json(grants);
     if (url === "/api/grants?wallet=perps") return perpsGrants === "down" ? json({ error: "down" }, 503) : json(perpsGrants);
     if (url === "/api/agents/hako-merry/own") return ownAnswer();
+    // Any other slug's /own refuses, as readOwnBook does for a slug with no Spot account on record.
     if (url.startsWith("/api/agents/")) return json({ error: "Agent not found" }, 404);
     throw new Error(`Unexpected network boundary: ${url}`);
   };
@@ -112,6 +114,8 @@ const settle = async () => { await act(async () => { for (let i = 0; i < 60; i++
 const mount = async (props: { perps?: boolean } = {}) => { await ui.render(React.createElement(App, props)); await settle(); };
 const stoppedOn = (key: keyof typeof seen) => seen[key]?.stoppedAgent as { name: string; slug: string; restart: { href: string } } | null | undefined;
 const asked = (path: string) => requests.filter((url) => url === path).length;
+const figureOn = (key: keyof typeof seen) => (seen[key]?.stoppedBook as { figures?: { equityUsdg?: number } } | null | undefined)?.figures?.equityUsdg;
+const onDesktop = () => { ui.dom.window.matchMedia = () => ({ matches: true, addEventListener: noop, removeEventListener: noop }) as unknown as MediaQueryList; };
 
 describe("a stopped owner, through the shell", () => {
   it("Home and the account card get the stopped agent, with his value from the owner-only read", async () => {
@@ -129,10 +133,10 @@ describe("a stopped owner, through the shell", () => {
     assert.equal(stoppedOn("entry")?.slug, "hako-merry", "the card beside every other page says it too");
   });
 
-  it("a record held for a renewal points at the re-signature", async () => {
+  it("a record held for a renewal is stopped too, and starts again from /create", async () => {
     grants = { exists: false, tenant: ME, stored: true };
     await mount();
-    assert.equal(stoppedOn("home")?.restart.href, "/grant#resign");
+    assert.equal(stoppedOn("home")?.restart.href, "/create");
   });
 
   it("Me gets the stopped card, and the phone's account card above it steps aside", async () => {
@@ -153,16 +157,38 @@ describe("a stopped owner, through the shell", () => {
     assert.equal(ui.container.querySelector('a[href="/create"]')?.textContent, "Create agent");
   });
 
-  it("a refused or unread owner read gives no figure: null, never a guessed one", async () => {
+  it("a held record whose owner read is refused is still stopped, with no figure: null, never a guessed one", async () => {
+    grants = { exists: false, tenant: ME, stored: true };
     ownAnswer = () => json({ error: "Agent not found" }, 404);
     await mount();
     assert.equal(stoppedOn("home")?.slug, "hako-merry");
     assert.equal(seen.home?.stoppedBook, null);
   });
 
+  it("on desktop, the aside carries the card and his figure on other pages, and steps aside on Home and Me", async () => {
+    onDesktop();
+    pathname = "/feed";
+    await mount();
+    assert.equal(stoppedOn("entry")?.slug, "hako-merry");
+    assert.equal(figureOn("entry"), 1000, "the aside's figure is the owner-only read's");
+    for (const page of ["/home", "/you"]) {
+      pathname = page;
+      await ui.remount(React.createElement(App));
+      await settle();
+      assert.equal(seen.entry, null, `${page}: the page draws the stopped card itself, once`);
+    }
+    assert.equal(stoppedOn("you")?.slug, "hako-merry");
+    assert.equal(figureOn("you"), 1000);
+    pathname = "/home";
+    await ui.remount(React.createElement(App));
+    await settle();
+    assert.equal(stoppedOn("home")?.slug, "hako-merry");
+    assert.equal(figureOn("home"), 1000);
+  });
+
   it("on desktop, the Chat tab goes to his way back, not to a second agent", async () => {
-    ui.dom.window.matchMedia = () => ({ matches: true, addEventListener: noop, removeEventListener: noop }) as unknown as MediaQueryList;
-    for (const [status, path] of [[{ exists: false, tenant: ME, stored: true }, "/grant#resign"], [{ exists: false, tenant: ME }, "/create"]] as const) {
+    onDesktop();
+    for (const [status, path] of [[{ exists: false, tenant: ME, stored: true }, "/create"], [{ exists: false, tenant: ME }, "/create"]] as const) {
       grants = status;
       ui.dom.window.history.replaceState(null, "", "/home");
       await ui.remount(React.createElement(App));
@@ -173,6 +199,19 @@ describe("a stopped owner, through the shell", () => {
       const at = ui.dom.window.location;
       assert.equal(`${at.pathname}${at.hash}`, path);
     }
+  });
+
+  it("a renewal on /grant tells the shell, which reads the account at once: no stopped card left beside it", async () => {
+    grants = { exists: false, tenant: ME, stored: true };
+    pathname = "/grant";
+    await mount();
+    assert.equal(stoppedOn("entry")?.slug, "hako-merry");
+    const told = seen.wallet?.onAccountChanged as (() => void) | undefined;
+    assert.equal(typeof told, "function", "the Wallet screen is handed the account refresh");
+    grants = { exists: true, tenant: ME, workerAliveAt: null };
+    await act(async () => { told!(); });
+    await settle();
+    assert.equal(stoppedOn("entry") ?? null, null);
   });
 
   it("re-signing flips the screens back to live, with no stopped card left behind", async () => {
@@ -187,13 +226,47 @@ describe("a stopped owner, through the shell", () => {
 });
 
 describe("who is not told their agent is stopped", () => {
-  it("a Perps-only owner: the Perps wallet is asked, and holds a grant", async () => {
+  it("a brand-new Privy login: a slug, no Spot agent on record, so the newcomer's screens", async () => {
+    // POST /api/auth/privy claims a slug for every new login (identity-store.ts
+    // resolveOrClaimDid, no accounts), and the feed names it under the default
+    // name. The owner-only read refuses it: there is no Spot book.
+    live = { ...live, mine: { ...feedMine("y8vq3k2m"), name: "Robin" } };
+    await mount({ perps: true });
+    assert.equal(asked("/api/agents/y8vq3k2m/own"), 1, "the read that tells a stopped agent from a newcomer");
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, false);
+    assert.equal(asked("/api/grants?wallet=perps"), 0, "no Perps read for a newcomer");
+    pathname = "/you";
+    await ui.render(React.createElement(App, { perps: true }));
+    await settle();
+    assert.equal(stoppedOn("you"), null);
+    assert.ok(seen.entry, "the newcomer's account card");
+    assert.equal(ui.container.querySelector('a[href="/create"]')?.textContent, "Create agent");
+  });
+
+  it("a Perps-only owner, no Spot agent on record: the newcomer's Spot screens, no Perps read needed", async () => {
+    perpsGrants = { exists: true, tenant: ME, grant: { smartAccount: `0x${"3".repeat(40)}`, chainId: 4663, purpose: "perps", caps: { perTradeUsdg: 1, dailyUsdg: 1 } } };
+    ownAnswer = () => json({ error: "Agent not found" }, 404);
+    await mount({ perps: true });
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, false);
+    assert.equal(asked("/api/grants?wallet=perps"), 0);
+  });
+
+  it("an owner with an old Spot book who now trades Perps: the Perps wallet is asked, and holds a grant", async () => {
     perpsGrants = { exists: true, tenant: ME, grant: { smartAccount: `0x${"3".repeat(40)}`, chainId: 4663, purpose: "perps", caps: { perTradeUsdg: 1, dailyUsdg: 1 } } };
     await mount({ perps: true });
     assert.equal(asked("/api/grants?wallet=perps"), 1);
     assert.equal(stoppedOn("home"), null);
     assert.equal(seen.home?.checking, false);
-    assert.equal(asked("/api/agents/hako-merry/own"), 0, "no stopped card, so no owner read for one");
+  });
+
+  it("a Spot record held for a renewal is stopped even beside a live Perps wallet", async () => {
+    grants = { exists: false, tenant: ME, stored: true };
+    perpsGrants = { exists: true, tenant: ME, grant: { smartAccount: `0x${"3".repeat(40)}`, chainId: 4663, purpose: "perps", caps: { perTradeUsdg: 1, dailyUsdg: 1 } } };
+    await mount({ perps: true });
+    assert.equal(stoppedOn("home")?.slug, "hako-merry");
+    assert.equal(asked("/api/grants?wallet=perps"), 0, "nothing for the Perps wallet to decide");
   });
 
   it("with Perps offered and no Perps wallet, he is stopped; with the Perps read down, nothing is claimed", async () => {
@@ -223,8 +296,20 @@ describe("who is not told their agent is stopped", () => {
     assert.equal(asked("/api/grants?wallet=perps"), 0);
   });
 
-  it("before the feed's first answer: checking, neither stopped nor new", async () => {
+  it("before the feed's first answer: checking, neither stopped nor new, and no \"Create agent\" on Me", async () => {
     live = { ...live, feedTenant: undefined, mine: null, reads: { ...live.reads, mine: "unread" } };
+    await mount();
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, true);
+    pathname = "/you";
+    await ui.render(React.createElement(App));
+    await settle();
+    assert.equal(seen.you?.checking, true);
+    assert.equal(ui.container.querySelector('a[href="/create"]')?.textContent ?? null, null);
+  });
+
+  it("a feed that failed before it ever answered: checking too, not the newcomer's invitation", async () => {
+    live = { ...live, feedTenant: undefined, mine: null, reads: { ...live.reads, mine: "unreadable" } };
     await mount();
     assert.equal(stoppedOn("home"), null);
     assert.equal(seen.home?.checking, true);

@@ -132,8 +132,8 @@ export interface AgentStatus {
    * Hosted Spot too, with `exists` false: the Spot store holds the tenant's
    * record stopped for a renewal (DELETE purpose permission-replacement) and
    * no new grant replaced it. Only a record the store can verify is said; one
-   * it cannot keeps the plain `{exists:false}`. The owner's screens read it to
-   * point a stopped agent at its re-signature (terminal/owner-state.ts).
+   * it cannot keeps the plain `{exists:false}`. The owner's screens read it as
+   * evidence the agent exists and is stopped (terminal/owner-state.ts).
    */
   stored?: true;
   /** Local pending renewal: verified public owner identity, without a signing grant. */
@@ -1136,11 +1136,11 @@ export async function GET(req: Request) {
     if (wallet === "spot") {
       g = await getGrantStore("spot").get(hostedTenant);
       // A SPOT RECORD STOPPED FOR A RENEWAL THAT NEVER LANDED is not "no
-      // agent": the owner's screens say it is stopped and point at the
-      // re-signature, not at creating one (owner-state.ts). Said as `stored`,
-      // as the Perps branch says it. Nothing else changes: still `exists`
-      // false, no grant view, and a record this cannot verify keeps the
-      // answer it always had rather than turning a Spot read into a 503.
+      // agent": the owner's screens say it is stopped, not that one is still
+      // to be made (owner-state.ts). Said as `stored`, as the Perps branch
+      // says it. Nothing else changes: still `exists` false, no grant view,
+      // and a record this cannot verify keeps the answer it always had
+      // rather than turning a Spot read into a 503.
       if (!g) {
         let stopped = false;
         try { stopped = (await getGrantStore("spot").storedGrantOwner(hostedTenant)) !== null; } catch { /* unverified: not said */ }

@@ -91,7 +91,7 @@ import {
   realCashOf,
 } from "./account-read";
 import { accountFeedRead, feedMatchesAccount, readAccountForSession } from "./account-session";
-import { ownerStateOf, ownsProfile, perpsReadWanted, stoppedOf } from "./owner-state";
+import { ownBookSlug, ownerStateOf, ownsProfile, perpsReadWanted, stoppedOf } from "./owner-state";
 import { useOwnBookRead, usePerpsWalletRead } from "./owner-reads";
 import { LoadFailure } from "./LoadFailure";
 import { ServiceNotice } from "./ServiceNotice";
@@ -415,8 +415,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
         return;
       }
       if (account && !account.status.exists) {
-        // A stopped agent's way back, not a second agent (owner-state.ts).
-        goTo(stoppedAgent?.restart.href ?? "/create");
+        goTo("/create");
         return;
       }
     }
@@ -618,18 +617,20 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
    *
    * `mine` above needs a live grant, so an owner who stopped theirs was drawn
    * as a newcomer everywhere. This names that state once, from the account,
-   * the session's own feed identity and, only where it would otherwise say
-   * "stopped", the Perps wallet (a login trading there is not told its agent
-   * is stopped). The Spot screens only: the Perps workspace has its own.
-   * The figures on the stopped card come from the owner-only read, re-asked
-   * with each account read.
+   * the session's own feed identity, the owner-only read of that slug's book
+   * (a slug alone is every Privy sign-in's, agent or not) and, for a removed
+   * record with a book, the Perps wallet (a login trading there is not told
+   * its agent is stopped). The Spot screens only: the Perps workspace has its
+   * own. The same owner-only read is the stopped card's figure, re-asked with
+   * each account read.
    */
-  const ownerInputs = { account, feed: portfolioRead, feedIsOwn: ownerFeedReady, named: live.mine };
-  const perpsWallet = usePerpsWalletRead(account?.session ?? null, perps && !isolatedWallet && perpsReadWanted(ownerInputs), account?.status);
-  const owner = ownerStateOf({ ...ownerInputs, perps: perps ? perpsWallet : "none" });
+  const ownerInputs = { account, feed: portfolioRead, feedAnswered: live.feedTenant !== undefined, feedIsOwn: ownerFeedReady, named: live.mine };
+  const ownBook = useOwnBookRead(isolatedWallet ? null : ownBookSlug(ownerInputs), account?.status);
+  const perpsWallet = usePerpsWalletRead(account?.session ?? null, perps && !isolatedWallet && perpsReadWanted({ ...ownerInputs, book: ownBook }), account?.status);
+  const owner = ownerStateOf({ ...ownerInputs, book: ownBook, perps: perps ? perpsWallet : "none" });
   const stoppedAgent = isolatedWallet ? null : stoppedOf(owner);
   const ownerChecking = !isolatedWallet && owner.kind === "checking";
-  const stoppedBook = useOwnBookRead(stoppedAgent?.slug ?? null, account?.status);
+  const stoppedBook = stoppedAgent ? ownBook : undefined;
   /**
    * THE MARKET RAIL IS FOR TRADING SCREENS. On a token, a public profile, a
    * search or the market list it is the fastest way between coins; on Home,
@@ -709,7 +710,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
         {screen.kind === "solana" && <SolanaScreen key={epoch} onSignedIn={invalidateOwnerView}/>}
         {!isolatedWallet && screen.kind === "create" && <CreateAgent account={account} accountFailed={accountFailed} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} onBack={()=>goTab("home")} onDone={()=>{refreshAccount();goTab("agent");}} onFund={grant=>{setAccount(current=>current?{...current,status:{...current.status,exists:true,grant}}:current);openScreen({kind:"deposit"});}}/>}
         {!isolatedWallet && screen.kind === "settings" && <Settings onFund={()=>openScreen({kind:"deposit"})} slug={mine?.slug ?? null} onSaved={chat.refreshSettings} agentDown={agentDown}/>}
-        {!isolatedWallet && screen.kind === "grant" && <Wallet key={epoch}/>}
+        {!isolatedWallet && screen.kind === "grant" && <Wallet key={epoch} onAccountChanged={refreshAccount}/>}
         {screen.kind === "tab" && screen.tab === "home" && (
           <Home
             tokens={live.tokens}
@@ -995,7 +996,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} stoppedAgent={stoppedAgent} stoppedBook={stoppedBook} checking={ownerChecking}/>}</aside> : null}
+      ) : desktop ? <aside className="desktop-portfolio">{/* Home and Me draw the stopped card themselves: one figure, one way back, paper said once. */}{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : stoppedAgent && screen.kind === "tab" && (screen.tab === "home" || screen.tab === "you") ? null : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} stoppedAgent={stoppedAgent} stoppedBook={stoppedBook} checking={ownerChecking}/>}</aside> : null}
       {(
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (

@@ -15,6 +15,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { JSDOM } from "jsdom";
 import type { AccountState } from "./HostedControls";
 import {
+  ownBookSlug,
   ownerStateOf,
   ownsProfile,
   perpsReadWanted,
@@ -31,17 +32,24 @@ import type { ReadState } from "./live";
 const ME = `0x${"a".repeat(40)}`;
 const signedIn = (status: AccountState["status"]): AccountState => ({ session: { hosted: true, address: ME }, status });
 const hako = { name: "hako merry", slug: "hako-merry" };
+const paperBook: OwnBookRead = {
+  recentTrades: null, topTrades: null,
+  figures: { book: "paper", equityUsdg: 1000, equityAt: Date.UTC(2026, 10, 18, 18, 4) / 1000, held: false, pnlUsdg: 0, pnlAt: null, underReview: false, pnlEstimated: false },
+};
 const base: OwnerInputs = {
   account: signedIn({ exists: false, tenant: ME }),
   feed: "ok",
+  feedAnswered: true,
   feedIsOwn: true,
   named: hako,
+  book: paperBook,
   perps: "none",
 };
 const state = (over: Partial<OwnerInputs> = {}) => ownerStateOf({ ...base, ...over });
+const held = signedIn({ exists: false, tenant: ME, stored: true });
 
 describe("the owner's state", () => {
-  it("a removed record with the session's own identity is stopped, and starts again from /create", () => {
+  it("a removed record whose book the owner-only read found is stopped, and starts again from /create", () => {
     const s = state();
     assert.equal(s.kind, "stopped-removed");
     assert.deepEqual(stoppedOf(s), {
@@ -50,10 +58,27 @@ describe("the owner's state", () => {
     });
   });
 
-  it("a record held for a renewal is stopped too, and is renewed at /grant#resign", () => {
-    const s = state({ account: signedIn({ exists: false, tenant: ME, stored: true }) });
-    assert.equal(s.kind, "stopped-stored");
-    assert.deepEqual(stoppedOf(s)?.restart, { href: "/grant#resign", label: "Renew his pass" });
+  it("a record held for a renewal is stopped too, and starts again from /create as well", () => {
+    // /create sends a browser holding the saved wallet on to /grant#resign
+    // itself; /grant#resign straight away gave a Privy owner on any other
+    // browser the owner-key restore form.
+    for (const book of [paperBook, null, undefined]) {
+      const s = state({ account: held, book });
+      assert.equal(s.kind, "stopped-stored", String(book));
+      assert.deepEqual(stoppedOf(s)?.restart, { href: "/create", label: "Start him again" });
+    }
+  });
+
+  it("a Privy newcomer has a slug and no book: a newcomer, not a stopped agent", () => {
+    // Every Privy sign-in claims a slug with no accounts (identity-store.ts
+    // resolveOrClaimDid), and the feed names it with the default name.
+    const robin = { name: "Robin", slug: "y8vq3k2m" };
+    assert.equal(state({ named: robin, book: null }).kind, "none", "/own refused: no Spot agent on record");
+    assert.equal(stoppedOf(state({ named: robin, book: null })), null);
+    assert.equal(state({ named: robin, book: undefined }).kind, "checking", "/own not answered yet: claim neither");
+    for (const perps of ["held", "none", "unread", null] as const) {
+      assert.equal(state({ named: robin, book: null, perps }).kind, "none", `perps ${perps}`);
+    }
   });
 
   it("a live grant is live, whatever else is said", () => {
@@ -68,6 +93,14 @@ describe("the owner's state", () => {
     assert.equal(stoppedOf(state({ perps: "held" })), null);
     assert.equal(state({ perps: "unread" }).kind, "none", "could not tell: what the screens said before");
     assert.equal(state({ perps: null }).kind, "checking", "asked, not answered: claim neither");
+    // Perps-only with no Spot account on record: /own refuses, whatever Perps says.
+    assert.equal(state({ book: null, perps: "held" }).kind, "none");
+  });
+
+  it("a Spot record held for a renewal is stopped whatever the Perps wallet holds", () => {
+    for (const perps of ["held", "none", "unread", null] as const) {
+      assert.equal(state({ account: held, perps }).kind, "stopped-stored", `perps ${perps}`);
+    }
   });
 
   it("a brand-new account has no identity in its feed, and stays a newcomer", () => {
@@ -83,7 +116,17 @@ describe("the owner's state", () => {
   });
 
   it("before the feed's first answer, stopped and new look alike: checking", () => {
-    assert.equal(state({ feed: "unread", feedIsOwn: false, named: null }).kind, "checking");
+    assert.equal(state({ feed: "unread", feedAnswered: false, feedIsOwn: false, named: null }).kind, "checking");
+  });
+
+  it("a feed that failed before it ever answered is unknown, not new: checking", () => {
+    // accountFeedRead says "unreadable" and feedMatchesAccount false for it,
+    // exactly as for a feed answered for another session.
+    for (const account of [signedIn({ exists: false, tenant: ME }), held]) {
+      assert.equal(state({ account, feed: "unreadable", feedAnswered: false, feedIsOwn: false, named: null }).kind, "checking");
+    }
+    // Answered for another session: that one is known, and names nobody here.
+    assert.equal(state({ feed: "unreadable", feedAnswered: true, feedIsOwn: false }).kind, "none");
   });
 
   it("signed out, self-hosted, or an account not read yet: nothing to say", () => {
@@ -94,15 +137,30 @@ describe("the owner's state", () => {
     assert.equal(state({ account: null }).kind, "none");
   });
 
-  it("the Perps wallet is asked only where it decides the answer", () => {
+  it("the Perps wallet is asked only where it decides the answer: a removed record with a book", () => {
     const want = (over: Partial<OwnerInputs> = {}) => perpsReadWanted({ ...base, ...over });
     assert.equal(want(), true);
     assert.equal(want({ account: signedIn({ exists: true, tenant: ME }) }), false, "live");
+    assert.equal(want({ account: held }), false, "a held record is stopped whatever Perps holds");
+    assert.equal(want({ book: null }), false, "no book: a newcomer, and no Perps read for one");
+    assert.equal(want({ book: undefined }), false, "the book decides first");
     assert.equal(want({ feed: "unread" }), false, "the feed decides first");
+    assert.equal(want({ feedAnswered: false }), false);
     assert.equal(want({ feedIsOwn: false }), false);
-    assert.equal(want({ named: { name: "Robin", slug: null } }), false, "a newcomer");
+    assert.equal(want({ named: { name: "Robin", slug: null } }), false, "no slug");
     assert.equal(want({ account: { session: { hosted: true, address: null }, status: { exists: false, tenant: null } } }), false, "signed out");
     assert.equal(want({ account: null }), false);
+  });
+
+  it("the owner's book is asked for the session's own slug, and only while it may be a stopped agent's", () => {
+    const slug = (over: Partial<OwnerInputs> = {}) => ownBookSlug({ ...base, ...over });
+    assert.equal(slug(), "hako-merry");
+    assert.equal(slug({ account: held }), "hako-merry", "a held record's figure");
+    assert.equal(slug({ account: signedIn({ exists: true, tenant: ME }) }), null, "live: the desk has its own");
+    assert.equal(slug({ feedIsOwn: false }), null, "never a slug from another session's feed");
+    assert.equal(slug({ feedAnswered: false }), null);
+    assert.equal(slug({ named: { name: "Robin", slug: null } }), null);
+    assert.equal(slug({ account: { session: { hosted: false, address: null }, status: { exists: false } } }), null, "self-hosted");
   });
 });
 
@@ -144,11 +202,7 @@ describe("the stopped card's figure", () => {
 const noop = () => {};
 const doc = (node: React.ReactElement) => new JSDOM(renderToStaticMarkup(node)).window.document;
 const words = (d: Document) => (d.body.textContent ?? "").replace(/\s+/g, " ");
-const stopped = (stored = false): StoppedOwner => stoppedOf(state(stored ? { account: signedIn({ exists: false, tenant: ME, stored: true }) } : {}))!;
-const paperBook: OwnBookRead = {
-  recentTrades: null, topTrades: null,
-  figures: { book: "paper", equityUsdg: 1000, equityAt: Date.UTC(2026, 10, 18, 18, 4) / 1000, held: false, pnlUsdg: 0, pnlAt: null, underReview: false, pnlEstimated: false },
-};
+const stopped = (stored = false): StoppedOwner => stoppedOf(state(stored ? { account: held } : {}))!;
 const NEWCOMER = /Create your merryman|Your agent starts here|Your merryman lives here|Meet your merryman/;
 
 async function home(props: Record<string, unknown>) {
@@ -180,7 +234,7 @@ async function header(props: Record<string, unknown>) {
 
 describe("a stopped owner's screens say stopped, with one way back", () => {
   for (const stored of [false, true]) {
-    const restart = stored ? { href: "/grant#resign", label: "Renew his pass" } : { href: "/create", label: "Start him again" };
+    const restart = { href: "/create", label: "Start him again" };
     it(`Home (${stored ? "held for a renewal" : "removed"})`, async () => {
       const d = await home({ stoppedAgent: stopped(stored), stoppedBook: paperBook });
       const text = words(d);

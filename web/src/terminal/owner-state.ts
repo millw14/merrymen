@@ -13,10 +13,19 @@
  * own profile (2026-11-18, a paper owner stopped for a re-signature and never
  * signed).
  *
- * So the state is decided here, from the account read, the feed's identity and
- * — only when it would otherwise be "stopped" — the Perps wallet, and handed to
- * every surface. Home, Me, the account card and the desktop header used to
- * repeat their own conditions, and each repetition is a place to disagree.
+ * A SLUG IS NOT AN AGENT. Every Privy sign-in claims one (identity-store.ts
+ * resolveOrClaimDid, with no accounts), so the feed names a slug for a
+ * newcomer who never made a Merryman too. "Stopped" needs evidence that a Spot
+ * agent existed: the Spot GET's `stored` (a record held for this tenant), or
+ * the owner-only /own read answering with a book (it refuses a slug with no
+ * Spot account on record, read-agent.ts readOwnBook). Without either it is a
+ * newcomer, as it always was.
+ *
+ * So the state is decided here, from the account read, the feed's identity,
+ * the owner's own book and — only for a removed record — the Perps wallet,
+ * and handed to every surface. Home, Me, the account card and the desktop
+ * header used to repeat their own conditions, and each repetition is a place
+ * to disagree.
  *
  * NOTHING HERE GRANTS ANYTHING. It picks words and links. The figures on a
  * stopped card come only from the owner-only /own route, which checks the
@@ -31,16 +40,23 @@ import type { ReadState } from "./live";
 import type { OwnBookView } from "./profile-view";
 
 /**
- * The Perps wallet's own answer, asked only for an owner who would otherwise be
- * "stopped": a login whose Perps wallet holds a grant is trading there, and is
- * not told its agent is stopped. Null until that read answers; "none" also for
- * a deployment that offers no Perps, where no Perps wallet can be running.
+ * The Perps wallet's own answer, asked only for a removed record with a book on
+ * file: a login whose Perps wallet holds a grant is trading there, and is not
+ * told its agent is stopped. Null until that read answers; "none" also for a
+ * deployment that offers no Perps, where no Perps wallet can be running.
  */
 export type PerpsWalletRead = "held" | "none" | "unread" | null;
 
-/** The one way back for a stopped agent. */
+/**
+ * The one way back for a stopped agent: /create, for a held record and a
+ * removed one alike. It already sends a browser holding the saved wallet to
+ * its renewal (CreateAgent.tsx "Resume your saved wallet", /grant#resign), and
+ * signs a login-owned agent again otherwise. /grant#resign straight away gave
+ * a Privy owner on another browser the owner-key restore form, which has no
+ * key of his to take.
+ */
 export interface Restart {
-  href: "/grant#resign" | "/create";
+  href: "/create";
   label: string;
 }
 
@@ -48,7 +64,7 @@ export interface Restart {
 export interface StoppedOwner {
   name: string;
   slug: string;
-  /** The record is held, stopped for a renewal: it is signed again, not made again. */
+  /** The record is held, stopped for a renewal (the Spot GET's `stored`), rather than removed. */
   stored: boolean;
   restart: Restart;
   /** His public page, where the owner's own view of the book lives. */
@@ -66,8 +82,9 @@ export type OwnerState =
   | { kind: "checking" }
   /**
    * Nothing to say about an agent: signed out, self-hosted with no grant, a
-   * newcomer, an account still loading or failed (the screens' own states), a
-   * feed for another session, or a Perps read that failed.
+   * newcomer (a slug and no book), an account still loading or failed (the
+   * screens' own states), a feed for another session, or an owner or Perps
+   * read that was refused or failed.
    */
   | { kind: "none" };
 
@@ -75,10 +92,18 @@ export interface OwnerInputs {
   account: AccountState | null;
   /** The owner's feed read for this session (account-session.ts accountFeedRead): "unread" until it first answers. */
   feed: ReadState;
+  /**
+   * The feed has answered at least once (`live.feedTenant` is no longer
+   * undefined). One that failed before it ever answered says nothing about
+   * whose agent this is: unknown, not new.
+   */
+  feedAnswered: boolean;
   /** The feed names this session's tenant (account-session.ts feedMatchesAccount). */
   feedIsOwn: boolean;
   /** The feed's identity (`live.mine`): the name, and the slug the identity store holds for the session. */
   named: { name: string; slug: string | null } | null | undefined;
+  /** The owner-only /own read for that slug (owner-reads.ts useOwnBookRead), asked for while ownBookSlug names it. */
+  book: OwnBookRead;
   perps: PerpsWalletRead;
 }
 
@@ -87,8 +112,10 @@ const NONE: OwnerState = { kind: "none" };
 const CHECKING: OwnerState = { kind: "checking" };
 const PERPS_ONLY: OwnerState = { kind: "perps-only" };
 
-/** Everything but the Perps wallet: a final answer, or a stopped agent the Perps read still has to clear. */
-function beforePerps(i: Omit<OwnerInputs, "perps">): { state: OwnerState } | { name: string; slug: string; stored: boolean } {
+type Candidate = { name: string; slug: string; stored: boolean };
+
+/** Everything but the owner's book and the Perps wallet: a final answer, or the agent those reads must confirm. */
+function candidateOf(i: Omit<OwnerInputs, "book" | "perps">): { state: OwnerState } | Candidate {
   const a = i.account;
   if (!a) return { state: NONE };
   if (a.status.exists) return { state: LIVE };
@@ -96,38 +123,54 @@ function beforePerps(i: Omit<OwnerInputs, "perps">): { state: OwnerState } | { n
   // the feed names no slug (identityOf with no tenant), and the install's own
   // screens are what they always were.
   if (!a.session.hosted || !a.session.address) return { state: NONE };
-  // Before the feed's first answer, "stopped" and "new" look the same.
-  if (i.feed === "unread") return { state: CHECKING };
-  // A feed for another session, or one that failed, names nobody's agent here.
+  // Before the feed's first answer, or with only failures so far, "stopped"
+  // and "new" look the same: unknown, which is not new.
+  if (i.feed === "unread" || !i.feedAnswered) return { state: CHECKING };
+  // A feed answered for another session names nobody's agent here.
   if (!i.feedIsOwn || !i.named?.slug) return { state: NONE };
   return { name: i.named.name, slug: i.named.slug, stored: a.status.stored === true };
 }
 
 export function ownerStateOf(i: OwnerInputs): OwnerState {
-  const s = beforePerps(i);
+  const s = candidateOf(i);
   if ("state" in s) return s.state;
+  // A SPOT RECORD HELD FOR THIS TENANT is a Spot agent that existed, whatever
+  // the Perps wallet holds: stopped, with no other read to wait for.
+  if (s.stored) return { kind: "stopped-stored", stopped: stoppedOwner(s) };
+  // REMOVED, OR NEVER MADE. Only the owner's book tells them apart: a refusal
+  // is a newcomer (or a read that failed), and says what it always said.
+  if (i.book === undefined) return CHECKING;
+  if (i.book === null) return NONE;
   if (i.perps === null) return CHECKING;
   if (i.perps === "held") return PERPS_ONLY;
   // Could not tell: what the Spot screens said before, rather than "stopped"
   // to an owner who may be trading on Perps.
   if (i.perps === "unread") return NONE;
-  const stopped: StoppedOwner = {
+  return { kind: "stopped-removed", stopped: stoppedOwner(s) };
+}
+
+function stoppedOwner(s: Candidate): StoppedOwner {
+  return {
     name: s.name,
     slug: s.slug,
     stored: s.stored,
-    // A held record is renewed where every renewal is signed. A removed one is
-    // made again from /create, which lands a login-owned agent on the same
-    // account and slug. Neither promises the book comes back as it was: a key
-    // made in the browser makes a new account, and so a new book.
-    restart: s.stored ? { href: "/grant#resign", label: "Renew his pass" } : { href: "/create", label: "Start him again" },
+    // Neither promises the book comes back as it was: a login-owned agent
+    // comes back on the same account, a key made in the browser on a new one.
+    restart: { href: "/create", label: "Start him again" },
     profile: `/a/${encodeURIComponent(s.slug)}`,
   };
-  return s.stored ? { kind: "stopped-stored", stopped } : { kind: "stopped-removed", stopped };
 }
 
-/** Ask the Perps wallet only for an owner it could stop being "stopped" for. */
+/** The slug to ask /own about: the session's own, while it may be a stopped agent's (and for its figure). */
+export function ownBookSlug(i: Omit<OwnerInputs, "book" | "perps">): string | null {
+  const s = candidateOf(i);
+  return "state" in s ? null : s.slug;
+}
+
+/** Ask the Perps wallet only where it decides the answer: a removed record whose book is on file. */
 export function perpsReadWanted(i: Omit<OwnerInputs, "perps">): boolean {
-  return !("state" in beforePerps(i));
+  const s = candidateOf(i);
+  return !("state" in s) && !s.stored && !!i.book;
 }
 
 /** The stopped agent, or null. */
