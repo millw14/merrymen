@@ -424,6 +424,8 @@ export default function GrantPage() {
   const [savedWallets, setSavedWallets] = useState<SavedWallet[]>([]);
   const [reArming, setReArming] = useState(false);
   const [discarding, setDiscarding] = useState(false);
+  /** What Start over's practice reset came to, when it was not queued (discard()). */
+  const [startOverNote, setStartOverNote] = useState<string | null>(null);
   // ── restore: bring an already-funded wallet back with its owner key ──────
   const [mode, setMode] = useState<"create" | "restore">("restore");
   const [restoreKey, setRestoreKey] = useState("");
@@ -1360,6 +1362,8 @@ export default function GrantPage() {
     const discardedGrant = loadGrant("spot");
     setDiscarding(true);
     setError(null);
+    setStartOverNote(null);
+    let paperReset: unknown;
     try {
       const res = await fetch("/api/grants/discard", { method: "POST", keepalive: true,
         headers: { "Content-Type": "application/json" },
@@ -1369,12 +1373,28 @@ export default function GrantPage() {
         setError(body?.error ?? `The server did not discard the grant (${res.status}). Your wallet is still saved here; try again.`);
         return;
       }
+      paperReset = (await res.json().catch(() => null) as { paperReset?: unknown } | null)?.paperReset;
     } catch {
       setError("The server could not confirm the kill. Your wallet is still saved here; check the connection and try again.");
       return;
     } finally {
       setDiscarding(false);
     }
+    // NO RESET QUEUED IS SAID, NOT LEFT TO LOOK LIKE ONE. The kill above
+    // happened either way; the practice reset is the half that finds its agent
+    // through the grant (lib/start-over.ts), so a grant already stopped finds
+    // nothing ("no-agent"), and a queue that cannot be written fails. Both
+    // used to end on the same clean page as a reset that was queued
+    // (2026-11-18: an owner whose agent was stopped pressed Start over twice;
+    // neither queued one). Only the words change: nothing here retries it or
+    // touches the book. An answer that names no outcome says nothing.
+    setStartOverNote(
+      paperReset === "no-agent"
+        ? "Your agent's permission is discarded, but no practice reset was queued: there was no active agent to reset. This Start over did not restart the practice book."
+        : paperReset === "failed"
+          ? "Your agent's permission is discarded, but the practice reset could not be queued. This Start over did not restart the practice book."
+          : null,
+    );
     // Another tab or a wallet switch can save a newer grant while the server
     // answers. This response is not permission to clear that wallet or backup.
     const currentGrant = loadGrant("spot");
@@ -1605,6 +1625,7 @@ export default function GrantPage() {
       )}
 
         <div className="grant-shell">
+        {startOverNote && <p role="status">{startOverNote}</p>}
         {grant && !switching && <section id="permission-security" className="grant-summary" style={{ marginBottom: 16 }}>
           <h2>Stop or revoke permissions</h2>
           <p>Stopping this service needs no wallet signature and keeps your agent's memory. Sign a fresh permission to restart. Revocation is a separate owner-authorized transaction on {chainLabel(grant.chainId)} that invalidates earlier session keys, including copies. Your account and recovery access stay available.</p>

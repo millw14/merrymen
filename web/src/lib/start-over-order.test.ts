@@ -103,7 +103,7 @@ describe("Start over", () => {
         MAINNET: 4663,
         PRESETS: [{ caps: {} }],
       };
-      for (const setter of ["setDiscarding", "setRenewed", "setGrant", "setBackedUp", "setReveal", "setAck", "setMainnetAck", "setFunding", "setChainId", "setCaps", "setCapText"]) deps[setter] = () => {};
+      for (const setter of ["setDiscarding", "setRenewed", "setGrant", "setBackedUp", "setReveal", "setAck", "setMainnetAck", "setFunding", "setChainId", "setCaps", "setCapText", "setStartOverNote"]) deps[setter] = () => {};
       const handler = new Function(...Object.keys(deps), `${code}; return discard;`)(...Object.values(deps)) as () => Promise<void>;
       await handler();
       if (outcome === "removed") {
@@ -113,5 +113,60 @@ describe("Start over", () => {
         assert.match(errors.at(-1) ?? "", outcome === "refused" ? /could not be archived/ : outcome === "replaced" ? /newer wallet and its backup were kept/ : /could not confirm/);
       }
     }
+  });
+
+  /**
+   * NO RESET QUEUED IS SAID. The server answers what became of the practice
+   * reset (`paperReset`, discard/route.ts): "no-agent" when the grant it finds
+   * the agent through was already stopped, "failed" when the queue could not
+   * be written. Both used to end on the same clean page as a queued one
+   * (2026-11-18). The kill and the browser cleanup are unchanged either way.
+   */
+  it("says when no practice reset was queued, and says nothing for one that was", async () => {
+    assert.ok(discard);
+    const code = ts.transpileModule(discard.getText(), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    const run = async (body: unknown) => {
+      const steps: string[] = [];
+      const notes: (string | null)[] = [];
+      const stored = { smartAccount: "0xoriginal", serialized: "original-signature" };
+      const deps: Record<string, unknown> = {
+        discarding: false,
+        funding: null,
+        grant: null,
+        session: { hosted: true, address: "0x" + "a".repeat(40) },
+        loadGrant: () => stored,
+        fetch: async () => { steps.push("request"); return new Response(JSON.stringify(body), { status: 200 }); },
+        clearGrant: () => steps.push("clear grant"),
+        setError: () => {},
+        setStartOverNote: (note: string | null) => notes.push(note),
+        localStorage: { removeItem: () => steps.push("clear backup") },
+        BACKUP_KEY: "backup",
+        MAINNET: 4663,
+        PRESETS: [{ caps: {} }],
+      };
+      for (const setter of ["setDiscarding", "setRenewed", "setGrant", "setBackedUp", "setReveal", "setAck", "setMainnetAck", "setFunding", "setChainId", "setCaps", "setCapText"]) deps[setter] = () => {};
+      const handler = new Function(...Object.keys(deps), `${code}; return discard;`)(...Object.values(deps)) as () => Promise<void>;
+      await handler();
+      assert.deepEqual(steps, ["request", "clear grant", "clear backup"], "the kill and the browser cleanup are what they were");
+      assert.equal(notes[0], null, "a press clears the last note first");
+      return notes.at(-1) ?? null;
+    };
+    const none = await run({ ok: true, paperReset: "no-agent" });
+    assert.match(none ?? "", /permission is discarded/);
+    assert.match(none ?? "", /no practice reset was queued: there was no active agent to reset/);
+    assert.match(none ?? "", /did not restart the practice book/);
+    const failed = await run({ ok: true, paperReset: "failed" });
+    assert.match(failed ?? "", /practice reset could not be queued/);
+    assert.match(failed ?? "", /did not restart the practice book/);
+    assert.equal(await run({ ok: true, paperReset: "queued" }), null, "a queued reset needs no apology");
+    assert.equal(await run({ ok: true, paperReset: "queued", perps: "stopped" }), null);
+    // An answer that names no outcome is not read as one either way.
+    assert.equal(await run({ ok: true }), null);
+    assert.equal(await run("not json at all"), null);
+    // And the page draws it, as a status, whichever panel the discard left showing.
+    const shell = SRC.indexOf('<div className="grant-shell">');
+    const drawn = SRC.indexOf('{startOverNote && <p role="status">{startOverNote}</p>}', shell);
+    assert.ok(shell > 0 && drawn > shell, "the note is drawn inside the shell");
+    assert.ok(drawn < SRC.indexOf('id="permission-security"', shell) && drawn < SRC.indexOf("{(!grant || switching) && (", shell), "before any panel");
   });
 });
