@@ -67,9 +67,10 @@ export function moodOf(input: MoodInput): Mood {
     case "no-agent":
       return { clip: "happy", bubble: "Dress me up, then I'll start trading for you.", tone: "calm", word: "New" };
     case "stopped":
-      // Only what is known: nothing runs him. No word on his money or his
-      // positions, which this phase has not read.
-      return { clip: "sleep", bubble: "I'm stopped, so I'm not trading.", tone: "calm", word: "Stopped" };
+      // The next step, not a fourth "stopped": the chip and the card beside
+      // him already say it. No word on his money or his positions, which this
+      // phase has not read.
+      return { clip: "sleep", bubble: "Start me again when you're ready.", tone: "calm", word: "Stopped" };
   }
 
   const a = input.autonomy;
