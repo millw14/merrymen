@@ -677,13 +677,16 @@ describe("the funded wallet's re-sign control", () => {
   it("shows signing progress, then confirms only a server-accepted renewal", async () => {
     const done = deferred<unknown>();
     renew = async ({ onStatus }) => { onStatus("checking your permission…"); return done.promise; };
-    await ui.render(React.createElement(Wallet));
+    let told = 0;
+    await ui.render(React.createElement(Wallet, { onAccountChanged: () => { told += 1; } }));
     await acknowledge("I authorize revoking");
     await ui.click("revoke earlier permissions & re-sign");
     const panel = ui.container.querySelector("#resign")!;
     assert.match(panel.querySelector('[role="status"]')?.textContent ?? "", /checking your permission/);
     assert.equal(panel.querySelector("fieldset")?.disabled, true);
+    assert.equal(told, 0, "nothing changed on the server yet");
     await act(async () => { done.resolve({ local: { ...grant, grantedAt: grant.grantedAt + 1 }, handoff: { ok: true } }); });
+    assert.equal(told, 1, "the shell reads the account again: no stopped card left beside a renewed agent");
     assert.match(panel.querySelector('[role="status"]')?.textContent ?? "", /Permission renewed/);
     assert.doesNotMatch(panel.textContent!, /checking your permission/);
     assert.equal(panel.querySelector("fieldset"), null);
@@ -694,11 +697,15 @@ describe("the funded wallet's re-sign control", () => {
 
   it("shows a server refusal and never reports that permission renewal succeeded", async () => {
     renew = async () => ({ local: grant, handoff: { ok: false, error: "Sign in again to renew your permission." } });
-    await ui.render(React.createElement(Wallet));
+    let told = 0;
+    await ui.render(React.createElement(Wallet, { onAccountChanged: () => { told += 1; } }));
     await acknowledge("I authorize revoking");
     await ui.click("revoke earlier permissions & re-sign");
     assert.match(ui.container.textContent!, /Sign in again to renew your permission/);
     assert.doesNotMatch(ui.container.textContent!, /Permission renewed/);
+    // The old permission was stopped before the refusal: the shell reads the
+    // account again and says so, rather than a live desk for a minute.
+    assert.equal(told, 1);
   });
 
   it("does not carry the previous renewal confirmation through switching wallets", async () => {
