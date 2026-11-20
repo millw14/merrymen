@@ -91,6 +91,7 @@ import {
   realCashOf,
 } from "./account-read";
 import { accountFeedRead, feedMatchesAccount, readAccountForSession } from "./account-session";
+import { ownsProfile } from "./owner-state";
 import { LoadFailure } from "./LoadFailure";
 import { ServiceNotice } from "./ServiceNotice";
 import "./service-notice.css";
@@ -904,7 +905,11 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             tokens={live.tokens}
             onBack={goBack}
             onToken={(id) => openScreen({ kind: "token", id })}
-            isMine={mine?.slug === agent.slug}
+            // THE SESSION'S OWN AGENT, LIVE OR STOPPED: from the feed's
+            // identity, not `mine`, which needs a live grant and made a stopped
+            // owner's own page a stranger's. The /own read it opens is the
+            // server's to answer (read-agent.ts readOwnBook).
+            isMine={ownsProfile(ownerFeedReady, live.mine, agent.slug)}
             onBookChanged={() => profileRefresh.current?.()}
           />
         )}

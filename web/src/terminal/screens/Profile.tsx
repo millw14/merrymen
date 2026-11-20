@@ -26,7 +26,6 @@ import { useNow } from "../clock";
 import {
   chartWindows,
   defaultWindow,
-  fetchOwnBook,
   growthWindow,
   saveBook,
   statsParts,
@@ -37,6 +36,7 @@ import {
 } from "../profile-view";
 import { SwapsTable } from "../SwapsTable";
 import { swapRowsOfProfile } from "../swaps";
+import { useOwnBookRead } from "../owner-reads";
 
 export function Profile({
   agent,
@@ -543,25 +543,12 @@ function ProfileChart({ agent, displayPnl }: { agent: ProfileAgent; displayPnl: 
  *
  * Asked for only while `slug` is set — the page sets it on the owner's own page
  * of a private book — and again whenever `refreshKey` changes, which is the
- * public read refreshing. Null on any failure: the page then shows the public
- * figures, which carry no money. Never another slug's answer.
+ * public read refreshing. Null while it is out and on any failure: the page
+ * then shows the public figures, which carry no money. Never another slug's
+ * answer. The same read a stopped owner's card makes (owner-reads.ts).
  */
 function useOwnBook(slug: string | null, refreshKey: unknown): OwnBookView | null {
-  const [own, setOwn] = useState<{ slug: string; view: OwnBookView } | null>(null);
-  useEffect(() => {
-    if (!slug) {
-      setOwn(null);
-      return;
-    }
-    let alive = true;
-    void fetchOwnBook(slug).then((view) => {
-      if (alive) setOwn(view ? { slug, view } : null);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [slug, refreshKey]);
-  return own && own.slug === slug ? own.view : null;
+  return useOwnBookRead(slug, refreshKey) ?? null;
 }
 
 /**
