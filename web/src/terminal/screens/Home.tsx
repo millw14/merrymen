@@ -183,7 +183,7 @@ export function Home({
               </div>
               <div className="mm-actions">
                 <a className="mm-action primary" href={stopped.restart.href}><Sparkles size={18} aria-hidden="true"/> {stopped.restart.label}</a>
-                <a className="mm-action" href={stopped.profile}>His profile</a>
+                <a className="mm-action" href={stopped.profile}>View profile</a>
               </div>
             </>
           ) : checking ? (

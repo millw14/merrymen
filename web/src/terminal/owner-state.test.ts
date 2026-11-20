@@ -54,7 +54,7 @@ describe("the owner's state", () => {
     assert.equal(s.kind, "stopped-removed");
     assert.deepEqual(stoppedOf(s), {
       name: "hako merry", slug: "hako-merry", stored: false,
-      restart: { href: "/create", label: "Start him again" }, profile: "/a/hako-merry",
+      restart: { href: "/create", label: "Start it again" }, profile: "/a/hako-merry",
     });
   });
 
@@ -65,7 +65,7 @@ describe("the owner's state", () => {
     for (const book of [paperBook, null, undefined]) {
       const s = state({ account: held, book });
       assert.equal(s.kind, "stopped-stored", String(book));
-      assert.deepEqual(stoppedOf(s)?.restart, { href: "/create", label: "Start him again" });
+      assert.deepEqual(stoppedOf(s)?.restart, { href: "/create", label: "Start it again" });
     }
   });
 
@@ -234,12 +234,12 @@ async function header(props: Record<string, unknown>) {
 
 describe("a stopped owner's screens say stopped, with one way back", () => {
   for (const stored of [false, true]) {
-    const restart = { href: "/create", label: "Start him again" };
+    const restart = { href: "/create", label: "Start it again" };
     it(`Home (${stored ? "held for a renewal" : "removed"})`, async () => {
       const d = await home({ stoppedAgent: stopped(stored), stoppedBook: paperBook });
       const text = words(d);
       assert.match(text, /hako merry is stopped/);
-      assert.match(text, /He isn't trading\. His record and profile are kept\./);
+      assert.match(text, /It isn't trading\. Its record and profile are kept\./);
       assert.match(text, /Paper value \$1,000\.00 as of Nov 18/);
       assert.doesNotMatch(text, NEWCOMER);
       assert.equal(text.match(/paper/gi)?.length, 1, "paper is said once");

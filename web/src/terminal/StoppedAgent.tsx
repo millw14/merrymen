@@ -14,7 +14,7 @@ export function StoppedWords({ stopped }: { stopped: StoppedOwner }) {
   return (
     <>
       <h2>{stopped.name} is stopped</h2>
-      <p>He isn&apos;t trading. His record and profile are kept.</p>
+      <p>It isn&apos;t trading. Its record and profile are kept.</p>
     </>
   );
 }
@@ -42,7 +42,7 @@ export function StoppedAgentCard({ stopped, book }: { stopped: StoppedOwner; boo
       <StoppedWords stopped={stopped} />
       <StoppedFigure book={book} />
       <a className="flow-primary" href={stopped.restart.href}>{stopped.restart.label}</a>
-      <a className="flow-secondary" href={stopped.profile}>His profile</a>
+      <a className="flow-secondary" href={stopped.profile}>View profile</a>
     </section>
   );
 }

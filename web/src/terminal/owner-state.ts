@@ -156,7 +156,7 @@ function stoppedOwner(s: Candidate): StoppedOwner {
     stored: s.stored,
     // Neither promises the book comes back as it was: a login-owned agent
     // comes back on the same account, a key made in the browser on a new one.
-    restart: { href: "/create", label: "Start him again" },
+    restart: { href: "/create", label: "Start it again" },
     profile: `/a/${encodeURIComponent(s.slug)}`,
   };
 }
