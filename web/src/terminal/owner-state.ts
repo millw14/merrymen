@@ -123,9 +123,13 @@ function candidateOf(i: Omit<OwnerInputs, "book" | "perps">): { state: OwnerStat
   // the feed names no slug (identityOf with no tenant), and the install's own
   // screens are what they always were.
   if (!a.session.hosted || !a.session.address) return { state: NONE };
-  // Before the feed's first answer, or with only failures so far, "stopped"
-  // and "new" look the same: unknown, which is not new.
-  if (i.feed === "unread" || !i.feedAnswered) return { state: CHECKING };
+  // Before the feed's first answer, "stopped" and "new" look the same: wait.
+  if (i.feed === "unread") return { state: CHECKING };
+  // A FEED THAT HAS ONLY FAILED must not hold a newcomer on "One moment…" with
+  // no way to create an agent for as long as the outage lasts. Only a record
+  // the server says is held for renewal keeps waiting (that owner needs the
+  // feed's name, not Create); anyone else gets the screens main always showed.
+  if (!i.feedAnswered) return { state: a.status.stored === true ? CHECKING : NONE };
   // A feed answered for another session names nobody's agent here.
   if (!i.feedIsOwn || !i.named?.slug) return { state: NONE };
   return { name: i.named.name, slug: i.named.slug, stored: a.status.stored === true };

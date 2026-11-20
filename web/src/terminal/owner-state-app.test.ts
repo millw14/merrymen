@@ -308,7 +308,17 @@ describe("who is not told their agent is stopped", () => {
     assert.equal(ui.container.querySelector('a[href="/create"]')?.textContent ?? null, null);
   });
 
-  it("a feed that failed before it ever answered: checking too, not the newcomer's invitation", async () => {
+  it("a feed that failed before it ever answered: a newcomer keeps the way to Create", async () => {
+    // An outage must not hold a signed-in newcomer on "One moment…" with no
+    // Create for as long as it lasts: these are the screens main showed.
+    live = { ...live, feedTenant: undefined, mine: null, reads: { ...live.reads, mine: "unreadable" } };
+    await mount();
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, false);
+  });
+
+  it("a feed that failed before it ever answered: a record held for renewal waits for its name", async () => {
+    grants = { exists: false, tenant: ME, stored: true };
     live = { ...live, feedTenant: undefined, mine: null, reads: { ...live.reads, mine: "unreadable" } };
     await mount();
     assert.equal(stoppedOn("home"), null);

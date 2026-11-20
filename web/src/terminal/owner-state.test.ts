@@ -119,12 +119,12 @@ describe("the owner's state", () => {
     assert.equal(state({ feed: "unread", feedAnswered: false, feedIsOwn: false, named: null }).kind, "checking");
   });
 
-  it("a feed that failed before it ever answered is unknown, not new: checking", () => {
+  it("a feed that failed before it ever answered: a held record waits, anyone else keeps Create", () => {
     // accountFeedRead says "unreadable" and feedMatchesAccount false for it,
     // exactly as for a feed answered for another session.
-    for (const account of [signedIn({ exists: false, tenant: ME }), held]) {
-      assert.equal(state({ account, feed: "unreadable", feedAnswered: false, feedIsOwn: false, named: null }).kind, "checking");
-    }
+    assert.equal(state({ account: held, feed: "unreadable", feedAnswered: false, feedIsOwn: false, named: null }).kind, "checking");
+    // A newcomer must not sit on "One moment…" with no Create for an outage.
+    assert.equal(state({ account: signedIn({ exists: false, tenant: ME }), feed: "unreadable", feedAnswered: false, feedIsOwn: false, named: null }).kind, "none");
     // Answered for another session: that one is known, and names nobody here.
     assert.equal(state({ feed: "unreadable", feedAnswered: true, feedIsOwn: false }).kind, "none");
   });
