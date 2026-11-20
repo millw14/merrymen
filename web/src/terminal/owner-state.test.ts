@@ -5,10 +5,14 @@
  * signed. His feed still named his agent, his book was on file — and Home and
  * Me said "Create your merryman", every other page "Your agent starts here",
  * and his own profile "Private". owner-state.ts names the state once; this
- * runs every arm of it.
+ * runs every arm of it, then renders the screens that read it.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import * as React from "react";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { JSDOM } from "jsdom";
 import type { AccountState } from "./HostedControls";
 import {
   ownerStateOf,
@@ -16,8 +20,13 @@ import {
   perpsReadWanted,
   stoppedFigure,
   stoppedOf,
+  type OwnBookRead,
   type OwnerInputs,
+  type StoppedOwner,
 } from "./owner-state";
+import type { ReadState } from "./live";
+
+(globalThis as unknown as { React: typeof React }).React = React;
 
 const ME = `0x${"a".repeat(40)}`;
 const signedIn = (status: AccountState["status"]): AccountState => ({ session: { hosted: true, address: ME }, status });
@@ -127,5 +136,123 @@ describe("the stopped card's figure", () => {
   it("a value nobody could read is a dash, never $0.00", () => {
     assert.deepEqual(stoppedFigure(figures({ equityUsdg: null, equityAt: null })), { label: "Paper value", value: "—", asOf: null, held: false });
     assert.deepEqual(stoppedFigure({ recentTrades: null, topTrades: null, figures: null }), { label: "Value", value: "—", asOf: null, held: false });
+  });
+});
+
+// ── the screens ──────────────────────────────────────────────────────────────
+
+const noop = () => {};
+const doc = (node: React.ReactElement) => new JSDOM(renderToStaticMarkup(node)).window.document;
+const words = (d: Document) => (d.body.textContent ?? "").replace(/\s+/g, " ");
+const stopped = (stored = false): StoppedOwner => stoppedOf(state(stored ? { account: signedIn({ exists: false, tenant: ME, stored: true }) } : {}))!;
+const paperBook: OwnBookRead = {
+  recentTrades: null, topTrades: null,
+  figures: { book: "paper", equityUsdg: 1000, equityAt: Date.UTC(2026, 10, 18, 18, 4) / 1000, held: false, pnlUsdg: 0, pnlAt: null, underReview: false, pnlEstimated: false },
+};
+const NEWCOMER = /Create your merryman|Your agent starts here|Your merryman lives here|Meet your merryman/;
+
+async function home(props: Record<string, unknown>) {
+  const { Home } = await import("./screens/Home");
+  return doc(createElement(Home, {
+    mine: null, tokens: [], agents: [], theses: [], tokenTab: "buys", read: "ok" as ReadState, hasAgent: false, phase: "no-agent",
+    onTokenTab: noop, onToken: noop, onAgent: noop, onDeposit: noop, onSearch: noop, onDesk: noop, onCreate: noop, onWardrobe: noop,
+    ...props,
+  } as never));
+}
+async function you(props: Record<string, unknown>) {
+  const { You } = await import("./screens/You");
+  return doc(createElement(You, {
+    mine: null, history: [], stopped: false, perTrade: null, perDay: null, hasAgent: false,
+    onLimits: noop, onStop: noop, onDesk: noop, onDeposit: noop, onWithdraw: noop, onCreate: noop,
+    ...props,
+  } as never));
+}
+async function entry(props: Record<string, unknown>) {
+  const { AccountEntry } = await import("./HostedControls");
+  return doc(createElement(AccountEntry, { account: signedIn({ exists: false, tenant: ME }), onRefresh: noop, onSignedIn: noop, ...props } as never));
+}
+async function header(props: Record<string, unknown>) {
+  const { DesktopHeader } = await import("./Desktop");
+  const { autonomyOf } = await import("@merrymen/core");
+  const mine = { name: "Your agent", slug: null, handle: null, owner: null, equity: null, chg24: null, mode: null, thesis: null, moves: [], glance: { id: "custom", label: "" }, autonomy: autonomyOf({ mode: null, liveBlocker: null }) };
+  return doc(createElement(DesktopHeader, { mine, hasAgent: false, onScreen: noop, onTab: noop, ...props } as never));
+}
+
+describe("a stopped owner's screens say stopped, with one way back", () => {
+  for (const stored of [false, true]) {
+    const restart = stored ? { href: "/grant#resign", label: "Renew his pass" } : { href: "/create", label: "Start him again" };
+    it(`Home (${stored ? "held for a renewal" : "removed"})`, async () => {
+      const d = await home({ stoppedAgent: stopped(stored), stoppedBook: paperBook });
+      const text = words(d);
+      assert.match(text, /hako merry is stopped/);
+      assert.match(text, /He isn't trading\. His record and profile are kept\./);
+      assert.match(text, /Paper value \$1,000\.00 as of Nov 18/);
+      assert.doesNotMatch(text, NEWCOMER);
+      assert.equal(text.match(/paper/gi)?.length, 1, "paper is said once");
+      const restarts = [...d.querySelectorAll("a.mm-action.primary")];
+      assert.equal(restarts.length, 1, "one way to restart");
+      assert.equal(restarts[0]!.getAttribute("href"), restart.href);
+      assert.equal(restarts[0]!.textContent?.trim(), restart.label);
+      assert.equal(d.querySelector("a.mm-action:not(.primary)")?.getAttribute("href"), "/a/hako-merry");
+      assert.equal(d.querySelector(".home-quick") === null, true, "no desk shortcuts for an agent with no grant");
+    });
+    it(`Me (${stored ? "held for a renewal" : "removed"})`, async () => {
+      const d = await you({ stoppedAgent: stopped(stored), stoppedBook: paperBook });
+      const text = words(d);
+      assert.match(text, /hako merry is stopped/);
+      assert.match(text, /Paper value \$1,000\.00 as of Nov 18/);
+      assert.doesNotMatch(text, NEWCOMER);
+      assert.equal(d.querySelector("a.flow-primary")?.getAttribute("href"), restart.href);
+      assert.equal(d.querySelector("a.flow-primary")?.textContent, restart.label);
+    });
+    it(`the account entry and the desktop aside (${stored ? "held for a renewal" : "removed"})`, async () => {
+      const d = await entry({ stoppedAgent: stopped(stored), stoppedBook: paperBook });
+      const text = words(d);
+      assert.match(text, /hako merry is stopped/);
+      assert.doesNotMatch(text, NEWCOMER);
+      assert.equal(d.querySelectorAll("a.flow-primary").length, 1);
+      assert.equal(d.querySelector("a.flow-primary")?.getAttribute("href"), restart.href);
+    });
+    it(`the desktop header (${stored ? "held for a renewal" : "removed"})`, async () => {
+      const d = await header({ stoppedAgent: stopped(stored) });
+      const text = words(d);
+      assert.doesNotMatch(text, /Create your merryman|Create an agent/);
+      assert.equal(d.querySelector("a.desktop-fund")?.getAttribute("href"), restart.href);
+      assert.equal(d.querySelector("a.desktop-fund")?.textContent, restart.label);
+      assert.match(d.querySelector(".desktop-account-menu summary")?.textContent ?? "", /hako merry/);
+    });
+  }
+
+  it("the figure: nothing while the read is out or refused, a dash for a value nobody read", async () => {
+    for (const book of [undefined, null]) {
+      const text = words(await home({ stoppedAgent: stopped(), stoppedBook: book }));
+      assert.match(text, /hako merry is stopped/);
+      assert.doesNotMatch(text, /Value|\$/, String(book));
+    }
+    const unknown = words(await entry({ stoppedAgent: stopped(), stoppedBook: { recentTrades: null, topTrades: null, figures: null } }));
+    assert.match(unknown, /Value —/);
+    assert.doesNotMatch(unknown, /\$0\.00/);
+  });
+});
+
+describe("a newcomer, and a state not yet known, are not told they are stopped", () => {
+  it("the newcomer's screens are the newcomer's", async () => {
+    assert.match(words(await home({})), /Create your merryman/);
+    assert.match(words(await you({})), /Create your merryman/);
+    assert.match(words(await entry({})), /Your agent starts here/);
+    assert.match(words(await header({})), /Create your merryman/);
+    for (const d of [await home({}), await you({}), await entry({}), await header({})]) assert.doesNotMatch(words(d), /is stopped/);
+  });
+
+  it("checking claims neither", async () => {
+    for (const d of [await home({ checking: true }), await you({ checking: true }), await entry({ checking: true }), await header({ checking: true })]) {
+      assert.doesNotMatch(words(d), /is stopped|Create your merryman|Your agent starts here|Create an agent|Your merryman lives here/);
+    }
+  });
+
+  it("an owner with a live grant whose numbers are loading is not stopped either", async () => {
+    const text = words(await home({ hasAgent: true, phase: "loading" }));
+    assert.match(text, /Fetching your merryman's numbers/);
+    assert.doesNotMatch(text, /is stopped/);
   });
 });

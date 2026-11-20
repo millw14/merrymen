@@ -91,7 +91,8 @@ import {
   realCashOf,
 } from "./account-read";
 import { accountFeedRead, feedMatchesAccount, readAccountForSession } from "./account-session";
-import { ownsProfile } from "./owner-state";
+import { ownerStateOf, ownsProfile, perpsReadWanted, stoppedOf } from "./owner-state";
+import { useOwnBookRead, usePerpsWalletRead } from "./owner-reads";
 import { LoadFailure } from "./LoadFailure";
 import { ServiceNotice } from "./ServiceNotice";
 import "./service-notice.css";
@@ -414,7 +415,8 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
         return;
       }
       if (account && !account.status.exists) {
-        goTo("/create");
+        // A stopped agent's way back, not a second agent (owner-state.ts).
+        goTo(stoppedAgent?.restart.href ?? "/create");
         return;
       }
     }
@@ -612,6 +614,23 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
   // Once it answers, a wrong-tenant feed is never shown as this owner's book.
   const portfolioRead = accountFeedRead(account?.session ?? null, live.feedTenant, live.reads.mine);
   /**
+   * WHOSE AGENT THIS SESSION HAS WHEN IT HAS NO LIVE ONE — see owner-state.ts.
+   *
+   * `mine` above needs a live grant, so an owner who stopped theirs was drawn
+   * as a newcomer everywhere. This names that state once, from the account,
+   * the session's own feed identity and, only where it would otherwise say
+   * "stopped", the Perps wallet (a login trading there is not told its agent
+   * is stopped). The Spot screens only: the Perps workspace has its own.
+   * The figures on the stopped card come from the owner-only read, re-asked
+   * with each account read.
+   */
+  const ownerInputs = { account, feed: portfolioRead, feedIsOwn: ownerFeedReady, named: live.mine };
+  const perpsWallet = usePerpsWalletRead(account?.session ?? null, perps && !isolatedWallet && perpsReadWanted(ownerInputs), account?.status);
+  const owner = ownerStateOf({ ...ownerInputs, perps: perps ? perpsWallet : "none" });
+  const stoppedAgent = isolatedWallet ? null : stoppedOf(owner);
+  const ownerChecking = !isolatedWallet && owner.kind === "checking";
+  const stoppedBook = useOwnBookRead(stoppedAgent?.slug ?? null, account?.status);
+  /**
    * THE MARKET RAIL IS FOR TRADING SCREENS. On a token, a public profile, a
    * search or the market list it is the fastest way between coins; on Home,
    * the wardrobe, create and settings it was 300px of tickers beside a screen
@@ -635,7 +654,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           header and the desktop rail — and with them a second `AccountEntry`,
           which polls and fetches like the visible one. Display:none hides a
           component; it does not stop it running. */}
-      {desktop && <DesktopHeader tradingMode={tradingMode} active={barTab ?? undefined} hasAgent={!!mine} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
+      {desktop && <DesktopHeader tradingMode={tradingMode} active={barTab ?? undefined} hasAgent={!!mine} stoppedAgent={stoppedAgent} checking={ownerChecking} hideBalances={screen.kind === "solana" || isolatedWallet} wallet={selectedWallet === "perps" ? "perps" : "spot"} mine={displayMine} onScreen={openScreen} onTab={goTab} />}
       {desktop && perpsDesk ? null : desktop && isolatedWallet ? <aside className="desktop-sidebar"><nav className="perps-desk" aria-label="Perps workspace"><h2>Perps wallet</h2><p><a href="/perps">Trading desk</a></p><p><a href="/settings?wallet=perps">Settings</a></p><p><a href="/grant?wallet=perps">Permission</a></p><p><a href="/withdraw?wallet=perps">Withdraw &amp; recover</a></p><p><a href="/home">Return to Spot</a></p></nav></aside> : desktop && (
         <DesktopSidebar
           reads={live.reads}
@@ -683,7 +702,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           if (desktop && next.kind === "tab") setChatDocked(next.tab === "agent" && mine !== null);
           openScreen(next);
         }} onExplore={section => { if (desktop) setSidebarSection(section); }} onQuestion={()=>{setChatDraft(current => current || "Explain my strategy and trading limits. Am I using paper or live trading?");goTab("agent");}}/>}
-        {!isolatedWallet && !mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "solana" && screen.kind !== "wardrobe" && !(screen.kind === "tab" && screen.tab === "home" && account?.status.exists !== true) && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}
+        {!isolatedWallet && !mine && !desktop && screen.kind !== "create" && screen.kind !== "groupchat" && screen.kind !== "solana" && screen.kind !== "wardrobe" && !(screen.kind === "tab" && screen.tab === "home" && account?.status.exists !== true) && !(screen.kind === "tab" && screen.tab === "you" && stoppedAgent) && <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} stoppedAgent={stoppedAgent} stoppedBook={stoppedBook} checking={ownerChecking}/>}
         {selectedWallet === "invalid" && <section className="perps-desk"><h1>Unknown wallet selection</h1><p>No wallet controls were opened.</p><a href="/home">Return to Spot</a></section>}
         {selectedWallet === "perps" && <PerpsWorkspace key={`${epoch}:${screen.kind}`} screen={screen.kind} offered={perps}/>}
         {!isolatedWallet && screen.kind === "grant" && <p><a href="/withdraw?wallet=perps">Perps withdrawal &amp; recovery</a></p>}
@@ -714,6 +733,9 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             onResign={() => {window.location.href=resignHref;}}
             phase={account === null ? (accountFailed ? "failed" : "loading") : account.session.hosted && !account.session.address ? "signed-out" : account.status.exists ? (portfolioRead === "unreadable" ? "failed" : "loading") : "no-agent"}
             hasAgent={account?.status.exists === true}
+            stoppedAgent={stoppedAgent}
+            stoppedBook={stoppedBook}
+            checking={ownerChecking}
             // The phone's only sign-in on Home: the account card that used to
             // carry it is hidden here for anybody without an agent (see the
             // AccountEntry condition above), and the desktop aside has its own.
@@ -796,6 +818,9 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             mine={mine}
             hasAgent={account?.status.exists === true}
             onCreate={() => openScreen({ kind: "create" })}
+            stoppedAgent={stoppedAgent}
+            stoppedBook={stoppedBook}
+            checking={ownerChecking}
           />
         )}
         {/* The trade chime's switch on every device; desktop also has it on
@@ -813,7 +838,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
             beside the sign-out rather than only in an API response. */}
         {screen.kind === "tab" && screen.tab === "you" && (
           <div className="profile-session-actions">
-            {!account?.status.exists && <a href="/create">Create agent</a>}
+            {!account?.status.exists && !stoppedAgent && !ownerChecking && <a href="/create">Create agent</a>}
             {account?.session.hosted && account.session.address && (
               <>
                 <span className="profile-session-who" title={account.session.address}>
@@ -970,7 +995,7 @@ export function App({ solana = false, perps = false }: { solana?: boolean; perps
           onScreen={openScreen}
           onTab={goTab}
         />
-      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView}/>}</aside> : null}
+      ) : desktop ? <aside className="desktop-portfolio">{screen.kind === "create" ? <section className="hosted-entry"><h2>Make it yours.</h2><p>Pick a strategy, set its limits, and save your wallet’s recovery key.</p><p>You can start in paper mode and follow your agent before adding real funds.</p></section> : <AccountEntry account={account} accountFailed={accountFailed} portfolio={portfolioRead} retrying={accountBusy} onRefresh={refreshAccount} onSignedIn={invalidateOwnerView} stoppedAgent={stoppedAgent} stoppedBook={stoppedBook} checking={ownerChecking}/>}</aside> : null}
       {(
           <nav className="tabbar" aria-label="Main navigation">
             {TABS.map((t) => (

@@ -113,6 +113,142 @@ const mount = async (props: { perps?: boolean } = {}) => { await ui.render(React
 const stoppedOn = (key: keyof typeof seen) => seen[key]?.stoppedAgent as { name: string; slug: string; restart: { href: string } } | null | undefined;
 const asked = (path: string) => requests.filter((url) => url === path).length;
 
+describe("a stopped owner, through the shell", () => {
+  it("Home and the account card get the stopped agent, with his value from the owner-only read", async () => {
+    await mount();
+    assert.deepEqual({ name: stoppedOn("home")?.name, slug: stoppedOn("home")?.slug, href: stoppedOn("home")?.restart.href },
+      { name: "hako merry", slug: "hako-merry", href: "/create" });
+    assert.equal(seen.home?.checking, false);
+    assert.equal(seen.home?.mine, null, "still no desk: there is no live grant");
+    assert.ok(asked("/api/agents/hako-merry/own") >= 1, "the figure comes from /own");
+    assert.equal((seen.home?.stoppedBook as { figures?: { equityUsdg?: number } } | undefined)?.figures?.equityUsdg, 1000);
+
+    pathname = "/feed";
+    await ui.render(React.createElement(App));
+    await settle();
+    assert.equal(stoppedOn("entry")?.slug, "hako-merry", "the card beside every other page says it too");
+  });
+
+  it("a record held for a renewal points at the re-signature", async () => {
+    grants = { exists: false, tenant: ME, stored: true };
+    await mount();
+    assert.equal(stoppedOn("home")?.restart.href, "/grant#resign");
+  });
+
+  it("Me gets the stopped card, and the phone's account card above it steps aside", async () => {
+    pathname = "/you";
+    await mount();
+    assert.equal(stoppedOn("you")?.slug, "hako-merry");
+    assert.equal(seen.entry, null, "one stopped card on Me, not two");
+    // Compared as text: a DOM node in a failed assertion's message is inspected, and that hangs.
+    assert.equal(ui.container.querySelector('a[href="/create"]')?.textContent ?? null, null, "no \"Create agent\" beside the sign-out for an agent that exists");
+  });
+
+  it("a newcomer on Me keeps the phone's account card and the way to create", async () => {
+    pathname = "/you";
+    live = { ...live, mine: feedMine(null) };
+    await mount();
+    assert.equal(stoppedOn("you"), null);
+    assert.ok(seen.entry, "the newcomer's account card");
+    assert.equal(ui.container.querySelector('a[href="/create"]')?.textContent, "Create agent");
+  });
+
+  it("a refused or unread owner read gives no figure: null, never a guessed one", async () => {
+    ownAnswer = () => json({ error: "Agent not found" }, 404);
+    await mount();
+    assert.equal(stoppedOn("home")?.slug, "hako-merry");
+    assert.equal(seen.home?.stoppedBook, null);
+  });
+
+  it("on desktop, the Chat tab goes to his way back, not to a second agent", async () => {
+    ui.dom.window.matchMedia = () => ({ matches: true, addEventListener: noop, removeEventListener: noop }) as unknown as MediaQueryList;
+    for (const [status, path] of [[{ exists: false, tenant: ME, stored: true }, "/grant#resign"], [{ exists: false, tenant: ME }, "/create"]] as const) {
+      grants = status;
+      ui.dom.window.history.replaceState(null, "", "/home");
+      await ui.remount(React.createElement(App));
+      await settle();
+      const chat = ui.container.querySelector<HTMLButtonElement>('.tabbar button[data-tour="tab-agent"]');
+      assert.ok(chat, "the Chat tab");
+      await act(async () => { chat.click(); });
+      const at = ui.dom.window.location;
+      assert.equal(`${at.pathname}${at.hash}`, path);
+    }
+  });
+
+  it("re-signing flips the screens back to live, with no stopped card left behind", async () => {
+    await mount();
+    assert.equal(stoppedOn("home")?.slug, "hako-merry");
+    grants = { exists: true, tenant: ME, workerAliveAt: null };
+    await act(async () => { await readAccount(); });
+    await settle();
+    assert.equal(stoppedOn("home"), null);
+    assert.equal((seen.home?.mine as { slug?: string } | null)?.slug, "hako-merry", "the live desk is drawn again");
+  });
+});
+
+describe("who is not told their agent is stopped", () => {
+  it("a Perps-only owner: the Perps wallet is asked, and holds a grant", async () => {
+    perpsGrants = { exists: true, tenant: ME, grant: { smartAccount: `0x${"3".repeat(40)}`, chainId: 4663, purpose: "perps", caps: { perTradeUsdg: 1, dailyUsdg: 1 } } };
+    await mount({ perps: true });
+    assert.equal(asked("/api/grants?wallet=perps"), 1);
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, false);
+    assert.equal(asked("/api/agents/hako-merry/own"), 0, "no stopped card, so no owner read for one");
+  });
+
+  it("with Perps offered and no Perps wallet, he is stopped; with the Perps read down, nothing is claimed", async () => {
+    await mount({ perps: true });
+    assert.equal(stoppedOn("home")?.slug, "hako-merry");
+    await ui.remount(React.createElement("div"));
+    perpsGrants = "down";
+    await ui.render(React.createElement(App, { perps: true }));
+    await settle();
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, false);
+  });
+
+  it("a feed answered for another session: no stopped card, no owner or Perps read", async () => {
+    live = { ...live, feedTenant: OTHER };
+    await mount({ perps: true });
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(asked("/api/agents/hako-merry/own"), 0);
+    assert.equal(asked("/api/grants?wallet=perps"), 0);
+  });
+
+  it("a brand-new account, whose feed names no slug", async () => {
+    live = { ...live, mine: feedMine(null) };
+    await mount({ perps: true });
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, false);
+    assert.equal(asked("/api/grants?wallet=perps"), 0);
+  });
+
+  it("before the feed's first answer: checking, neither stopped nor new", async () => {
+    live = { ...live, feedTenant: undefined, mine: null, reads: { ...live.reads, mine: "unread" } };
+    await mount();
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, true);
+  });
+
+  it("signed out", async () => {
+    session = { hosted: true, address: null };
+    grants = { exists: false, tenant: null };
+    live = { ...live, feedTenant: null };
+    await mount({ perps: true });
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(requests.filter((url) => url !== "/api/auth/session" && url !== "/api/grants").length, 0);
+  });
+
+  it("self-hosted", async () => {
+    session = { hosted: false, address: null };
+    grants = { exists: false };
+    live = { ...live, feedTenant: undefined };
+    await mount({ perps: true });
+    assert.equal(stoppedOn("home"), null);
+    assert.equal(seen.home?.checking, false);
+  });
+});
+
 describe("the profile's owner, through the shell", () => {
   // What an owner's page then does — the book switch, no wire button, and the
   // /own read that replaces "Private" — is profile-render.test.ts's.
