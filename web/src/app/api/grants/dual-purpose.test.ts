@@ -729,3 +729,95 @@ describe("hosted: GET ?wallet=perps answers for the Perps wallet, and only it", 
     assert.ok(readdirSync(path.join(home, "tenants-perps")).length > 0, "other logins' Perps wallets are untouched");
   });
 });
+
+/**
+ * A SPOT RECORD STOPPED FOR A RENEWAL THAT NEVER LANDED is `stored`, as the
+ * Perps branch says of its own (2026-11-18: an owner stopped his agent for a
+ * re-signature and never signed; his screens said "Create your merryman").
+ * The owner's screens read it to point at the re-signature rather than at
+ * creating an agent (terminal/owner-state.ts). Everything else about the Spot
+ * answer is unchanged: still `exists` false, never a grant view, and a record
+ * that was removed, never made, or cannot be verified answers exactly as before.
+ */
+describe("hosted: GET (Spot) says `stored` for a record stopped for a renewal, and nothing else changes", () => {
+  const get = (who: Login | null, query = "") =>
+    route.GET(new Request(`${ORIGIN}/api/grants${query}`, who ? { headers: { cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(who.account.address)}` } } : {}));
+  const stopForRenewal = (who: Login, account: string) => route.DELETE(new Request(`${ORIGIN}/api/grants`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json", cookie: `${auth.SESSION_COOKIE}=${auth.mintSession(who.account.address)}` },
+    body: JSON.stringify({ purpose: "permission-replacement", expectedTenant: who.account.address, expectedAccount: account }),
+  }));
+  before(async () => {
+    // A live grant's answer reads the ledger: this file-backed deploy opens
+    // the home's sqlite file (ledger.ts withReadDb), as the describe above.
+    const { wrapSqlite } = await import("../../../../../worker/src/db");
+    const { applyLedgerSchema } = await import("../../../../../worker/src/store");
+    mkdirSync(home, { recursive: true });
+    const raw = new DatabaseSync(path.join(home, "merrymen.db"));
+    try { await applyLedgerSchema(wrapSqlite(raw)); } finally { raw.close(); }
+  });
+
+  it("a stopped Spot record is `stored`, no-store, with the tenant and nothing of the grant; the Perps answer is untouched", async () => {
+    const sol = await login("sol-stopped");
+    const grant = await spotGrant(sol);
+    assert.equal((await privyPost(grant, "", sol, "spot")).status, 200);
+    const stop = await stopForRenewal(sol, grant.smartAccount);
+    assert.equal(stop.status, 200, await stop.clone().text());
+    assert.equal(await stores.getGrantStore("spot").get(sol.account.address), null, "set-up: the store will not show it");
+    const res = await get(sol);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("cache-control"), "private, no-store");
+    const text = await res.text();
+    assert.deepEqual(JSON.parse(text), { exists: false, tenant: sol.account.address.toLowerCase(), stored: true });
+    assert.ok(!text.toLowerCase().includes(grant.smartAccount.slice(2).toLowerCase()), "no account, key or grant field in the answer");
+    assert.deepEqual(await (await get(sol, "?wallet=perps")).json(), { exists: false, tenant: sol.account.address.toLowerCase() },
+      "a stopped Spot record is not a Perps one");
+  });
+
+  it("a removed record, a login that never had one, another login's live grant, and a signed-out read answer as before", async () => {
+    const ray = await login("ray-removed");
+    const grant = await spotGrant(ray);
+    assert.equal((await privyPost(grant, "", ray, "spot")).status, 200);
+    assert.equal((await stopForRenewal(ray, grant.smartAccount)).status, 200);
+    // Start over's removal (lib/start-over.ts `remove`) of the stopped record.
+    await stores.getGrantStore("spot").remove(ray.account.address);
+    assert.deepEqual(await (await get(ray)).json(), { exists: false, tenant: ray.account.address.toLowerCase() }, "removed: no `stored`");
+
+    const una = await login("una-never");
+    assert.deepEqual(await (await get(una)).json(), { exists: false, tenant: una.account.address.toLowerCase() }, "never made: no `stored`");
+
+    const tia = await login("tia-live");
+    assert.equal((await privyPost(await spotGrant(tia), "", tia, "spot")).status, 200);
+    const live = (await (await get(tia)).json()) as { exists?: boolean; stored?: unknown };
+    assert.equal(live.exists, true, "a live grant is still shown");
+    assert.equal("stored" in live, false);
+
+    const out = await get(null);
+    assert.deepEqual(await out.json(), { exists: false, tenant: null });
+  });
+
+  it("a stopped record the store cannot verify keeps the plain answer: never `stored`, never a 503", async () => {
+    const vic = await login("vic-unverified");
+    const grant = await spotGrant(vic);
+    assert.equal((await privyPost(grant, "", vic, "spot")).status, 200);
+    assert.equal((await stopForRenewal(vic, grant.smartAccount)).status, 200);
+    const file = tenantFile("tenants", vic);
+    const stopped = readFileSync(file, "utf8");
+    const record = JSON.parse(stopped) as { grant: Record<string, unknown> };
+    try {
+      for (const [what, text] of [
+        ["truncated", "{ truncated"],
+        ["a malformed stop marker", JSON.stringify({ ...record, grant: { ...record.grant, replacementStop: {} } })],
+        ["naming the Perps wallet", JSON.stringify({ ...record, grant: { ...record.grant, purpose: "perps" } })],
+      ] as const) {
+        writeFileSync(file, text);
+        const res = await get(vic);
+        assert.equal(res.status, 200, `${what}: ${await res.clone().text()}`);
+        assert.deepEqual(await res.json(), { exists: false, tenant: vic.account.address.toLowerCase() }, what);
+      }
+    } finally {
+      writeFileSync(file, stopped);
+    }
+    assert.equal(((await (await get(vic)).json()) as { stored?: unknown }).stored, true, "the record put back is `stored` again");
+  });
+});
