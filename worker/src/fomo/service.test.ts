@@ -44,6 +44,10 @@ import { FOMO_GROUP_OFF, renderEnvelope } from "./render";
 import * as store from "./store";
 import type {
   ExtendTailData,
+  GhostConfigData,
+  GhostEnterData,
+  GhostPnlData,
+  MarkData,
   OpportunitiesData,
   RankingsData,
   ResearchCoinData,
@@ -1204,6 +1208,100 @@ describe("tails", () => {
 });
 
 // ── Permission, audience, configuration ─────────────────────────────────
+
+describe("tail marks", () => {
+  const MARK = {
+    traderUserId: "11111111-1111-1111-1111-111111111111",
+    eventId: "ev-1",
+    handle: "Uni",
+    tokenId: "solana:1399811149:Mint11111111111111111111111111111111111111111",
+    entryPrice8: "0.05000000",
+    entryAtMs: NOW - 30 * 60_000,
+    entryPool: "PONS / SOL",
+  };
+
+  it("records one told buy's entry mark, and a repeat records nothing", async () => {
+    const h = await harness();
+    const first = await h.invoke<MarkData>("fomo_record_tail_mark", { ...MARK });
+    assert.equal(first.status, "ok");
+    assert.deepEqual(first.data, { action: "mark", eventId: "ev-1", recorded: true });
+    const again = await h.invoke<MarkData>("fomo_record_tail_mark", { ...MARK });
+    assert.equal(again.data?.recorded, false, "a retried tell never double-books");
+    const rows = await store.tailMarksForTrader(h.db, OWNER, MARK.traderUserId, 0);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.entryPrice8, "0.05000000");
+  });
+
+  it("refuses an unshaped price without storing", async () => {
+    const h = await harness();
+    const bad = await h.invoke<MarkData>("fomo_record_tail_mark", { ...MARK, eventId: "ev-2", entryPrice8: "0.050000000" });
+    assert.equal(bad.status, "failed");
+    assert.equal((await store.tailMarksForTrader(h.db, OWNER, MARK.traderUserId, 0)).length, 0);
+  });
+});
+
+describe("ghost paper", () => {
+  const TRADER = "11111111-1111-1111-1111-111111111111";
+  const ENTER = {
+    traderUserId: TRADER, eventId: "ev-g1", handle: "Uni", tokenId: "solana:1399811149:***",
+    entryPrice8: "1.00000000", scoutBudgetMicro: 1_000_000_000,
+  };
+
+  it("papers nothing until ghosting is on for the trader", async () => {
+    const h = await harness();
+    const off = await h.invoke<GhostEnterData>("fomo_ghost_enter", { ...ENTER });
+    assert.deepEqual(off.data, { action: "ghost-enter", eventId: "ev-g1", entered: false, sizeUsdMicro: null, reason: "ghost-off" });
+    assert.deepEqual(await store.ghostPositions(h.db, OWNER, 0), []);
+  });
+
+  it("on opens a scout-cut ghost, and a repeat papers nothing twice", async () => {
+    const h = await harness();
+    await store.setGhostPrefs(h.db, { tenant: OWNER, traderUserId: TRADER, enabled: true, mode: "scout-cut", customUsdMicro: 0, capUsdMicro: 0, nowMs: NOW });
+    const first = await h.invoke<GhostEnterData>("fomo_ghost_enter", { ...ENTER, eventId: "ev-g2" });
+    assert.deepEqual(first.data, { action: "ghost-enter", eventId: "ev-g2", entered: true, sizeUsdMicro: 100_000_000, reason: null });
+    const again = await h.invoke<GhostEnterData>("fomo_ghost_enter", { ...ENTER, eventId: "ev-g2" });
+    assert.equal(again.data?.entered, false, "a retried tell never double-papers");
+    assert.equal(await store.openGhostExposure(h.db, OWNER), 100_000_000);
+  });
+
+  it("the cap bites before the ledger grows past it", async () => {
+    const h = await harness();
+    await store.setGhostPrefs(h.db, { tenant: OWNER, traderUserId: TRADER, enabled: true, mode: "flat", customUsdMicro: 0, capUsdMicro: 150_000_000, nowMs: NOW });
+    const first = await h.invoke<GhostEnterData>("fomo_ghost_enter", { ...ENTER, eventId: "ev-g4", scoutBudgetMicro: null });
+    assert.equal(first.data?.entered, true);
+    const second = await h.invoke<GhostEnterData>("fomo_ghost_enter", { ...ENTER, eventId: "ev-g5", scoutBudgetMicro: null });
+    assert.deepEqual([second.data?.entered, second.data?.reason], [false, "capped"]);
+  });
+
+  it("config on/off/size/stop/reset say what they did", async () => {
+    const h = await harness();
+    const live = await h.invoke<GhostConfigData>("fomo_ghost_config", { trader: TRADER, op: "on", amountMicro: null, mode: null });
+    assert.equal(live.status, "ok");
+    assert.match(live.data?.words ?? "", /Ghosting/);
+    const size = await h.invoke<GhostConfigData>("fomo_ghost_config", { trader: TRADER, op: "size", amountMicro: 250_000_000, mode: null });
+    assert.match(size.data?.words ?? "", /\$250\.00 custom/);
+    const badSize = await h.invoke<GhostConfigData>("fomo_ghost_config", { trader: TRADER, op: "size", amountMicro: null, mode: null });
+    assert.equal(badSize.status, "failed", "size without an amount never validates");
+    const stop = await h.invoke<GhostConfigData>("fomo_ghost_config", { trader: null, op: "stop", amountMicro: null, mode: null });
+    assert.match(stop.data?.words ?? "", /topped|stopped/);
+    const reset = await h.invoke<GhostConfigData>("fomo_ghost_config", { trader: null, op: "reset", amountMicro: null, mode: null });
+    assert.match(reset.data?.words ?? "", /empty/);
+  });
+
+  it("pnl reads the paper record with sample sizes", async () => {
+    const h = await harness();
+    const empty = await h.invoke<GhostPnlData>("fomo_ghost_pnl", {});
+    assert.match(empty.data?.lines.join("\n") ?? "", /\/ghost on/);
+    await store.setGhostPrefs(h.db, { tenant: OWNER, traderUserId: TRADER, enabled: true, mode: "flat", customUsdMicro: 0, capUsdMicro: 0, nowMs: NOW });
+    await store.enterGhostPosition(h.db, {
+      tenant: OWNER, eventKey: "ev-g3", traderUserId: TRADER, handle: "Uni", tokenKey: "k:t",
+      entryPrice8: "1.00000000", sizeUsdMicro: 100_000_000, nowMs: NOW,
+    });
+    await store.settleGhostPosition(h.db, { tenant: OWNER, eventKey: "ev-g3", horizon: "h1", pnlMicro: 25_000_000, atMs: NOW });
+    const pnl = await h.invoke<GhostPnlData>("fomo_ghost_pnl", {});
+    assert.match(pnl.data?.lines.join("\n") ?? "", /over 1 settled/);
+  });
+});
 
 describe("the order of checks", () => {
   it("data access off: not-authorized with ZERO provider calls and no cache read", async () => {
