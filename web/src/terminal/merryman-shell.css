@@ -166,6 +166,19 @@
 }
 .terminal-host .mm-action.primary:hover { background: #b6df2a; }
 
+/* ── a stopped agent (owner-state.ts) ──
+   Its restart and profile are links, drawn as the pills beside them. Its one
+   figure is quiet: a faint label, the value in light type, its date after. */
+.terminal-host a.mm-action,
+.terminal-host a.desktop-fund { text-decoration: none; }
+.terminal-host .stopped-figure { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.terminal-host .stopped-figure strong { font-size: 20px; font-weight: 400; letter-spacing: -0.03em; color: var(--tx); }
+.terminal-host .stopped-figure small { color: var(--faint); font-size: 12px; }
+/* On Me it is the page, across both of the wide layout's columns. */
+.terminal-host .account-page > .stopped-agent { grid-column: 1 / -1; }
+/* The desktop aside draws both links as underlined words on one line. */
+.terminal-host .desktop-portfolio .stopped-agent .flow-secondary { margin-left: 18px; }
+
 .terminal-host .home-leaders-teaser .home-show-more {
   display: inline-flex;
   align-items: center;

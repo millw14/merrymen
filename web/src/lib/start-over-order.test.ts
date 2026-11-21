@@ -102,8 +102,10 @@ describe("Start over", () => {
         BACKUP_KEY: "backup",
         MAINNET: 4663,
         PRESETS: [{ caps: {} }],
+        resetQueuedEarlier: { current: false },
+        onAccountChanged: () => {},
       };
-      for (const setter of ["setDiscarding", "setRenewed", "setGrant", "setBackedUp", "setReveal", "setAck", "setMainnetAck", "setFunding", "setChainId", "setCaps", "setCapText"]) deps[setter] = () => {};
+      for (const setter of ["setDiscarding", "setRenewed", "setGrant", "setBackedUp", "setReveal", "setAck", "setMainnetAck", "setFunding", "setChainId", "setCaps", "setCapText", "setStartOverNote"]) deps[setter] = () => {};
       const handler = new Function(...Object.keys(deps), `${code}; return discard;`)(...Object.values(deps)) as () => Promise<void>;
       await handler();
       if (outcome === "removed") {
@@ -113,5 +115,88 @@ describe("Start over", () => {
         assert.match(errors.at(-1) ?? "", outcome === "refused" ? /could not be archived/ : outcome === "replaced" ? /newer wallet and its backup were kept/ : /could not confirm/);
       }
     }
+  });
+
+  /**
+   * NO RESET QUEUED IS SAID. The server answers what became of the practice
+   * reset (`paperReset`, discard/route.ts): "no-agent" when the grant it finds
+   * the agent through was already stopped, "failed" when the queue could not
+   * be written. Both used to end on the same clean page as a queued one
+   * (2026-11-18). The kill and the browser cleanup are unchanged either way,
+   * and a reset an earlier, incomplete press queued is never denied.
+   */
+  it("says when no practice reset was queued, and says nothing for one that was", async () => {
+    assert.ok(discard);
+    const code = ts.transpileModule(discard.getText(), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    /** One page: its presses share the page's memory of a reset an earlier press queued. */
+    const page = () => {
+      const resetQueuedEarlier = { current: false };
+      return async (body: unknown, status = 200) => {
+        const steps: string[] = [];
+        const notes: (string | null)[] = [];
+        const errors: (string | null)[] = [];
+        let told = 0;
+        const stored = { smartAccount: "0xoriginal", serialized: "original-signature" };
+        const deps: Record<string, unknown> = {
+          discarding: false,
+          funding: null,
+          grant: null,
+          session: { hosted: true, address: "0x" + "a".repeat(40) },
+          loadGrant: () => stored,
+          fetch: async () => { steps.push("request"); return new Response(JSON.stringify(body), { status }); },
+          clearGrant: () => steps.push("clear grant"),
+          setError: (error: string | null) => errors.push(error),
+          setStartOverNote: (note: string | null) => notes.push(note),
+          localStorage: { removeItem: () => steps.push("clear backup") },
+          BACKUP_KEY: "backup",
+          MAINNET: 4663,
+          PRESETS: [{ caps: {} }],
+          resetQueuedEarlier,
+          onAccountChanged: () => { told += 1; },
+        };
+        for (const setter of ["setDiscarding", "setRenewed", "setGrant", "setBackedUp", "setReveal", "setAck", "setMainnetAck", "setFunding", "setChainId", "setCaps", "setCapText"]) deps[setter] = () => {};
+        const handler = new Function(...Object.keys(deps), `${code}; return discard;`)(...Object.values(deps)) as () => Promise<void>;
+        await handler();
+        assert.deepEqual(steps, status === 200 ? ["request", "clear grant", "clear backup"] : ["request"], "the kill and the browser cleanup are what they were");
+        assert.equal(notes[0], null, "a press clears the last note first");
+        assert.equal(told, 1, "the shell reads the account again once the server has answered");
+        return { note: notes.at(-1) ?? null, error: errors.at(-1) ?? null };
+      };
+    };
+    const run = async (body: unknown) => (await page()(body)).note;
+    const none = await run({ ok: true, paperReset: "no-agent" });
+    assert.match(none ?? "", /permission is discarded/);
+    assert.match(none ?? "", /this Start over found no running agent, so no reset was queued/);
+    assert.match(none ?? "", /the paper book was not restarted/);
+    assert.doesNotMatch(none ?? "", /practice/, "the dialog's own words: the paper book");
+    const failed = await run({ ok: true, paperReset: "failed" });
+    assert.match(failed ?? "", /the reset could not be queued, so the paper book was not restarted/);
+    assert.equal(await run({ ok: true, paperReset: "queued" }), null, "a queued reset needs no apology");
+    assert.equal(await run({ ok: true, paperReset: "queued", perps: "stopped" }), null);
+    // An answer that names no outcome is not read as one either way.
+    assert.equal(await run({ ok: true }), null);
+    assert.equal(await run("not json at all"), null);
+
+    // AN INCOMPLETE START OVER THAT QUEUED THE RESET (a Perps wallet that would
+    // not stop: discard/route.ts answers 503 after the Spot half). The first
+    // press says the reset was queued; the retry, which finds no agent left,
+    // does not deny it.
+    const press = page();
+    const incomplete = { error: "Start over incomplete: your agent's grant is discarded, but your Perps wallet's grant could not be revoked yet. Try again.", ownerFacing: true, paperReset: "queued", perps: "not-stopped" };
+    const first = await press(incomplete, 503);
+    assert.match(first.error ?? "", /Start over incomplete/);
+    assert.equal(first.note, "The paper book's reset was queued.");
+    const retry = await press({ ok: true, paperReset: "no-agent", perps: "stopped" });
+    assert.match(retry.note ?? "", /reset was queued by your earlier press/);
+    assert.doesNotMatch(retry.note ?? "", /no reset was queued|not restarted/);
+    // Said once: a later press that finds nothing is this press's own news again.
+    assert.match((await press({ ok: true, paperReset: "no-agent" })).note ?? "", /no reset was queued/);
+    // A 503 whose reset was not queued says only its error.
+    assert.equal((await page()({ ...incomplete, paperReset: "no-agent" }, 503)).note, null);
+    // And the page draws it, as a status, whichever panel the discard left showing.
+    const shell = SRC.indexOf('<div className="grant-shell">');
+    const drawn = SRC.indexOf('{startOverNote && <p role="status">{startOverNote}</p>}', shell);
+    assert.ok(shell > 0 && drawn > shell, "the note is drawn inside the shell");
+    assert.ok(drawn < SRC.indexOf('id="permission-security"', shell) && drawn < SRC.indexOf("{(!grant || switching) && (", shell), "before any panel");
   });
 });

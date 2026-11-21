@@ -362,7 +362,13 @@ function WalletRow({ w }: { w: SavedWallet }) {
   );
 }
 
-export default function GrantPage() {
+/**
+ * `onAccountChanged`: this page changed the server's grant (signed, restored,
+ * renewed, re-armed, stopped or discarded it). The shell reads the account
+ * again at once, so a stopped card, or a live desk, is not left beside the
+ * page for up to a minute saying what is no longer true (owner-state.ts).
+ */
+export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () => void }) {
   /*
     THE SCOUT, not the outlaw. Caps are sealed into the signature BEFORE the
     account has any money in it, so the default cannot be sized to capital
@@ -424,6 +430,10 @@ export default function GrantPage() {
   const [savedWallets, setSavedWallets] = useState<SavedWallet[]>([]);
   const [reArming, setReArming] = useState(false);
   const [discarding, setDiscarding] = useState(false);
+  /** What Start over's practice reset came to, when it needs saying (discard()). */
+  const [startOverNote, setStartOverNote] = useState<string | null>(null);
+  /** An earlier Start over on this page queued the reset, so a retry that finds no agent does not deny it. */
+  const resetQueuedEarlier = useRef(false);
   // ── restore: bring an already-funded wallet back with its owner key ──────
   const [mode, setMode] = useState<"create" | "restore">("restore");
   const [restoreKey, setRestoreKey] = useState("");
@@ -697,6 +707,7 @@ export default function GrantPage() {
       });
       if (r.ok) {
         setServerArmed(true);
+        onAccountChanged?.();
       } else {
         // The button that did nothing. `if (r.ok)` with no else meant a refusal
         // left the banner up, re-enabled the button, and said NOTHING — so the
@@ -888,6 +899,7 @@ export default function GrantPage() {
       // handoff had succeeded. The panel is for a wallet the server has genuinely
       // forgotten, not for one it just accepted.
       setServerArmed(handoff.ok);
+      if (handoff.ok) onAccountChanged?.();
       if (!handoff.ok) setError(handoff.error ?? "the server refused this grant");
       setStatus(null);
     } catch (e) {
@@ -990,6 +1002,7 @@ export default function GrantPage() {
       // worker had the grant whether or not the server took it, so a refusal was
       // reported as a live agent.
       setServerArmed(handoff.ok);
+      if (handoff.ok) onAccountChanged?.();
       if (!handoff.ok) setError(handoff.error ?? "the server refused this grant");
       setStatus(null);
     } catch (e) {
@@ -1072,6 +1085,7 @@ export default function GrantPage() {
         await verifyCurrentAccount();
         await stopAgentForReplacement("spot", session?.hosted ? session.address : undefined, grant.smartAccount, grant.sessionKeyAddress);
         setServerArmed(false);
+        onAccountChanged?.();
         setSecurityMessage("Stop request accepted. The worker stops on its next check; earlier session keys are not yet revoked on-chain.");
       } catch (e) {
         if (!revoke) throw e;
@@ -1274,6 +1288,9 @@ export default function GrantPage() {
     } finally {
       setStatus(null);
       setRenewing(false);
+      // Once the old permission is stopped the server's answer has changed,
+      // renewed or not: live again, or held for this renewal.
+      if (stopped) onAccountChanged?.();
     }
   }
 
@@ -1360,21 +1377,53 @@ export default function GrantPage() {
     const discardedGrant = loadGrant("spot");
     setDiscarding(true);
     setError(null);
+    setStartOverNote(null);
+    let paperReset: unknown;
     try {
       const res = await fetch("/api/grants/discard", { method: "POST", keepalive: true,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ expectedTenant: session?.hosted ? session.address : undefined }) });
       if (!res.ok) {
-        const body = await res.json().catch(() => null) as { error?: string } | null;
+        const body = await res.json().catch(() => null) as { error?: string; paperReset?: unknown } | null;
         setError(body?.error ?? `The server did not discard the grant (${res.status}). Your wallet is still saved here; try again.`);
+        // AN INCOMPLETE START OVER CAN STILL HAVE QUEUED THE RESET: a Perps
+        // wallet that would not stop answers 503 after the Spot half is done
+        // (discard/route.ts startedOver). Said, and kept for the retry, which
+        // finds no agent left to reset.
+        if (body?.paperReset === "queued") {
+          resetQueuedEarlier.current = true;
+          setStartOverNote("The paper book's reset was queued.");
+        }
+        onAccountChanged?.();
         return;
       }
+      paperReset = (await res.json().catch(() => null) as { paperReset?: unknown } | null)?.paperReset;
+      onAccountChanged?.();
     } catch {
       setError("The server could not confirm the kill. Your wallet is still saved here; check the connection and try again.");
       return;
     } finally {
       setDiscarding(false);
     }
+    // NO RESET QUEUED IS SAID, NOT LEFT TO LOOK LIKE ONE. The kill above
+    // happened either way; the practice reset is the half that finds its agent
+    // through the grant (lib/start-over.ts), so a grant already stopped finds
+    // nothing ("no-agent"), and a queue that cannot be written fails. Both
+    // used to end on the same clean page as a reset that was queued
+    // (2026-11-18: an owner whose agent was stopped pressed Start over twice;
+    // neither queued one). Only the words change: nothing here retries it or
+    // touches the book. An answer that names no outcome says nothing.
+    const queuedEarlier = resetQueuedEarlier.current;
+    resetQueuedEarlier.current = false;
+    setStartOverNote(
+      paperReset === "no-agent"
+        ? queuedEarlier
+          ? "Your agent's permission is discarded. The paper book's reset was queued by your earlier press."
+          : "Your agent's permission is discarded, but this Start over found no running agent, so no reset was queued and the paper book was not restarted."
+        : paperReset === "failed"
+          ? "Your agent's permission is discarded, but the reset could not be queued, so the paper book was not restarted."
+          : null,
+    );
     // Another tab or a wallet switch can save a newer grant while the server
     // answers. This response is not permission to clear that wallet or backup.
     const currentGrant = loadGrant("spot");
@@ -1605,6 +1654,7 @@ export default function GrantPage() {
       )}
 
         <div className="grant-shell">
+        {startOverNote && <p role="status">{startOverNote}</p>}
         {grant && !switching && <section id="permission-security" className="grant-summary" style={{ marginBottom: 16 }}>
           <h2>Stop or revoke permissions</h2>
           <p>Stopping this service needs no wallet signature and keeps your agent's memory. Sign a fresh permission to restart. Revocation is a separate owner-authorized transaction on {chainLabel(grant.chainId)} that invalidates earlier session keys, including copies. Your account and recovery access stay available.</p>

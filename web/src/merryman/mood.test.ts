@@ -112,7 +112,7 @@ describe("moods", () => {
 
   it("every phase and state lands on a real clip and a plain word", () => {
     const states = [live, paper, autonomyOf({ mode: null, liveBlocker: null })];
-    for (const phase of ["loading", "failed", "signed-out", "no-agent"] as const) {
+    for (const phase of ["loading", "failed", "signed-out", "no-agent", "stopped"] as const) {
       const m = moodOf({ phase });
       assert.ok(ids.has(m.clip), phase);
       assert.doesNotMatch(m.word, /^[A-Z ]{4,}$/, "never an all-caps machine state");

@@ -42,6 +42,7 @@ import { performanceOf } from "./agent-performance";
 import { useNow } from "./clock";
 import { pausedRecovery, recoveryAutonomy } from "./recovery-view";
 import { notRunningNote } from "./worker-stale";
+import type { StoppedOwner } from "./owner-state";
 
 export type SidebarSection = "markets" | "agents" | "feed" | "board";
 const SECTIONS: { id: SidebarSection; label: string }[] = [
@@ -62,9 +63,15 @@ export function DesktopHeader({
   hideBalances = false,
   wallet = "spot",
   tradingMode,
+  stoppedAgent: stopped = null,
+  checking = false,
   onScreen,
   onTab,
-}: Actions & { active?: Tab; hasAgent?: boolean; hideBalances?: boolean; wallet?: "spot" | "perps"; mine: LiveMine; tradingMode?: ReactNode }) {
+}: Actions & { active?: Tab; hasAgent?: boolean; hideBalances?: boolean; wallet?: "spot" | "perps"; mine: LiveMine; tradingMode?: ReactNode;
+  /** The owner's own Spot agent, stopped (owner-state.ts): the header's one action starts him again, not "Create". Never set in the Perps workspace. */
+  stoppedAgent?: StoppedOwner | null;
+  /** A read that tells a stopped agent from none is out: no action is offered until it answers. */
+  checking?: boolean }) {
   const displayedAutonomy = recoveryAutonomy(mine.autonomy, mine.recovery);
   const accountMenu = useRef<HTMLDetailsElement>(null);
   // "/" OPENS SEARCH, as the hint beside the word says (desktop.css). Only
@@ -125,14 +132,17 @@ export function DesktopHeader({
           <small>{displayedAutonomy.moneyLabel}</small>
           <strong>{money(mine.glance.cashUsd ?? null)}</strong>
         </span>}
-        {!hideBalances && <button
+        {!hideBalances && (!hasAgent && stopped
+          ? <a className="desktop-fund" href={stopped.restart.href}>{stopped.restart.label}</a>
+          : !hasAgent && checking ? null
+          : <button
           className="desktop-fund"
           onClick={() => onScreen({ kind: "deposit" })}
         >
           {hasAgent ? "Add money" : "Create your merryman"}
-        </button>}
+        </button>)}
         <details className="desktop-account-menu" ref={accountMenu} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget as Node|null))closeAccountMenu();}} onKeyDown={event=>{if(event.key==="Escape"){closeAccountMenu();accountMenu.current?.querySelector("summary")?.focus();}}}>
-          <summary><Face name={mine.name} slug={mine.slug}/><span>{hasAgent && mine.name ? mine.name : "Account"}</span><ChevronDown size={14}/></summary>
+          <summary><Face name={stopped && !hasAgent ? stopped.name : mine.name} slug={stopped && !hasAgent ? stopped.slug : mine.slug}/><span>{hasAgent && mine.name ? mine.name : stopped ? stopped.name : "Account"}</span><ChevronDown size={14}/></summary>
           <nav aria-label="Account navigation" onClick={closeAccountMenu}>
             <Link href={wallet === "perps" ? "/perps" : "/you"}>{wallet === "perps" ? "Perps portfolio" : "Portfolio"}</Link>
             {wallet === "spot" && <Link href="/wardrobe">Dress your merryman</Link>}
@@ -141,7 +151,9 @@ export function DesktopHeader({
             <Link href="/withdraw?wallet=perps">Perps withdrawal & recovery</Link>
             {wallet === "spot" && <Link href="/limits">Trading limits</Link>}
             {assistants && <Link href={CONNECT_ASSISTANT_HREF}>Connect to Claude</Link>}
-            {!hasAgent && <Link href={wallet === "perps" ? "/create?for=perps" : "/create"}>{wallet === "perps" ? "Create Perps wallet" : "Create an agent"}</Link>}
+            {!hasAgent && (stopped
+              ? <a href={stopped.restart.href}>{stopped.restart.label}</a>
+              : !checking && <Link href={wallet === "perps" ? "/create?for=perps" : "/create"}>{wallet === "perps" ? "Create Perps wallet" : "Create an agent"}</Link>)}
           </nav>
         </details>
       </div>

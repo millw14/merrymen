@@ -128,6 +128,12 @@ export interface AgentStatus {
    * put would refuse on (one that cannot be read, or names the other wallet),
    * or an active record whose session key cannot be opened, is a 503 instead,
    * never `stored` (storedGrantOwner).
+   *
+   * Hosted Spot too, with `exists` false: the Spot store holds the tenant's
+   * record stopped for a renewal (DELETE purpose permission-replacement) and
+   * no new grant replaced it. Only a record the store can verify is said; one
+   * it cannot keeps the plain `{exists:false}`. The owner's screens read it as
+   * evidence the agent exists and is stopped (terminal/owner-state.ts).
    */
   stored?: true;
   /** Local pending renewal: verified public owner identity, without a signing grant. */
@@ -1127,8 +1133,20 @@ export async function GET(req: Request) {
   if (hostedTenant !== undefined) {
     if (!hostedTenant) return statusResponse({ exists: false, tenant: null });
     let g: StoredGrant | null;
-    if (wallet === "spot") g = await getGrantStore("spot").get(hostedTenant);
-    else {
+    if (wallet === "spot") {
+      g = await getGrantStore("spot").get(hostedTenant);
+      // A SPOT RECORD STOPPED FOR A RENEWAL THAT NEVER LANDED is not "no
+      // agent": the owner's screens say it is stopped, not that one is still
+      // to be made (owner-state.ts). Said as `stored`, as the Perps branch
+      // says it. Nothing else changes: still `exists` false, no grant view,
+      // and a record this cannot verify keeps the answer it always had
+      // rather than turning a Spot read into a 503.
+      if (!g) {
+        let stopped = false;
+        try { stopped = (await getGrantStore("spot").storedGrantOwner(hostedTenant)) !== null; } catch { /* unverified: not said */ }
+        if (stopped) return statusResponse({ exists: false, tenant: hostedTenant, stored: true });
+      }
+    } else {
       // Keyed on the verified tenant, as Spot's is. A store that cannot answer
       // is "could not read", never "no Perps wallet": that answer would hide
       // a wallet the owner may need to stop.

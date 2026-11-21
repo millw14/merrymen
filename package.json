@@ -86,7 +86,7 @@
     "esbuild": "0.28.1",
     "lightweight-charts": "^5.2.1",
     "lucide-react": "^1.41.0",
-    "next": "^15.5.27",
+    "next": "^15.5.29",
     "qrcode-generator": "2.0.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

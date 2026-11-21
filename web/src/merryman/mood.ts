@@ -29,8 +29,12 @@ export type Mood = {
 export type ChatPhase = "idle" | "thinking" | "replying" | "failed";
 
 export type MoodInput = {
-  /** Where the shell is: still reading, failed to read, signed out, signed in with no agent, or an agent. */
-  phase: "loading" | "failed" | "signed-out" | "no-agent" | "agent";
+  /**
+   * Where the shell is: still reading, failed to read, signed out, signed in
+   * with no agent, an agent that is stopped (no live grant, its identity kept:
+   * terminal/owner-state.ts), or an agent.
+   */
+  phase: "loading" | "failed" | "signed-out" | "no-agent" | "stopped" | "agent";
   autonomy?: Pick<Autonomy, "state" | "rule" | "needsOwnerAction" | "headline" | "reason" | "expiresSoon" | "simulated" | "action"> | null;
   /** A fleet recovery hold (recovery-view.ts pausedRecovery). */
   recovery?: boolean;
@@ -62,6 +66,11 @@ export function moodOf(input: MoodInput): Mood {
       return { clip: "happy", bubble: "Hi! I'm a merryman. Sign in and I'll trade for you.", tone: "calm", word: "Hello" };
     case "no-agent":
       return { clip: "happy", bubble: "Dress me up, then I'll start trading for you.", tone: "calm", word: "New" };
+    case "stopped":
+      // The next step, not a fourth "stopped": the chip and the card beside
+      // him already say it. No word on his money or his positions, which this
+      // phase has not read.
+      return { clip: "sleep", bubble: "Start me again when you're ready.", tone: "calm", word: "Stopped" };
   }
 
   const a = input.autonomy;

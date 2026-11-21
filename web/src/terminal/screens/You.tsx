@@ -13,6 +13,8 @@ import { useOutfit } from "@/merryman/wardrobe-store";
 import { CONNECT_ASSISTANT_HREF, useConnectAssistantOffered } from "../assistant-connect";
 import { RecoveryNotice } from "../RecoveryNotice";
 import { pausedRecovery } from "../recovery-view";
+import type { OwnBookRead, StoppedOwner } from "../owner-state";
+import { StoppedAgentCard } from "../StoppedAgent";
 
 export function You({
   onLimits,
@@ -27,6 +29,9 @@ export function You({
   history,
   hasAgent = false,
   onCreate,
+  stoppedAgent = null,
+  stoppedBook,
+  checking = false,
 }: {
   onLimits: () => void;
   onStop: () => void;
@@ -42,10 +47,26 @@ export function You({
   /** Has the server said an agent exists? `mine` is null while it loads too. */
   hasAgent?: boolean;
   onCreate?: () => void;
+  /** This owner's agent, stopped (owner-state.ts): said, with his own value and the way back. */
+  stoppedAgent?: StoppedOwner | null;
+  stoppedBook?: OwnBookRead;
+  /** A read that tells a stopped agent from none has not answered: invite nobody yet. */
+  checking?: boolean;
 }) {
   // Before the early return: a hook may not be skipped on some renders.
   const assistants = useConnectAssistantOffered();
   const { outfit } = useOutfit(mine?.slug ?? null, mine?.slug ?? mine?.name ?? "draft");
+  // A STOPPED AGENT IS NOT "YOUR MERRYMAN LIVES HERE". His name, record and
+  // profile are all still his; the page says he is stopped and how to start him.
+  if (!mine && stoppedAgent)
+    return (
+      <div className="account-page">
+        <header className="account-header">
+          <h1>Me</h1>
+        </header>
+        <StoppedAgentCard stopped={stoppedAgent} book={stoppedBook} />
+      </div>
+    );
   // With no agent, the shell sends a "deposit" to /create (App openScreen),
   // so this button now leads somewhere instead of back to this same page.
   // An owner whose book has not loaded is not offered creation: the account
@@ -54,6 +75,8 @@ export function You({
   if (!mine)
     return hasAgent ? (
       <Empty kind="profile" title="Fetching your merryman…" />
+    ) : checking ? (
+      <Empty kind="profile" title="One moment…" />
     ) : (
       <Empty
         kind="profile"

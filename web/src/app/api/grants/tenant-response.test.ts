@@ -42,6 +42,9 @@ before(async () => {
     asked.push(tenant);
     return null;
   });
+  // Nobody here holds a stopped record either (the Spot GET's `stored`), and
+  // the database is never connected.
+  mock.method(grants.getGrantStore("spot"), "storedGrantOwner", async () => null);
   mock.method(grants.getGrantStore("spot"), "remove", async (tenant: string) => { if (removeDown) throw new Error("database unavailable"); removed.push(tenant); });
   mock.method(grants.getGrantStore("spot"), "stopForReplacement", async (...args: unknown[]) => {
     replacements.push(args);

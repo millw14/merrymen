@@ -23,6 +23,8 @@ import { pausedRecovery, recoveryFunds } from "./recovery-view";
 import { GloamFunding } from "./GloamFunding";
 import { GloamWithdrawal } from "./GloamWithdrawal";
 import { DepositWays } from "./DepositWays";
+import type { OwnBookRead, StoppedOwner } from "./owner-state";
+import { StoppedAgentCard } from "./StoppedAgent";
 
 export interface AccountState {
   session: {hosted: boolean; address: string | null};
@@ -52,7 +54,7 @@ export interface AccountState {
    * today (AgentStatus.energy). Null or absent is "not said yet", never an
    * empty allowance and never a zero balance.
    */
-  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; workerStale?: boolean | null; heartbeatUnread?: true; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: GrantPermissionView & {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}}};
+  status: {exists: boolean; /** Authenticated tenant bound to hosted /api/grants responses. */ tenant?: string | null; /** Hosted, with `exists` false: the record is held, stopped for a renewal (grants/route.ts AgentStatus). */ stored?: true; recovery?: FleetRecoveryView | null; mode?: "paper" | "live" | "idle" | null; liveBlocker?: string | null; workerAliveAt?: number | null; workerStale?: boolean | null; heartbeatUnread?: true; gasSponsored?: boolean | null; balances?: GrantBalances; energy?: EnergyStatus | null; grant?: GrantPermissionView & {smartAccount: string; chainId:number; caps:{perTradeUsdg:number; dailyUsdg:number}}};
 }
 // Moved to its own module so it can be executed in a test; re-exported so no import moves.
 export { requestJson } from "./request-json";
@@ -111,8 +113,12 @@ export function WalletSignIn({onDone}:{onDone:()=>void}) {
  * `retrying` is a pass already running. The failure stays true until a read
  * succeeds, so without it "We couldn't load your account" stood unchanged
  * through the retry the reader had just asked for, and Try again looked broken.
+ *
+ * A STOPPED AGENT IS NOT "YOUR AGENT STARTS HERE" (owner-state.ts): `stoppedAgent`
+ * says so, with the owner's own value (`stoppedBook`) and the way back, and
+ * `checking` claims neither while the read that tells them apart is out.
  */
-export function AccountEntry({account,accountFailed=false,portfolio="ok",retrying=false,onRefresh,onSignedIn}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;retrying?:boolean;onRefresh:()=>void;onSignedIn:()=>void}) {
+export function AccountEntry({account,accountFailed=false,portfolio="ok",retrying=false,onRefresh,onSignedIn,stoppedAgent=null,stoppedBook,checking=false}:{account:AccountState|null;accountFailed?:boolean;portfolio?:ReadState;retrying?:boolean;onRefresh:()=>void;onSignedIn:()=>void;stoppedAgent?:StoppedOwner|null;stoppedBook?:OwnBookRead;checking?:boolean}) {
   if(account?.status.exists) {
     if (pausedRecovery(account.status.recovery)) return <section className="hosted-entry"><h2>Your agent</h2><RecoveryNotice recovery={account.status.recovery} funds={recoveryFunds(account.status)}/><RetryButton retrying={retrying} onRetry={onRefresh}/></section>;
     if(portfolio==="unread") return <section className="hosted-entry"><h2>Your agent</h2><SkeletonRows rows={2} label="Loading your portfolio"/></section>;
@@ -122,6 +128,8 @@ export function AccountEntry({account,accountFailed=false,portfolio="ok",retryin
   if(!account || (accountFailed && !account.status.exists)) return accountFailed
     ? <section className="hosted-entry"><h2>Your agent</h2><p role="status">{retrying ? "Trying to load your account again…" : <>We couldn&apos;t load your account. It will retry on its own.</>}</p><RetryButton retrying={retrying} onRetry={onRefresh}/></section>
     : <section className="hosted-entry"><SkeletonRows rows={2} label="Loading your account"/></section>;
+  if(stoppedAgent) return <StoppedAgentCard stopped={stoppedAgent} book={stoppedBook}/>;
+  if(checking) return <section className="hosted-entry"><SkeletonRows rows={2} label="Loading your account"/></section>;
   return <section className="hosted-entry"><h2>Your agent starts here</h2><p>Create an agent to manage your portfolio and follow its trades here.</p>{account.session.hosted && !account.session.address ? <SignIn onDone={onSignedIn}/> : <a className="flow-primary" href="/create">Create an agent</a>}</section>;
 }
 export function FundingPanel({mode,account,onClose}:{mode:"deposit"|"withdraw";account:AccountState;onClose:()=>void}) {

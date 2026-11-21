@@ -11,6 +11,8 @@ import { Board } from "./Board";
 import { MerrymanHero } from "@/merryman/MerrymanHero";
 import { moodOf, type MoodInput } from "@/merryman/mood";
 import { DRAFT, useOutfit } from "@/merryman/wardrobe-store";
+import type { OwnBookRead, StoppedOwner } from "../owner-state";
+import { StoppedFigure, StoppedWords } from "../StoppedAgent";
 
 /**
  * HOME IS YOUR MERRYMAN.
@@ -25,6 +27,8 @@ import { DRAFT, useOutfit } from "@/merryman/wardrobe-store";
  * three that opens Explore → Leaders.
  *
  * For somebody with no agent he is the invitation: dress one, then create it.
+ * For an owner whose agent is stopped he is that agent, saying so, with the one
+ * way to start him again (owner-state.ts) — never the newcomer's invitation.
  */
 export function Home({
   agents,
@@ -41,6 +45,9 @@ export function Home({
   hasAgent,
   phase,
   signIn,
+  stoppedAgent: stopped = null,
+  stoppedBook,
+  checking = false,
   read,
   retired = null,
   retiredAgents = [],
@@ -88,6 +95,15 @@ export function Home({
    * mounted sign-in controls would both try to prove the same session.
    */
   signIn?: ReactNode;
+  /**
+   * THIS OWNER'S AGENT, STOPPED: no live grant, but the session's own feed
+   * still names it (owner-state.ts). Drawn instead of the invitation, with his
+   * value from the owner-only read (`stoppedBook`) and the one way back.
+   */
+  stoppedAgent?: StoppedOwner | null;
+  stoppedBook?: OwnBookRead;
+  /** A read that tells a stopped agent from none has not answered: invite nobody yet. */
+  checking?: boolean;
   /** Whether the leaderboard READ landed — quiet and unreadable are different. */
   read: import("../live").ReadState;
   /** Accounts the board folded into a count. See Board. */
@@ -110,14 +126,17 @@ export function Home({
   const mood = moodOf(
     mine
       ? { phase: "agent", autonomy: mine.autonomy, recovery: recovery !== null }
-      : { phase: phase ?? (hasAgent ? "loading" : "no-agent") },
+      : stopped ? { phase: "stopped" }
+      : { phase: checking ? "loading" : phase ?? (hasAgent ? "loading" : "no-agent") },
   );
   // HIS LOOK: the owner's own choice for their agent, or the one being dressed
   // before an agent exists. Seeded on the slug otherwise, like every other
   // merryman on the board.
-  const outfitId = mine?.slug ?? DRAFT;
-  const { outfit } = useOutfit(outfitId, mine?.slug ?? mine?.name ?? DRAFT);
-  const name = mine?.name ?? "Your merryman";
+  // A stopped agent keeps his own look: the slug is still his.
+  const ownSlug = mine?.slug ?? stopped?.slug ?? null;
+  const outfitId = ownSlug ?? DRAFT;
+  const { outfit } = useOutfit(outfitId, ownSlug ?? mine?.name ?? DRAFT);
+  const name = mine?.name ?? stopped?.name ?? "Your merryman";
   const renew = mine && (mine.autonomy.rule === "expired" || mine.autonomy.expiresSoon) && !recovery && onResign;
 
   return (
@@ -156,6 +175,23 @@ export function Home({
                 {onWardrobe && <button type="button" className="mm-action" onClick={onWardrobe}><Shirt size={18} aria-hidden="true"/> Dress</button>}
               </div>
             </>
+          ) : stopped ? (
+            <>
+              <div className="hero empty">
+                <StoppedWords stopped={stopped} />
+                <StoppedFigure book={stoppedBook} />
+              </div>
+              <div className="mm-actions">
+                <a className="mm-action primary" href={stopped.restart.href}><Sparkles size={18} aria-hidden="true"/> {stopped.restart.label}</a>
+                <a className="mm-action" href={stopped.profile}>View profile</a>
+              </div>
+            </>
+          ) : checking ? (
+            // Neither the invitation nor a stopped card until the read that
+            // tells them apart has answered: either could be untrue.
+            <div className="hero empty" aria-busy="true">
+              <h2>One moment…</h2>
+            </div>
           ) : hasAgent ? (
             // AN OWNER WHOSE NUMBERS HAVE NOT LANDED is not a newcomer: no
             // invitation to create what they already have. The account card
