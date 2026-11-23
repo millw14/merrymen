@@ -130,3 +130,22 @@ it("SDKs that pin zod 3 accept and reject these sample payloads on the patched z
   rejects(CreatePolicyBodySchema, { scope: "account", rules: Array(101).fill(rule) }, "rules");
   rejects(CreatePolicyBodySchema, { scope: "account", rules: [{ ...rule, operation: "unknown" }] }, "rules.0.operation");
 });
+
+it("each package given the root zod still declares zod 3 itself; once one stops, drop its override", () => {
+  // Remove an override when its package no longer asks for zod 3: Privy 3.52.x
+  // (drops x402), a Reown appkit-wallet on zod 4 (appkit PRs #5830/#5844) that
+  // WalletConnect and Privy pin, or a cdp-sdk that accepts zod 4 (PR #867).
+  const root = fileURLToPath(new URL("../../../", import.meta.url));
+  const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+  const overridden = Object.entries(manifest.overrides).filter(([, value]) => (value as { zod?: string }).zod === "$zod").map(([name]) => name).sort();
+  assert.deepEqual(overridden, ["@coinbase/cdp-sdk", "@reown/appkit-wallet", "x402"]);
+  const { packages } = JSON.parse(readFileSync(path.join(root, "package-lock.json"), "utf8"));
+  for (const name of overridden) {
+    const copies = Object.keys(packages).filter((location) => location === `node_modules/${name}` || location.endsWith(`/node_modules/${name}`));
+    assert.ok(copies.length > 0, `${name} is no longer installed: drop its zod override`);
+    for (const location of copies) {
+      const { version, dependencies } = JSON.parse(readFileSync(path.join(root, location, "package.json"), "utf8"));
+      assert.match(dependencies?.zod ?? "none", /^[~^]?3\.\d+\.\d+$/, `${location}@${version} declares zod ${dependencies?.zod ?? "none"}, not a zod 3 range: drop the ${name} zod override once no copy asks for zod 3, and update this test`);
+    }
+  }
+});

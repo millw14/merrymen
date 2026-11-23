@@ -123,9 +123,16 @@ export async function verifyNativeModules(installedRoot) {
  * @privy-io/react-auth under x402, @coinbase/cdp-sdk and @reown/appkit-wallet
  * (also nested under @wagmi/connectors); no zod 3 release is patched. The
  * package.json overrides now give those three packages Merrymen's own patched
- * zod 4, assertPatched above rejects any zod older than 4.6.6, and
- * web/src/lib/dependency-compatibility.test.ts checks that their schemas
- * still accept and reject as before.
+ * zod 4 (Milla's decision of 2026-11-24, docs/perps-paper-launch.md), and
+ * assertPatched above rejects any zod older than 4.6.6. With those copies
+ * gone, the abitype copies under @coinbase/cdp-sdk (1.0.6) and
+ * @wagmi/connectors (1.0.8) also resolve the root zod 4, against their
+ * optional peer "^3 >=3.22.0"; only cdp-sdk's policy schemas import
+ * abitype/zod. web/src/lib/dependency-compatibility.test.ts checks that these
+ * SDKs accept and reject sample payloads on zod 4, and fails once any of them
+ * stops declaring zod 3. Drop an override when: Privy 3.52.x drops x402; a
+ * Reown appkit-wallet on zod 4 (appkit PRs #5830/#5844) is what WalletConnect
+ * and Privy pin; cdp-sdk accepts zod 4 (cdp-sdk PR #867).
  */
 export function evaluateAudit(audit) {
   if (audit.error) throw new Error(`npm audit failed: ${JSON.stringify(audit.error)}`);
