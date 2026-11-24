@@ -463,7 +463,7 @@ describe("child fomo file: tails", () => {
     ended: false,
     consider: false,
     events: [tev(1), tev(2, { kind: "thesis", text: "their words" })],
-    totals: null,
+    totals: null, markTally: null,
     ...over,
   });
 

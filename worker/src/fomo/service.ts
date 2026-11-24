@@ -115,6 +115,10 @@ import {
   type ResolveData,
   type TailData,
   type ExtendTailData,
+  type MarkData,
+  type GhostConfigData,
+  type GhostEnterData,
+  type GhostPnlData,
   type ThesisView,
   type TokenActivityData,
   type TokenRef,
@@ -127,6 +131,7 @@ import {
   type UntailData,
   type WatchData,
 } from "./tools";
+import { ghostPnlMicro, ghostSummaryLines, resolveGhostSize, summarizeGhost } from "./ghost";
 import type {
   CapabilityRecord,
   CoinDossier,
@@ -3404,6 +3409,159 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
    * tails are switched off or there is no live feed, because it keeps
    * telling what nothing would tell. Local only: no provider call, ever.
    */
+  /**
+   * Record one told tail buy's entry mark for the tail leaderboard. The child
+   * calls this after a buy notice SENDS (telegram/notifier.ts): the mark and
+   * the sent log share at-most-once semantics, so a mark means "told". Local
+   * only: no provider call, ever. A repeat records nothing.
+   */
+  async function toolRecordTailMark(ic: Inv, args: ToolArgs["fomo_record_tail_mark"]): Promise<FomoEnvelope<MarkData>> {
+    const a = new Answer();
+    a.requested = { eventId: args.eventId, tokenId: args.tokenId };
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const recorded = await store.recordTailMark(db, {
+      tenant: ic.cc.tenant,
+      eventKey: args.eventId,
+      traderUserId: args.traderUserId,
+      handle: args.handle,
+      tokenKey: args.tokenId,
+      entryPrice8: args.entryPrice8,
+      entryAtMs: args.entryAtMs,
+      entryPool: args.entryPool ?? "",
+      nowMs: ic.now,
+    });
+    return finish(ic, a, {
+      cls: "profile",
+      mode: "cached-ok",
+      subject: null,
+      data: { action: "mark", eventId: args.eventId, recorded },
+      rows: recorded ? 1 : 0,
+      essential: [],
+      status: "ok",
+    });
+  }
+
+  async function toolGhostEnter(ic: Inv, args: ToolArgs["fomo_ghost_enter"]): Promise<FomoEnvelope<GhostEnterData>> {
+    const a = new Answer();
+    a.requested = { eventId: args.eventId, tokenId: args.tokenId };
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const tenant = ic.cc.tenant;
+    const done = (entered: boolean, sizeUsdMicro: number | null, reason: string | null): FomoEnvelope<GhostEnterData> =>
+      finish(ic, a, {
+        cls: "profile", mode: "cached-ok", subject: null,
+        data: { action: "ghost-enter", eventId: args.eventId, entered, sizeUsdMicro, reason },
+        rows: entered ? 1 : 0, essential: [], status: "ok",
+      });
+    const prefs = await store.getGhostPrefs(db, tenant, args.traderUserId).catch(() => null);
+    if (!prefs || !prefs.enabled) return done(false, null, "ghost-off");
+    const size = resolveGhostSize({ mode: prefs.mode === "flat" || prefs.mode === "custom" ? prefs.mode : "scout-cut", customUsdMicro: prefs.customUsdMicro }, args.scoutBudgetMicro);
+    if (size === null) return done(false, null, "no-budget");
+    if (prefs.capUsdMicro > 0) {
+      const open = await store.openGhostExposure(db, tenant).catch(() => 0);
+      if (open + size > prefs.capUsdMicro) return done(false, size, "capped");
+    }
+    const entered = await store.enterGhostPosition(db, {
+      tenant, eventKey: args.eventId, traderUserId: args.traderUserId, handle: args.handle,
+      tokenKey: args.tokenId, entryPrice8: args.entryPrice8, sizeUsdMicro: size, nowMs: ic.now,
+    }).catch(() => false);
+    return done(entered, size, entered ? null : "already");
+  }
+
+  /** Resolve a config ref to a tailed trader id, like toolExtendTail: active tails first, then our own handle record. */
+  async function ghostTraderId(tenant: string, ref: TraderRef): Promise<{ userId: string; handle: string | null } | null> {
+    const active = await store.activeTails(db, tenant, Date.now()).catch(() => []);
+    const match =
+      ref.kind === "user-id"
+        ? active.find((t) => t.userId === ref.value)
+        : active.find((t) => (t.handle ?? "").toLowerCase() === ref.value.toLowerCase());
+    if (match) return { userId: match.userId, handle: match.handle };
+    if (ref.kind === "handle") {
+      const known = await store.traderByHandle(db, ref.value).catch(() => null);
+      if (known) return { userId: known.userId, handle: known.handle ?? ref.value };
+    }
+    if (ref.kind === "user-id") return { userId: ref.value, handle: null };
+    return null;
+  }
+
+  async function toolGhostConfig(ic: Inv, args: ToolArgs["fomo_ghost_config"]): Promise<FomoEnvelope<GhostConfigData>> {
+    const a = new Answer();
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const tenant = ic.cc.tenant;
+    const say = (op: string, handle: string | null, words: string): FomoEnvelope<GhostConfigData> =>
+      finish(ic, a, {
+        cls: "profile", mode: "cached-ok", subject: null,
+        data: { action: "ghost-config", op, handle, words }, rows: 1, essential: [], status: "ok",
+      });
+    if (args.op === "stop") {
+      const n = await store.disableAllGhosts(db, tenant, ic.now);
+      return say("stop", null, n === 0 ? "Ghost paper was already stopped: nothing was being papered." : `Ghost paper stopped: ${n} ${n === 1 ? "trader" : "traders"} switched off. Open positions keep settling; nothing new opens.`);
+    }
+    if (args.op === "reset") {
+      const n = await store.resetGhosts(db, tenant);
+      return say("reset", null, n === 0 ? "The ghost ledger was already empty." : `Ghost ledger wiped: ${n} ${n === 1 ? "position" : "positions"} deleted. Prefs survive; papering stays as configured.`);
+    }
+    const ref = args.trader;
+    if (!ref) return say(args.op, null, "Which trader? Send /ghost with their handle.");
+    const who = await ghostTraderId(tenant, ref);
+    if (!who) return say(args.op, ref.kind === "handle" ? ref.value : null, `I don't know that trader. Ghosting covers tailed traders — /tail them first, then /ghost on.`);
+    const cur = (await store.getGhostPrefs(db, tenant, who.userId).catch(() => null)) ?? {
+      traderUserId: who.userId, enabled: false, mode: "scout-cut", customUsdMicro: 0, capUsdMicro: 0, updatedAtMs: ic.now,
+    };
+    const who2 = who.handle ? `@${who.handle.replace(/^@+/, "")}` : "that trader";
+    const save = async (p: typeof cur): Promise<void> => {
+      await store.setGhostPrefs(db, {
+        tenant, traderUserId: who.userId, enabled: p.enabled, mode: p.mode,
+        customUsdMicro: p.customUsdMicro, capUsdMicro: p.capUsdMicro, nowMs: ic.now,
+      });
+    };
+    if (args.op === "on") {
+      await save({ ...cur, enabled: true });
+      return say("on", who.handle, `Ghosting ${who2}: their told buys open ghost positions at ${cur.mode === "flat" ? "$100 flat" : cur.mode === "custom" ? "your custom size" : "ten percent of the scout budget"}. Fake money only.`);
+    }
+    if (args.op === "off") {
+      await save({ ...cur, enabled: false });
+      return say("off", who.handle, `Ghosting ${who2} off: nothing new opens. Open positions keep settling.`);
+    }
+    if (args.op === "mode" && args.mode) {
+      await save({ ...cur, mode: args.mode });
+      return say("mode", who.handle, `Ghost size for ${who2}: ${args.mode === "flat" ? "$100 flat" : args.mode === "custom" ? "custom (send /ghost size <amount>)" : "ten percent of the scout budget"}.`);
+    }
+    if (args.op === "size" && typeof args.amountMicro === "number") {
+      if (args.amountMicro < 1_000_000 || args.amountMicro > 10_000_000_000) {
+        return say("size", who.handle, "Ghost size runs $1 to $10,000. Send /ghost size <amount> inside that.");
+      }
+      await save({ ...cur, mode: "custom", customUsdMicro: args.amountMicro });
+      return say("size", who.handle, `Ghost size for ${who2}: $${(args.amountMicro / 1_000_000).toFixed(2)} custom${cur.capUsdMicro > 0 ? ", still under your cap" : ""}.`);
+    }
+    if (args.op === "cap" && typeof args.amountMicro === "number") {
+      await save({ ...cur, capUsdMicro: args.amountMicro });
+      return say("cap", who.handle, args.amountMicro === 0 ? `Ghost cap for ${who2} lifted.` : `Ghost cap for ${who2}: $${(args.amountMicro / 1_000_000).toFixed(2)} open exposure, then new ghosts wait.`);
+    }
+    return say(args.op, who.handle, "That ghost command needs more: /ghost on, /ghost off, /ghost size <amount>, /ghost mode <scout-cut|flat|custom>, /ghost cap <amount>, /ghost stop, /ghost reset.");
+  }
+
+  async function toolGhostPnl(ic: Inv, args: ToolArgs["fomo_ghost_pnl"]): Promise<FomoEnvelope<GhostPnlData>> {
+    const a = new Answer();
+    a.requested = { days: args.days };
+    a.add(localSection("owner-state", true, ic.now, "live"));
+    const tenant = ic.cc.tenant;
+    const rows = await store.ghostPositions(db, tenant, ic.now - args.days * 86_400_000).catch(() => []);
+    const positions = rows.flatMap((r) => {
+      const entry = Number(r.entryPrice8);
+      if (!Number.isFinite(entry) || entry <= 0) return [];
+      return [{
+        eventKey: r.eventKey, traderUserId: r.traderUserId, handle: r.handle,
+        sizeUsdMicro: r.sizeUsdMicro, entryPriceUsd: entry, h1PnlMicro: r.h1PnlMicro, h24PnlMicro: r.h24PnlMicro,
+      }];
+    });
+    const open = await store.openGhostExposure(db, tenant).catch(() => 0);
+    const lines = ghostSummaryLines(summarizeGhost(positions), open);
+    return finish(ic, a, {
+      cls: "profile", mode: "cached-ok", subject: null,
+      data: { action: "ghost-pnl", lines }, rows: positions.length, essential: [], status: "ok",
+    });
+  }
+
   async function toolExtendTail(ic: Inv, args: ToolArgs["fomo_extend_tail"]): Promise<FomoEnvelope<ExtendTailData>> {
     const a = new Answer();
     a.requested = { trader: args.trader.kind, hours: args.hours };
@@ -3661,6 +3819,14 @@ export function createFomoService(deps: FomoServiceDeps): FomoServiceExt {
         return toolUntail(ic, args as ToolArgs[typeof tool]);
       case "fomo_extend_tail":
         return toolExtendTail(ic, args as ToolArgs[typeof tool]);
+      case "fomo_record_tail_mark":
+        return toolRecordTailMark(ic, args as ToolArgs[typeof tool]);
+      case "fomo_ghost_config":
+        return toolGhostConfig(ic, args as ToolArgs[typeof tool]);
+      case "fomo_ghost_enter":
+        return toolGhostEnter(ic, args as ToolArgs[typeof tool]);
+      case "fomo_ghost_pnl":
+        return toolGhostPnl(ic, args as ToolArgs[typeof tool]);
     }
   }
 
