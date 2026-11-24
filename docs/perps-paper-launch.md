@@ -419,7 +419,43 @@ v3 export inside Zod 4 also retains the affected behavior. This advisory stays
 open for release review; the audit is not clean merely because the application's
 direct copy is patched. The existing working directory had newer Privy packages
 than its lockfile, so final verification must use a separate clean `npm ci`
-installation that matches the lock exactly.
+installation that matches the lock exactly. (Superseded on 2026-11-24: see
+the scoped Zod 4 overrides below.)
+
+### Scoped Zod 4 overrides: 2026-11-24
+
+Milla decided to ship scoped overrides that point `x402`, `@coinbase/cdp-sdk`
+and `@reown/appkit-wallet` at the root Zod 4 (4.6.7, range `^4.6.7`). This
+replaces the October 30 position above: GHSA-mrhx-c7xc-m3w5 has no Zod 3
+patch, and the CI exception for the four Zod 3 copies ended after 2026-11-22.
+The lock change removes those four copies and raises the root range to
+`^4.6.7`; no installed version moved, Privy, wagmi, viem and WalletConnect
+included.
+
+Validation, and its limits:
+
+- A production build compared with one of main built at the same path differs
+  in code only in x402's lazily loaded chunks, now on Zod 4, and the webpack
+  runtime's chunk map; the rest is manifests and per-build keys. Privy's
+  `useX402Fetch` is their only importer, `web/src` never calls it, and nothing
+  in the build requests those chunks.
+- Reown's `W3mFrameSchema` and the CDP policy schemas are not in `.next`.
+- `web/src/lib/dependency-compatibility.test.ts` checks that the three SDKs
+  accept and reject sample payloads on Zod 4, and fails once any of them stops
+  declaring Zod 3.
+- `npm@10.9.11 ci --dry-run` accepts the lock. CI's build, pack, global
+  install and `verify-installed` steps, run locally on Node 22 (npm 10.9.9)
+  and Node 26 (npm 11.20.0), pass with 0 vulnerabilities.
+- x402's prebuilt paywall bundle keeps its own Zod 3 inside; nothing imports
+  it, and the override cannot reach it.
+- Not done: a live Privy sign-in or embedded-wallet creation in a browser; a
+  GitHub CI run before this entry (the local runs were macOS arm64); and a
+  comparison of the sample payloads against Zod 3 (they are spot checks).
+
+Remove each override when its trigger ships: Privy 3.52.x, which drops `x402`
+(3.52.0 is published but is a separate wallet upgrade); a Reown
+`appkit-wallet` on Zod 4 that WalletConnect and Privy pin (appkit PRs #5830
+and #5844); a `cdp-sdk` that accepts Zod 4 (cdp-sdk PR #867).
 
 ## Capture and replay procedure
 
