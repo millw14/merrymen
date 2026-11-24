@@ -557,7 +557,7 @@ export type FomoReadToolName =
   | "fomo_get_research_status";
 
 /** Authorized mutations — a separate registry, never offered where read-only tools are. */
-export type FomoMutationToolName = "fomo_watch_coin" | "fomo_unwatch_coin" | "fomo_tail_trader" | "fomo_untail_trader" | "fomo_extend_tail";
+export type FomoMutationToolName = "fomo_watch_coin" | "fomo_unwatch_coin" | "fomo_tail_trader" | "fomo_untail_trader" | "fomo_extend_tail" | "fomo_record_tail_mark";
 
 export type FomoToolName = FomoReadToolName | FomoMutationToolName;
 
