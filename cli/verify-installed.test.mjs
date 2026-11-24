@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { assertPatched, evaluateAudit, physicalLock, ZOD3_EXCEPTION } from "./verify-installed.mjs";
+import { assertPatched, evaluateAudit, physicalLock } from "./verify-installed.mjs";
 
-const patched = Object.fromEntries(Object.entries({ postcss: "8.5.28", ws: "8.22.0", "bn.js": "4.12.5", uuid: "11.1.1", "@walletconnect/utils": "2.21.9" }).map(([name, version]) => [`node_modules/${name}`, { name, version }]));
+const patched = Object.fromEntries(Object.entries({ postcss: "8.5.28", ws: "8.22.0", "bn.js": "4.12.5", uuid: "11.1.1", "@walletconnect/utils": "2.21.9", zod: "4.6.7" }).map(([name, version]) => [`node_modules/${name}`, { name, version }]));
 
 test("physical scan includes hidden vulnerable duplicates and ignores a misleading shrinkwrap", (t) => {
   const directory = mkdtempSync(path.join(tmpdir(), "merrymen-verify-test-"));
@@ -63,68 +63,40 @@ test("empty hoisted placeholders are accepted only when required dependencies an
   assert.throws(() => physicalLock(directory), /package\.json/);
 });
 
-// npm audit's report, as it reads for the installed tree on 2026-10-25.
+// npm audit's report, as it read for the installed tree on 2026-10-25.
 const advisory = (id, severity, title) => ({ source: 1, name: id, title, url: `https://github.com/advisories/${id}`, severity, range: "*" });
 const ZOD = advisory("GHSA-mrhx-c7xc-m3w5", "high", "Zod can exhaust memory while validating oversized constrained collections");
 const NEXT = advisory("GHSA-2464-fhr4-w9xw", "critical", "Next.js: Unauthenticated Remote Code Execution in Image Optimization API");
 const zodUnder = (parent) => `node_modules/merrymen/node_modules/${parent}/node_modules/zod`;
-const sdkCopies = [...ZOD3_EXCEPTION.parents.map(zodUnder), "node_modules/merrymen/node_modules/@wagmi/connectors/node_modules/@reown/appkit-wallet/node_modules/zod"];
-const zod3 = (nodes) => Object.fromEntries(nodes.map((node) => [node, { name: "zod", version: node.includes("appkit-wallet") ? "3.22.4" : "3.25.76" }]));
+// The four copies the 2026-11-22 exception used to excuse.
+const sdkCopies = ["@coinbase/cdp-sdk", "@reown/appkit-wallet", "@wagmi/connectors", "x402"].map(zodUnder);
 const report = (vulnerabilities) => ({ vulnerabilities, metadata: { vulnerabilities: { total: Object.keys(vulnerabilities).length } } });
 const zodFinding = (nodes, via = [ZOD]) => ({ name: "zod", severity: "high", via, nodes });
 const dependent = (name, ...via) => ({ name, severity: "high", via, nodes: [`node_modules/merrymen/node_modules/${name}`] });
-const october = new Date("2026-10-25T12:00:00Z");
 
-test("the zod 3 exception excuses only the four SDKs' copies and what is flagged through them", () => {
+test("a clean report passes, and npm's own failure is never a pass", () => {
+  assert.doesNotThrow(() => evaluateAudit(report({})));
+  assert.throws(() => evaluateAudit({ error: { code: "ENOAUDIT", summary: "registry unreachable" } }), /npm audit failed/);
+});
+
+test("the zod 3 exception is gone: the SDK copies it excused fail the audit and the physical check", () => {
   const audit = report({
     zod: zodFinding(sdkCopies),
     x402: dependent("x402", "zod", "wagmi"),
-    wagmi: dependent("wagmi", "@wagmi/connectors"),
-    "@wagmi/connectors": dependent("@wagmi/connectors", "zod", "@reown/appkit-wallet", "@coinbase/cdp-sdk"),
-    "@coinbase/cdp-sdk": dependent("@coinbase/cdp-sdk", "zod"),
-    "@reown/appkit-wallet": dependent("@reown/appkit-wallet", "zod"),
     "@privy-io/react-auth": dependent("@privy-io/react-auth", "x402", "@reown/appkit-wallet"),
-    merrymen: dependent("merrymen", "@privy-io/react-auth", "zod"),
   });
-  assert.deepEqual(evaluateAudit(audit, zod3(sdkCopies), october), sdkCopies);
-  assert.deepEqual(evaluateAudit(report({}), {}, october), []);
+  assert.throws(() => evaluateAudit(audit), /3 vulnerable packages: zod \(high: https:\/\/github\.com\/advisories\/GHSA-mrhx-c7xc-m3w5\); x402 \(high: via zod, via wagmi\)/);
+  for (const [node, version] of [[sdkCopies[0], "3.25.76"], [sdkCopies[1], "3.22.4"], ["node_modules/merrymen/node_modules/zod", "4.6.5"]]) {
+    assert.throws(() => assertPatched({ ...patched, [node]: { name: "zod", version } }), new RegExp(`Unpatched installed dependency: ${node}@${version.replaceAll(".", "\\.")}`));
+  }
+  assert.doesNotThrow(() => assertPatched({ ...patched, [sdkCopies[3]]: { name: "zod", version: "4.6.6" } }));
 });
 
-test("Privy's api-base left the exception on 2026-11-04: a zod 3 copy under it fails again", () => {
-  assert.ok(!ZOD3_EXCEPTION.parents.includes("@privy-io/api-base"));
-  const privy = zodUnder("@privy-io/api-base");
+test("every other advisory fails, alone or beside another", () => {
   const audit = report({
-    zod: zodFinding([...sdkCopies, privy]),
-    "@privy-io/api-base": dependent("@privy-io/api-base", "zod"),
-    "@privy-io/react-auth": dependent("@privy-io/react-auth", "@privy-io/api-base"),
-  });
-  assert.throws(() => evaluateAudit(audit, { ...zod3(sdkCopies), ...zod3([privy]) }, october), /3 vulnerable packages: zod \(high/);
-});
-
-test("a zod copy anywhere else, or a zod 4 copy under one of the four, still fails", () => {
-  const own = "node_modules/merrymen/node_modules/zod";
-  assert.throws(() => evaluateAudit(report({ zod: zodFinding([...sdkCopies, own]) }), { ...zod3(sdkCopies), [own]: { name: "zod", version: "4.6.5" } }, october), /1 vulnerable packages: zod \(high/);
-  const other = zodUnder("@some/other-sdk");
-  assert.throws(() => evaluateAudit(report({ zod: zodFinding([other]) }), zod3([other]), october), /zod \(high/);
-  const four = zodUnder("x402");
-  assert.throws(() => evaluateAudit(report({ zod: zodFinding([four]) }), { [four]: { name: "zod", version: "4.6.5" } }, october), /zod \(high/);
-  assert.throws(() => evaluateAudit(report({ zod: zodFinding([sdkCopies[0]]) }), {}, october), /zod \(high/);
-});
-
-test("every other advisory still fails, alone or beside the excused one", () => {
-  const audit = report({
-    zod: zodFinding(sdkCopies),
     next: { name: "next", severity: "critical", via: [NEXT], nodes: ["node_modules/merrymen/node_modules/next"] },
-    merrymen: dependent("merrymen", "next", "zod"),
+    merrymen: dependent("merrymen", "next"),
   });
-  assert.throws(() => evaluateAudit(audit, zod3(sdkCopies), october), /2 vulnerable packages: next \(critical: https:\/\/github\.com\/advisories\/GHSA-2464-fhr4-w9xw\); merrymen \(high: via next, via zod\)/);
-  assert.throws(() => evaluateAudit(report({ zod: zodFinding(sdkCopies, [ZOD, NEXT]) }), zod3(sdkCopies), october), /zod \(high/);
-  assert.throws(() => evaluateAudit(report({ zod: zodFinding(sdkCopies, [ZOD, "@some/dep"]) }), zod3(sdkCopies), october), /zod \(high/);
-});
-
-test("the exception ends after its last day, and npm's own failure is never a pass", () => {
-  const audit = report({ zod: zodFinding(sdkCopies) });
-  assert.deepEqual(evaluateAudit(audit, zod3(sdkCopies), new Date(`${ZOD3_EXCEPTION.lastDay}T23:59:59Z`)), sdkCopies);
-  assert.throws(() => evaluateAudit(audit, zod3(sdkCopies), new Date("2026-11-23T00:00:00Z")), /ended after 2026-11-22/);
-  assert.throws(() => evaluateAudit({ error: { code: "ENOAUDIT", summary: "registry unreachable" } }, {}, october), /npm audit failed/);
+  assert.throws(() => evaluateAudit(audit), /2 vulnerable packages: next \(critical: https:\/\/github\.com\/advisories\/GHSA-2464-fhr4-w9xw\); merrymen \(high: via next\)/);
+  assert.throws(() => evaluateAudit(report({ zod: zodFinding([zodUnder("@some/other-sdk")], [ZOD, NEXT]) })), /1 vulnerable packages: zod \(high/);
 });

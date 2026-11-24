@@ -78,12 +78,14 @@ export function assertPatched(packages) {
       case "bn.js": safe = version[0] === 4 ? atLeast([4, 12, 5]) : atLeast([5, 2, 4]); break;
       case "uuid": safe = atLeast([11, 1, 1]); break;
       case "@walletconnect/utils": safe = atLeast([2, 21, 9]); break;
+      // GHSA-mrhx-c7xc-m3w5. No zod 3 is patched, so any zod 3 copy fails here.
+      case "zod": safe = atLeast([4, 6, 6]); break;
       default: continue;
     }
     seen.add(pkg.name);
     assert.ok(safe, `Unpatched installed dependency: ${location}@${pkg.version}`);
   }
-  for (const name of ["postcss", "ws", "bn.js", "uuid", "@walletconnect/utils"]) {
+  for (const name of ["postcss", "ws", "bn.js", "uuid", "@walletconnect/utils", "zod"]) {
     assert.ok(seen.has(name), `Expected runtime dependency missing from physical install: ${name}`);
   }
 }
@@ -113,86 +115,35 @@ export async function verifyNativeModules(installedRoot) {
 }
 
 /**
- * ONE TIME-BOXED EXCEPTION, for one advisory in four packages, in force
- * through `lastDay` (UTC) and never after.
+ * npm audit's report, judged: any finding fails the audit, naming every
+ * vulnerable package. There is no exception.
  *
- * GHSA-mrhx-c7xc-m3w5 (zod < 4.6.6, high: memory exhaustion while validating
- * oversized constrained collections) was widened on 2026-10-23 to every zod 3
- * release, and no zod 3 release is patched (3.25.76 is the last). Merrymen's
- * own zod is patched. Every excused copy reaches the install through
- * @privy-io/react-auth (bundled, see pack-runtime.mjs). Merrymen imports none
- * of these four packages.
- *
- * 2026-11-04: extended from 2026-11-08 to 2026-11-22, with no new package or
- * version. Privy left the list: react-auth 3.51.1 pins @privy-io/api-base
- * 2.0.0, which has no zod. The other four still have zod 3 in their latest
- * releases or cannot move. Each one leaves the list when one of these ships:
- * - x402: Privy pins ^0.7.1. Needs an x402 0.7.x on zod 4, or a react-auth
- *   that leaves x402 0.7 (x402 1.2.0 is still zod ^3.24.2).
- * - @reown/appkit-wallet: 1.8.24 and the 2.0 canary both pin zod 3.22.4.
- *   Needs a release on zod 4 that WalletConnect's ethereum-provider and
- *   react-auth then pin. react-auth pins provider 2.22.4, which pins
- *   appkit 1.8.9, which pins appkit-wallet 1.8.9.
- * - @wagmi/connectors: 6.2.0 has no zod of its own. This copy is the hoisted
- *   zod of its nested appkit-wallet 1.7.8. x402 0.7.3 needs wagmi ^2.15.6.
- *   wagmi 2.19.5, the last 2.x, pins connectors 6.2.0 exactly. Connectors 8.x
- *   needs @wagmi/core 3, so it cannot move until x402 or Privy leaves wagmi 2.
- *   It also leaves the list once appkit-wallet does.
- * - @coinbase/cdp-sdk: 1.60.0 is still zod ^3.25.76. It comes in through
- *   @base-org/account 2.4.0 under connectors 6.2.0 (range ^1.0.0). Needs a
- *   cdp-sdk 1.x on zod 4, or connectors leaving wagmi 2.
- *
- * Excused: the zod finding, when that advisory is all it reports and every
- * flagged copy is a zod 3 whose direct parent is one of the four; then any
- * package flagged only because it depends on something excused. Anything else
- * fails as before: another advisory, a zod copy anywhere else (including
- * @privy-io/api-base again), a zod 4 copy, or any day after `lastDay`.
+ * The time-boxed zod 3 exception for GHSA-mrhx-c7xc-m3w5 (PRs #360 and #379,
+ * last day 2026-11-22) is gone. Its four copies came in through
+ * @privy-io/react-auth under x402, @coinbase/cdp-sdk and @reown/appkit-wallet
+ * (also nested under @wagmi/connectors); no zod 3 release is patched. The
+ * package.json overrides now give those three packages Merrymen's own patched
+ * zod 4 (Milla's decision of 2026-11-24, docs/perps-paper-launch.md), and
+ * assertPatched above rejects any zod older than 4.6.6. With those copies
+ * gone, the abitype copies under @coinbase/cdp-sdk (1.0.6) and
+ * @wagmi/connectors (1.0.8) also resolve the root zod 4, against their
+ * optional peer "^3 >=3.22.0"; only cdp-sdk's policy schemas import
+ * abitype/zod. web/src/lib/dependency-compatibility.test.ts checks that these
+ * SDKs accept and reject sample payloads on zod 4, and fails once any of them
+ * stops declaring zod 3. Drop an override when: Privy 3.52.x drops x402; a
+ * Reown appkit-wallet on zod 4 (appkit PRs #5830/#5844) is what WalletConnect
+ * and Privy pin; cdp-sdk accepts zod 4 (cdp-sdk PR #867).
  */
-export const ZOD3_EXCEPTION = Object.freeze({
-  advisory: "GHSA-mrhx-c7xc-m3w5",
-  lastDay: "2026-11-22",
-  parents: Object.freeze(["@coinbase/cdp-sdk", "@reown/appkit-wallet", "@wagmi/connectors", "x402"]),
-});
-
-/** The package directly above a node: `…/node_modules/@a/b/node_modules/zod` → `@a/b`. */
-function parentOf(node) {
-  const owner = node.slice(0, node.lastIndexOf("/node_modules/"));
-  return owner.slice(owner.lastIndexOf("node_modules/") + "node_modules/".length);
-}
-
-/**
- * npm audit's report, judged: every finding must be excused by the exception
- * above or the audit fails, naming what is left. Returns the excused zod nodes.
- */
-export function evaluateAudit(audit, packages, now = new Date(), exception = ZOD3_EXCEPTION) {
+export function evaluateAudit(audit) {
   if (audit.error) throw new Error(`npm audit failed: ${JSON.stringify(audit.error)}`);
-  const vulnerabilities = audit.vulnerabilities ?? {};
-  const inForce = now.toISOString().slice(0, 10) <= exception.lastDay;
-  const zod = vulnerabilities.zod;
-  const excused = new Set();
-  if (inForce && zod &&
-      zod.via.length > 0 && zod.via.every((via) => typeof via === "object" && via.url?.endsWith(`/${exception.advisory}`)) &&
-      zod.nodes.length > 0 && zod.nodes.every((node) => exception.parents.includes(parentOf(node)) && /^3\./.test(packages[node]?.version ?? ""))) {
-    excused.add("zod");
-  }
-  for (let grew = excused.size > 0; grew; ) {
-    grew = false;
-    for (const [name, finding] of Object.entries(vulnerabilities)) {
-      if (excused.has(name) || finding.via.length === 0 || !finding.via.every((via) => typeof via === "string" && excused.has(via))) continue;
-      excused.add(name);
-      grew = true;
-    }
-  }
-  const remaining = Object.entries(vulnerabilities).filter(([name]) => !excused.has(name));
+  const remaining = Object.entries(audit.vulnerabilities ?? {});
   if (remaining.length > 0) {
     const named = remaining.map(([name, finding]) => `${name} (${finding.severity}: ${finding.via.map((via) => typeof via === "string" ? `via ${via}` : via.url ?? via.title).join(", ")})`).join("; ");
-    const ended = zod && !inForce ? ` The zod 3 exception for ${exception.advisory} ended after ${exception.lastDay}.` : "";
-    throw new Error(`Installed dependency audit failed: ${remaining.length} vulnerable packages: ${named}.${ended}`);
+    throw new Error(`Installed dependency audit failed: ${remaining.length} vulnerable packages: ${named}.`);
   }
-  return excused.size > 0 ? [...zod.nodes] : [];
 }
 
-export function auditPhysicalLock(snapshot, now = new Date()) {
+export function auditPhysicalLock(snapshot) {
   const directory = mkdtempSync(path.join(tmpdir(), "merrymen-installed-audit-"));
   try {
     writeFileSync(path.join(directory, "package.json"), JSON.stringify(snapshot.manifest));
@@ -204,13 +155,13 @@ export function auditPhysicalLock(snapshot, now = new Date()) {
     if (result.error) throw result.error;
     let audit;
     try { audit = JSON.parse(result.stdout); } catch { throw new Error(`npm audit returned invalid output: ${result.stderr}`); }
-    // npm exits 1 whenever it reports anything, excused or not; a failure
-    // with no report is still a failure.
+    // npm exits 1 whenever it reports anything; a failure with no report is
+    // still a failure.
     if (result.status !== 0 && !audit.error && Object.keys(audit.vulnerabilities ?? {}).length === 0) {
       throw new Error(`npm audit exited ${result.status} without a report: ${result.stderr}`);
     }
-    const excused = evaluateAudit(audit, snapshot.lock.packages, now);
-    return { metadata: audit.metadata, excused };
+    evaluateAudit(audit);
+    return { metadata: audit.metadata };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -229,13 +180,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       encoding: "utf8", timeout: 75_000, maxBuffer: 1024 * 1024,
     });
     if (proofCheck.error || proofCheck.status !== 0) throw new Error("Prebuilt Gloam bundle verification failed.");
-    const { metadata, excused } = auditPhysicalLock(snapshot);
-    const exception = excused.length === 0 ? "" :
-      `, all excused through ${ZOD3_EXCEPTION.lastDay} for ${ZOD3_EXCEPTION.advisory} (zod 3 at ${excused.join(", ")})`;
-    if (exception && process.env.GITHUB_ACTIONS) {
-      console.log(`::warning title=Audit exception::${ZOD3_EXCEPTION.advisory} is excused for ${excused.length} zod 3 copies until ${ZOD3_EXCEPTION.lastDay}; after that this check fails again.`);
-    }
-    console.log(`[merrymen] Verified ${Object.keys(snapshot.lock.packages).length - 1} installed packages; native sharp, esbuild and Next SWC plus bundled Gloam proof/encryption modules work; audit: ${metadata.vulnerabilities.total} vulnerabilities${exception}.`);
+    const { metadata } = auditPhysicalLock(snapshot);
+    console.log(`[merrymen] Verified ${Object.keys(snapshot.lock.packages).length - 1} installed packages; native sharp, esbuild and Next SWC plus bundled Gloam proof/encryption modules work; audit: ${metadata.vulnerabilities.total} vulnerabilities.`);
   } catch (error) {
     console.error(`[merrymen] Installed package verification failed: ${error.message}`);
     process.exitCode = 1;
