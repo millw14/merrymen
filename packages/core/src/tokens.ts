@@ -132,15 +132,84 @@ export interface PriceQuote {
 
 /** Reject anything that isn't a plausible ERC-20 entry before it can reach a
  * policy allowlist or a price lookup. Shape only — depth is checked on-chain. */
-export function isValidCustomToken(t: unknown): t is CustomToken {
-  if (!t || typeof t !== "object") return false;
-  const c = t as Partial<CustomToken>;
-  if (typeof c.symbol !== "string" || !/^[A-Za-z0-9._-]{1,16}$/.test(c.symbol)) return false;
-  if (typeof c.address !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(c.address)) return false;
-  if (typeof c.decimals !== "number" || !Number.isInteger(c.decimals) || c.decimals < 0 || c.decimals > 36) {
-    return false;
+const CUSTOM_TOKEN_SYMBOL = /^[A-Za-z0-9._-]{1,16}$/;
+const CUSTOM_TOKEN_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/** Suffix on every custom-token fault, so the grant screens can offer a Settings
+ * link without parsing the rest of the sentence. */
+export const CUSTOM_TOKEN_FAULT_HINT =
+  "Correct this in Settings before this permission is signed.";
+
+export type CustomTokenFault = {
+  field: "entry" | "symbol" | "address" | "decimals";
+  reason: string;
+};
+
+/**
+ * Why a saved custom-token entry cannot be sealed into a grant. The field is
+ * the one to correct; `entry` means the value is not a token record at all.
+ * Same checks as `isValidCustomToken` — one source of truth.
+ */
+export function customTokenFault(t: unknown): CustomTokenFault | null {
+  if (!t || typeof t !== "object" || Array.isArray(t)) {
+    return { field: "entry", reason: "is not a token record" };
   }
-  return true;
+  const c = t as Record<string, unknown>;
+  if (typeof c.symbol !== "string" || !CUSTOM_TOKEN_SYMBOL.test(c.symbol)) {
+    return {
+      field: "symbol",
+      reason: c.symbol === undefined || c.symbol === "" ? "is missing symbol" : "has an invalid symbol",
+    };
+  }
+  if (typeof c.address !== "string" || !CUSTOM_TOKEN_ADDRESS.test(c.address)) {
+    return {
+      field: "address",
+      reason: c.address === undefined || c.address === "" ? "is missing address" : "has an invalid address",
+    };
+  }
+  if (c.decimals === undefined || c.decimals === null) {
+    return { field: "decimals", reason: "is missing decimals" };
+  }
+  if (typeof c.decimals !== "number" || !Number.isInteger(c.decimals) || c.decimals < 0 || c.decimals > 36) {
+    return { field: "decimals", reason: "has invalid decimals" };
+  }
+  return null;
+}
+
+export function isValidCustomToken(t: unknown): t is CustomToken {
+  return customTokenFault(t) === null;
+}
+
+function customTokenLabel(entry: unknown, index: number): string {
+  const base = `Custom token ${index + 1}`;
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return base;
+  const c = entry as Record<string, unknown>;
+  if (typeof c.symbol === "string" && CUSTOM_TOKEN_SYMBOL.test(c.symbol)) return `${base} (${c.symbol})`;
+  if (typeof c.address === "string" && CUSTOM_TOKEN_ADDRESS.test(c.address)) {
+    return `${base} (${c.address.slice(0, 6)}…${c.address.slice(-4)})`;
+  }
+  return base;
+}
+
+/**
+ * A sentence that names the first malformed saved custom token and the field
+ * to correct, or null if every entry is a valid token (or the list is absent).
+ * Grant paths throw this before they stop, revoke, or request a signature.
+ */
+export function describeCustomTokenFaults(entries: unknown): string | null {
+  if (entries === undefined) return null;
+  if (!Array.isArray(entries)) {
+    return `Saved custom tokens are not a list. ${CUSTOM_TOKEN_FAULT_HINT}`;
+  }
+  for (let i = 0; i < entries.length; i++) {
+    const fault = customTokenFault(entries[i]);
+    if (fault) return `${customTokenLabel(entries[i], i)} ${fault.reason}. ${CUSTOM_TOKEN_FAULT_HINT}`;
+  }
+  return null;
+}
+
+export function isCustomTokenFaultMessage(message: string | null | undefined): boolean {
+  return typeof message === "string" && message.includes(CUSTOM_TOKEN_FAULT_HINT);
 }
 
 /** Shared upgrade beacon behind every Stock Token BeaconProxy. */

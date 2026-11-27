@@ -793,6 +793,51 @@ describe("the funded wallet's re-sign control", () => {
   });
 
   /**
+   * A LIST WITH ONE VALID TOKEN AND ONE MISSING DECIMALS used to be filtered
+   * on the settings read, so restore signed a wall that no longer covered the
+   * dropped token and never said why. The original list is checked first, and
+   * the entry and field are named, before any stop, revocation, or signature.
+   */
+  it("restoring with a custom token that is missing decimals stops nothing, names the field, and signs both tokens once it is corrected", async () => {
+    const valid = { symbol: "WETH", address: fixtureAddress(201), decimals: 18 };
+    const broken = { symbol: "PEPE", address: fixtureAddress(202) };
+    const fixed = { ...broken, decimals: 18 };
+    let tokens: unknown[] = [valid, broken];
+    const fetch = globalThis.fetch;
+    globalThis.fetch = (input, init) => String(input) === "/api/settings"
+      ? Promise.resolve(json({ values: { customTokens: tokens, basketSymbols: [] } }))
+      : fetch(input, init);
+    await ui.render(React.createElement(Wallet));
+    await ui.click("switch to another wallet");
+    await enterRestoreKey();
+    await ui.click("check this wallet");
+    await acknowledge("I understand — real funds");
+    await acknowledge("I understand restore first stops");
+    await ui.click("Restore & arm 0x1111…1111");
+    const alert = ui.container.querySelector(".grant-error");
+    assert.ok(alert, "the restore screen names the broken token");
+    assert.match(alert.textContent!, /Custom token 2 \(PEPE\) is missing decimals/);
+    assert.match(alert.textContent!, /Correct this in Settings before this permission is signed/);
+    assert.equal(alert.getAttribute("role"), "alert");
+    assert.equal(alert.querySelector("a")?.getAttribute("href"), "/settings");
+    assert.match(alert.textContent!, /Review custom tokens/);
+    assert.deepEqual(fundingChecks, [], "refused before even the fee check");
+    assert.equal(stopCalls, 0);
+    assert.deepEqual(replacementStops, []);
+    assert.equal(revokeCalls, 0);
+    assert.equal(mintCalls, 0);
+    tokens = [valid, fixed];
+    let sealed: unknown;
+    renew = async options => {
+      sealed = options.extraTokens;
+      return { local: grant, handoff: { ok: true } };
+    };
+    await ui.click("Restore & arm 0x1111…1111");
+    assert.equal(mintCalls, 1);
+    assert.deepEqual(sealed, [valid, fixed], "the replacement grant includes both tokens");
+  });
+
+  /**
    * A LOGIN'S TWO WALLETS SHARE ONE OWNER KEY, and the grant POST that ends a
    * restore refuses another one. Self-hosted, the restore's stop had already
    * removed the running Spot grant.json (and stopped Solana) and its revocation

@@ -24,6 +24,8 @@ import {
   CASH,
   grantPonsAdapter,
   grantPonsClassVault,
+  describeCustomTokenFaults,
+  isCustomTokenFaultMessage,
   isValidCustomToken,
   robinhoodChain,
   robinhoodTestnet,
@@ -264,6 +266,32 @@ function short(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
+function reviewCustomTokensLink(error: string) {
+  if (!isCustomTokenFaultMessage(error)) return null;
+  return <> <a href="/settings">Review custom tokens</a></>;
+}
+
+/** Click-time settings for a grant path: the original list, not the filtered
+ * mount-time copy. Throws a named field fault before any later work. */
+async function readValidatedCustomTokens(): Promise<CustomToken[]> {
+  let values: Record<string, unknown>;
+  try {
+    const r = await fetch("/api/settings", { cache: "no-store" });
+    if (!r.ok) throw new Error("settings unavailable");
+    const body: unknown = await r.json();
+    if (!body || typeof body !== "object" || !("values" in body) ||
+        !body.values || typeof body.values !== "object" || Array.isArray(body.values)) {
+      throw new Error("invalid settings response");
+    }
+    values = body.values as Record<string, unknown>;
+  } catch {
+    throw new Error("Could not refresh your trading settings. Retry when settings are available.");
+  }
+  const fault = describeCustomTokenFaults(values.customTokens);
+  if (fault) throw new Error(fault);
+  return (values.customTokens ?? []) as CustomToken[];
+}
+
 function chainLabel(id: number): string {
   return id === TESTNET ? `testnet · ${TESTNET}` : `mainnet · ${MAINNET}`;
 }
@@ -457,7 +485,13 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
   // Owner-added tokens from settings. These are NOT tradable by virtue of being
   // listed — the tradable set lives inside the signed session key, so listing a
   // token only takes effect when a grant covering it is signed here.
-  const [customTokens, setCustomTokens] = useState<CustomToken[]>([]);
+  // The unfiltered settings list. Mount used to `.filter(isValidCustomToken)`
+  // and drop a token missing `decimals` with no notice, so a restore could
+  // re-sign a wall that no longer covered it. Display and coverage still use
+  // only the valid entries derived from this list; restore validates the
+  // original click-time list first.
+  const [savedCustomTokens, setSavedCustomTokens] = useState<unknown>([]);
+  const customTokens = (Array.isArray(savedCustomTokens) ? savedCustomTokens : []).filter(isValidCustomToken);
   // The deployed V4SelfSwap for this install, read from /settings. Sealed into
   // the wall at signing — which is why it is read here and not at trade time.
   const [v4Adapter, setV4Adapter] = useState<`0x${string}` | undefined>(undefined);
@@ -620,8 +654,8 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
     fetch("/api/settings")
       .then((r) => (r.ok ? r.json() : null))
       .then((v: { values?: { customTokens?: unknown[]; basketSymbols?: string[]; v4AdapterAddress?: string; ponsAdapterAddress?: string; ponsClassVaultFactory?: string }; defaults?: { basketSymbols?: string[] } } | null) => {
-        const list = (v?.values?.customTokens ?? []).filter(isValidCustomToken);
-        setCustomTokens(list as CustomToken[]);
+        const raw = v?.values?.customTokens;
+        setSavedCustomTokens(raw === undefined ? [] : raw);
         setBasketSymbols(v?.values?.basketSymbols ?? v?.defaults?.basketSymbols ?? []);
         const a = v?.values?.v4AdapterAddress;
         setV4Adapter(typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a) ? (a as `0x${string}`) : undefined);
@@ -639,7 +673,7 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
         setClassFactory(typeof cf === "string" && /^0x[0-9a-fA-F]{40}$/.test(cf) ? (cf as `0x${string}`) : undefined);
       })
       .catch(() => {
-        setCustomTokens([]);
+        setSavedCustomTokens([]);
         setBasketSymbols([]);
       });
     return () => { active = false; };
@@ -947,6 +981,11 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
     setRenewed(false);
     setStatus("starting…");
     try {
+      // The original settings list, at click time, before anything is stopped.
+      // Mount already dropped invalid entries from `customTokens`; a click after
+      // the owner has corrected Settings must also see the new list.
+      const freshTokens = await readValidatedCustomTokens();
+      setSavedCustomTokens(freshTokens);
       await verifyCurrentAccount();
       // A login's two wallets share one owner key, and the grant POST that
       // ends this restore refuses another one. Asked first, so a restore the
@@ -962,7 +1001,7 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
         caps,
         onStatus: setStatus,
         chainId: selectedChain,
-        extraTokens: customTokens,
+        extraTokens: freshTokens,
         v4AdapterAddress: v4Adapter,
         ponsAdapterAddress: await verifiedAdapter(ponsAdapter, selectedChain, setStatus),
         ponsClassVaultFactory: classFactory,
@@ -1192,10 +1231,8 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
           throw new Error("invalid settings response");
         }
         const v = body.values as Record<string, unknown>;
-        if (v.customTokens !== undefined &&
-            (!Array.isArray(v.customTokens) || !v.customTokens.every(isValidCustomToken))) {
-          throw new Error("invalid custom tokens");
-        }
+        const tokenFault = describeCustomTokenFaults(v.customTokens);
+        if (tokenFault) throw new Error(tokenFault);
         const addressSetting = (value: unknown): `0x${string}` | undefined => {
           if (value === undefined || value === "") return undefined;
           if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value)) {
@@ -1207,11 +1244,14 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
         freshAdapter = addressSetting(v.v4AdapterAddress);
         freshPons = addressSetting(v.ponsAdapterAddress);
         freshClassFactory = addressSetting(v.ponsClassVaultFactory);
-        setCustomTokens(freshTokens);
+        setSavedCustomTokens(freshTokens);
         setV4Adapter(freshAdapter);
         setPonsAdapter(freshPons);
         setClassFactory(freshClassFactory);
-      } catch {
+      } catch (e) {
+        // A named custom-token fault must not be rewritten as a generic refresh
+        // failure: the owner needs the entry and the field, not a retry hint.
+        if (e instanceof Error && isCustomTokenFaultMessage(e.message)) throw e;
         // An unavailable response is not an empty settings record: signing
         // stale mount state could silently leave out the adapter just saved.
         throw new Error("Could not refresh your trading settings. Retry when settings are available.");
@@ -1699,7 +1739,7 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
                 which is every desync. A refusal here was therefore invisible no
                 matter which path produced it, and pressing re-arm looked like a
                 button that did nothing. */}
-            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
+            {error && <div className="grant-error mono" role="alert">{error}{isWallTooWide(error) ? <> <a href="/settings">Review custom tokens</a></> : reviewCustomTokensLink(error)}</div>}
             {/* WHAT IS ACTUALLY IN IT, and the key to it. A wallet reaches this
                 panel precisely when the server won't arm it, which is also when
                 someone is most likely to think their money has vanished. The
@@ -2043,7 +2083,7 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
                 </button>
               </>
             )}
-            {error && <div className="grant-error mono">{error}{isWallTooWide(error) && <> <a href="/settings">Review custom tokens</a></>}</div>}
+            {error && <div className="grant-error mono" role="alert">{error}{isWallTooWide(error) ? <> <a href="/settings">Review custom tokens</a></> : reviewCustomTokensLink(error)}</div>}
             </fieldset>
           </div>
         )}
@@ -2724,6 +2764,7 @@ export default function GrantPage({ onAccountChanged }: { onAccountChanged?: () 
                           need a narrower permission; contact support before changing those routes.
                         </p>
                       )}
+                      {reviewCustomTokensLink(error)}
                     </div>
                   )}
                 </>
